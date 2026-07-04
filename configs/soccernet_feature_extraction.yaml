@@ -1,0 +1,30 @@
+feature_extraction:
+  enabled: true
+
+  extractor_name: "sn_spotting_resnet_tf2_pca512"
+  output_dim: 512
+
+  # auto  : feature가 없으면 만들고 있으면 재사용
+  # force : 기존 feature를 덮어쓰고 새로 생성
+  # skip  : feature extraction 생략
+  mode: "auto"
+
+  chunk_sec: 300
+
+  sn_spotting_root: "external/sn-spotting"
+  video_feature_extractor: "external/sn-spotting/Features/VideoFeatureExtractor.py"
+  pca_path: "external/sn-spotting/Features/pca_512_TF2.pkl"
+  pca_scaler_path: "external/sn-spotting/Features/average_512_TF2.pkl"
+
+  split:
+    strategy: "midpoint"  # midpoint | manual | none
+    allow_job_option_halftime_split_sec: true
+
+  cache:
+    reuse_existing_feature: true
+    overwrite: false
+
+  failure_policy:
+    # auto/fallback 개발 중에는 true.
+    # strict real 테스트에서는 job option으로 false를 줄 수 있다.
+    allow_analysis_to_continue_on_failure: true

@@ -1,0 +1,95 @@
+inference:
+  # auto:
+  #   real model이 준비되면 real 사용, 없으면 fallback 사용
+  # fallback:
+  #   항상 fallback 후보 생성
+  # real:
+  #   real model 필수. 준비 안 됐고 allow_fallback_when_missing=false면 job failed
+  mode: "auto"
+
+  # 개발 중에는 true, 배포 안정화 후에는 false 권장
+  allow_fallback_when_missing: true
+
+  # true면 real model 준비 안 된 경우 fallback하지 않고 실패
+  strict_real_model: false
+
+  # champion 모델 API화 이후에는 placeholder가 아니라 real adapter 이름으로 변경해야 함
+  model_adapter: "soccer_highlight_former"
+
+  device: "auto"
+
+  model:
+    model_dir: "storage/models/highlight_spotting/champion"
+    checkpoint_file: "best.pt"
+    model_config_file: "model.yaml"
+    inference_config_file: "inference.yaml"
+    data_config_file: "data.yaml"
+    manifest_file: "manifest.json"
+
+  # champion은 SoccerNet feature 기반 학습 모델
+  expected_feature_asset_types:
+    - "SOCCERNET_FEATURE_HALF1"
+    - "SOCCERNET_FEATURE_HALF2"
+    - "SOCCERNET_FEATURE"
+
+  # RAW_VIDEO만 들어온 경우 임시 E2E 유지용 fallback.
+  # 실제 champion 추론은 feature가 있어야 함.
+  raw_video_fallback_enabled: true
+
+postprocess:
+  # champion validation 기준값.
+  # threshold sweep에서 0.05~0.30은 동일 결과였고,
+  # 기존 평가 기준은 0.20이었으므로 서비스 기본값은 0.20 유지.
+  default_threshold: 0.20
+
+  # 모델 후보는 넉넉히 유지하고, 숏츠 개수 제한은 plan/ranking 단계에서 처리하는 게 안전함.
+  max_candidates: 80
+
+  nms_window_sec: 10.0
+
+  class_aware_nms: true
+  apply_offset: true
+
+  # clip plan 생성용 기본 길이 설정
+  min_duration_sec: 4.0
+  max_duration_sec: 12.0
+  pre_event_sec: 4.0
+  post_event_sec: 4.0
+
+  # 아직 class-wise threshold는 champion 평가 기준으로 확정된 값이 아님.
+  # 처음 API화 단계에서는 null 또는 동일 threshold를 권장.
+  class_thresholds: null
+
+  # 나중에 class-wise threshold를 다시 실험해서 쓰고 싶으면 아래처럼 별도 활성화
+  # class_thresholds:
+  #   goal: 0.20
+  #   shot: 0.20
+  #   foul: 0.20
+  #   card: 0.20
+  #   free_kick: 0.20
+  #   corner: 0.20
+
+ranking:
+  # 후보 80개 중 실제 숏츠 후보로 몇 개를 넘길지
+  default_top_k: 20
+  max_top_k: 50
+
+label_display:
+  goal:
+    tag: "GOAL"
+    title_prefix: "GOAL"
+  shot:
+    tag: "SHOT"
+    title_prefix: "SHOT"
+  foul:
+    tag: "FOUL"
+    title_prefix: "FOUL"
+  card:
+    tag: "CARD"
+    title_prefix: "CARD"
+  free_kick:
+    tag: "FREE KICK"
+    title_prefix: "FREE KICK"
+  corner:
+    tag: "CORNER"
+    title_prefix: "CORNER"

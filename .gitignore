@@ -1,0 +1,133 @@
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+*.local
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Virtual environments and Python packaging
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+build/
+dist/
+*.egg-info/
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+*.pid.lock
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated storage, uploads, renders, and AI artifacts
+storage/
+app/storage/workspaces/
+uploads/
+downloads/
+renders/
+outputs/
+artifacts/
+checkpoints/
+models/
+runs/
+wandb/
+mlruns/
+
+# Large model/data artifacts
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.safetensors
+*.pkl
+*.pickle
+*.joblib
+*.npy
+*.npz
+*.parquet
+*.feather
+*.h5
+*.hdf5
+
+# Video and media files
+*.mp4
+*.m4v
+*.mov
+*.mkv
+*.avi
+*.webm
+*.wmv
+*.flv
+*.mpg
+*.mpeg
+*.ts
+*.mts
+*.m2ts
+*.3gp
+*.wav
+*.mp3
+*.aac
+*.flac
+*.m4a
+
+# Generated subtitles, timelines, and analysis exports
+*.srt
+*.vtt
+*.ass
+*.edl
+*.fcpxml
+*.xml
+*.csv
+*.tsv
+
+# Markdown and local documentation drafts
+*.md
+docs/
+notes/
+
+# Archives and large bundles
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Tooling metadata
+.cache/
+.agents/
+.codex/

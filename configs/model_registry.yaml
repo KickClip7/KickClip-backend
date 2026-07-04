@@ -1,0 +1,30 @@
+models:
+  dummy_analysis:
+    full_match_analysis:
+      id: "dummy_full_match_analysis_v1"
+      model_name: "DummyFullMatchAnalysisTask"
+      model_version: "0.1.0"
+      description: "6회차용 dummy analysis task. 실제 AI 모델 없이 job 상태 흐름만 검증한다."
+      checkpoint_path: null
+      config_path: null
+      enabled: true
+
+  highlight_spotting:
+    champion:
+      id: "highlight_transformer_best"
+      model_name: "SoccerHighlightFormer"
+      checkpoint_path: "storage/models/highlight_spotting/champion/best.pt"
+      config_path: "storage/models/highlight_spotting/champion/model.yaml"
+      label_map_path: "storage/models/highlight_spotting/champion/label_map.json"
+      postprocess_config_path: "configs/highlight_spotting.yaml"
+      enabled: true
+
+  player_tracking:
+    dummy:
+      id: "dummy_player_tracking_v1"
+      model_name: "DummyPlayerTrackingTask"
+      model_version: "0.1.0"
+      description: "8~15회차에서 프론트 선수별 모드 연결과 실제 tracker 교체 준비를 위해 사용할 dummy player tracking task."
+      checkpoint_path: null
+      config_path: null
+      enabled: true

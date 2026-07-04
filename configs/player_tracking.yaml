@@ -1,0 +1,22 @@
+player_tracking:
+  # MVP default. Change to "real" only after detector/tracker implementations are connected.
+  mode: dummy
+
+  dummy:
+    default_players:
+      - number: 7
+        role: FW
+      - number: 9
+        role: FW
+      - number: 10
+        role: MF
+      - number: 5
+        role: DF
+
+  artifact:
+    schema_version: player_tracks.v1
+
+  real:
+    detector_model_path: null
+    tracker_config_path: null
+    min_detection_confidence: 0.3
