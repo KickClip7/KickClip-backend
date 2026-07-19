@@ -2,6 +2,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.domains.auth.access import require_match_access
+from app.domains.auth.dependencies import get_current_user
+from app.domains.auth.model import User
 from app.domains.timeline.fusion import (
     build_frontend_event,
     normalize_timeline_category_filter,
@@ -26,7 +29,9 @@ def list_match_timeline_events(
     ),
     half: int | None = Query(default=None, ge=1, le=2),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> TimelineEventsResponse:
+    require_match_access(db, match_id, current_user)
     backend_label = normalize_timeline_category_filter(category)
 
     repository = TimelineEventRepository(db)

@@ -116,7 +116,13 @@ class HighlightModelLoader:
                 "type": "dict",
                 "keys": keys[:50],
             }
-            for likely_key in ["state_dict", "model_state_dict", "model", "net"]:
+            for likely_key in [
+                "model_state",
+                "state_dict",
+                "model_state_dict",
+                "model",
+                "net",
+            ]:
                 value = checkpoint.get(likely_key)
                 if isinstance(value, dict):
                     summary[f"{likely_key}_num_tensors"] = len(value)

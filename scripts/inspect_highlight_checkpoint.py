@@ -66,7 +66,7 @@ def main() -> None:
 
     if isinstance(checkpoint, dict):
         report["top_level_keys"] = list(checkpoint.keys())
-        for key in ["state_dict", "model_state_dict", "model", "net"]:
+        for key in ["model_state", "state_dict", "model_state_dict", "model", "net"]:
             value = checkpoint.get(key)
             if isinstance(value, dict):
                 report[key] = _summarize_state_dict(value)

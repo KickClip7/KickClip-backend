@@ -46,6 +46,8 @@ temp/
 
 # Generated storage, uploads, renders, and AI artifacts
 storage/
+!app/storage/
+!app/storage/*.py
 app/storage/workspaces/
 uploads/
 downloads/
@@ -54,6 +56,10 @@ outputs/
 artifacts/
 checkpoints/
 models/
+!configs/models/
+!configs/models/action_spotting/
+!configs/models/action_spotting/best_soccer_model/
+!configs/models/action_spotting/best_soccer_model/*
 runs/
 wandb/
 mlruns/

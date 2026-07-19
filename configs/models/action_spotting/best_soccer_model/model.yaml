@@ -1,0 +1,28 @@
+model:
+  name: "best_soccer_model"
+  type: "window_attention_transformer"
+  input_dim: 512
+  num_classes: 4
+
+soccer_highlight_former:
+  architecture: "window_attention_transformer"
+  input_dim: 512
+  num_classes: 4
+  d_model: 192
+  dropout: 0.15
+  pool_topk_ratio: 0.125
+
+  local_block:
+    kernel_size: 5
+
+  transformer:
+    num_layers: 3
+    num_heads: 4
+    dim_feedforward: 576
+    dropout: 0.15
+    activation: "gelu"
+    norm_first: false
+
+  positional_encoding:
+    type: "learned"
+    max_len: 256

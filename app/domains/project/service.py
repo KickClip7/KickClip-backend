@@ -14,8 +14,16 @@ class ProjectService:
         self.db = db
         self.repository = ProjectRepository(db)
 
-    def create_project(self, data: ProjectCreate) -> Project:
-        project = self.repository.create(**data.model_dump())
+    def create_project(
+        self,
+        data: ProjectCreate,
+        *,
+        owner_id: str | None = None,
+    ) -> Project:
+        project = self.repository.create(
+            **data.model_dump(),
+            owner_id=owner_id,
+        )
         self.db.commit()
         self.db.refresh(project)
         return project
@@ -23,11 +31,19 @@ class ProjectService:
     def get_project(self, project_id: str) -> Project | None:
         return self.repository.get_by_id(project_id)
 
-    def list_recent_projects(self, limit: int = 10) -> list[Project]:
-        return self.repository.list_recent(limit=limit)
+    def list_recent_projects(
+        self,
+        limit: int = 10,
+        owner_id: str | None = None,
+    ) -> list[Project]:
+        return self.repository.list_recent(limit=limit, owner_id=owner_id)
 
-    def list_recent_project_cards(self, limit: int = 10) -> list[ProjectRecentItem]:
-        projects = self.repository.list_recent(limit=limit)
+    def list_recent_project_cards(
+        self,
+        limit: int = 10,
+        owner_id: str | None = None,
+    ) -> list[ProjectRecentItem]:
+        projects = self.repository.list_recent(limit=limit, owner_id=owner_id)
 
         result: list[ProjectRecentItem] = []
 

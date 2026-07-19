@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql+psycopg://kickclip:kickclip@localhost:5432/kickclip"
     DB_ECHO: bool = False
 
+    AUTH_SECRET_KEY: str = "local-development-only-change-me-please-32chars"
+    AUTH_ACCESS_TOKEN_MINUTES: int = 15
+    AUTH_REFRESH_TOKEN_DAYS: int = 30
+    MEDIA_SIGNED_URL_MINUTES: int = 10
+
+    # 개발자 모드는 서버에서 명시적으로 허용하고 키를 설정해야 활성화할 수 있다.
+    DEVELOPER_MODE_ENABLED: bool = False
+    DEVELOPER_ACCESS_KEY: str = ""
+
     @property
     def cors_origins(self) -> list[str]:
         raw = self.BACKEND_CORS_ORIGINS.strip()

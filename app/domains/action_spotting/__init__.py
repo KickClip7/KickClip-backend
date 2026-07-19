@@ -1,0 +1,1 @@
+"""Action spotting API contracts."""

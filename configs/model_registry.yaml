@@ -11,11 +11,13 @@ models:
 
   highlight_spotting:
     champion:
-      id: "highlight_transformer_best"
-      model_name: "SoccerHighlightFormer"
+      id: "best_soccer_model_sha256_195ae99a"
+      model_name: "BestSoccerActionSpotter"
+      model_version: "epoch-6"
+      description: "4-class SoccerNet PCA512 window-attention Transformer action spotting champion."
       checkpoint_path: "storage/models/highlight_spotting/champion/best.pt"
-      config_path: "storage/models/highlight_spotting/champion/model.yaml"
-      label_map_path: "storage/models/highlight_spotting/champion/label_map.json"
+      config_path: "configs/models/action_spotting/best_soccer_model/model.yaml"
+      label_map_path: "configs/models/action_spotting/best_soccer_model/label_map.json"
       postprocess_config_path: "configs/highlight_spotting.yaml"
       enabled: true
 

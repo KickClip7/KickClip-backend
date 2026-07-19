@@ -18,11 +18,16 @@ class ProjectRepository:
         stmt = select(Project).where(Project.project_id == project_id)
         return self.db.scalar(stmt)
 
-    def list_recent(self, limit: int = 10) -> list[Project]:
+    def list_recent(
+        self,
+        limit: int = 10,
+        owner_id: str | None = None,
+    ) -> list[Project]:
         stmt = (
             select(Project)
             .options(selectinload(Project.matches))
-            .order_by(Project.updated_at.desc())
-            .limit(limit)
         )
+        if owner_id is not None:
+            stmt = stmt.where(Project.owner_id == owner_id)
+        stmt = stmt.order_by(Project.updated_at.desc()).limit(limit)
         return list(self.db.scalars(stmt).all())

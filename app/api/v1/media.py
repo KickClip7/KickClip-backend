@@ -1,14 +1,27 @@
 from collections.abc import Iterator
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.domains.auth.access import require_media_access
+from app.domains.auth.dependencies import get_current_user, get_optional_current_user
+from app.domains.auth.model import User
+from app.domains.auth.repository import UserRepository
+from app.domains.auth.security import (
+    InvalidTokenError,
+    decode_media_token,
+)
+from app.core.config import get_settings
 from app.domains.media.model import MediaAsset
-from app.domains.media.schema import MediaAssetRead, MediaAssetResponse
-from app.domains.media.service import MediaAssetService
+from app.domains.media.schema import (
+    MediaAssetRead,
+    MediaAssetResponse,
+    SignedMediaUrlResponse,
+)
+from app.domains.media.signed_url import build_signed_media_url
 from app.storage.local_storage import LocalStorage
 
 
@@ -25,21 +38,34 @@ CHUNK_SIZE = 1024 * 1024
 def get_media_asset(
     asset_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> MediaAssetResponse:
-    service = MediaAssetService(db)
-    asset = service.get_media_asset(asset_id)
-
-    if asset is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Media asset not found",
-        )
+    asset = require_media_access(db, asset_id, current_user)
 
     base = MediaAssetRead.model_validate(asset)
     return MediaAssetResponse(
         **base.model_dump(),
-        stream_url=f"/api/v1/media/{asset.asset_id}/stream",
+        stream_url=build_signed_media_url(asset.asset_id, current_user.user_id)[0],
         download_url=f"/api/v1/media/{asset.asset_id}/download",
+    )
+
+
+@router.get(
+    "/{asset_id}/signed-url",
+    response_model=SignedMediaUrlResponse,
+    summary="브라우저 재생용 단기 서명 URL 발급",
+)
+def create_signed_media_url(
+    asset_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SignedMediaUrlResponse:
+    require_media_access(db, asset_id, current_user)
+    url, expires_in = build_signed_media_url(asset_id, current_user.user_id)
+    return SignedMediaUrlResponse(
+        asset_id=asset_id,
+        url=url,
+        expires_in=expires_in,
     )
 
 
@@ -50,10 +76,16 @@ def get_media_asset(
 def stream_media_asset(
     asset_id: str,
     request: Request,
+    token: str | None = Query(default=None),
     db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_current_user),
 ) -> StreamingResponse:
-    service = MediaAssetService(db)
-    asset = _get_asset_or_404(service, asset_id)
+    asset = _authorize_stream_access(
+        db=db,
+        asset_id=asset_id,
+        current_user=current_user,
+        token=token,
+    )
     file_path = _resolve_asset_file_path_or_404(asset)
 
     return _build_range_response(
@@ -69,10 +101,16 @@ def stream_media_asset(
 )
 def head_stream_media_asset(
     asset_id: str,
+    token: str | None = Query(default=None),
     db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_current_user),
 ) -> Response:
-    service = MediaAssetService(db)
-    asset = _get_asset_or_404(service, asset_id)
+    asset = _authorize_stream_access(
+        db=db,
+        asset_id=asset_id,
+        current_user=current_user,
+        token=token,
+    )
     file_path = _resolve_asset_file_path_or_404(asset)
 
     return Response(
@@ -92,9 +130,9 @@ def head_stream_media_asset(
 def download_media_asset(
     asset_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> FileResponse:
-    service = MediaAssetService(db)
-    asset = _get_asset_or_404(service, asset_id)
+    asset = require_media_access(db, asset_id, current_user)
     file_path = _resolve_asset_file_path_or_404(asset)
 
     filename = asset.original_filename or file_path.name
@@ -104,21 +142,6 @@ def download_media_asset(
         media_type=asset.mime_type or "application/octet-stream",
         filename=filename,
     )
-
-
-def _get_asset_or_404(
-    service: MediaAssetService,
-    asset_id: str,
-) -> MediaAsset:
-    asset = service.get_media_asset(asset_id)
-
-    if asset is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Media asset not found",
-        )
-
-    return asset
 
 
 def _resolve_asset_file_path_or_404(asset: MediaAsset) -> Path:
@@ -132,6 +155,38 @@ def _resolve_asset_file_path_or_404(asset: MediaAsset) -> Path:
         )
 
     return file_path
+
+
+def _authorize_stream_access(
+    *,
+    db: Session,
+    asset_id: str,
+    current_user: User | None,
+    token: str | None,
+) -> MediaAsset:
+    if current_user is not None:
+        return require_media_access(db, asset_id, current_user)
+    if token:
+        try:
+            payload = decode_media_token(
+                token,
+                asset_id=asset_id,
+                secret_key=get_settings().AUTH_SECRET_KEY,
+            )
+        except InvalidTokenError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired media token",
+            ) from exc
+        user_id = str(payload.get("sub") or "")
+        user = UserRepository(db).get_by_id(user_id)
+        if user is not None and user.is_active:
+            return require_media_access(db, asset_id, user)
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 def _build_range_response(
