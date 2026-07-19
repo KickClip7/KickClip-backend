@@ -2,6 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.domains.auth.access import require_project_access
+from app.domains.auth.dependencies import get_current_user
+from app.domains.auth.model import User
 from app.domains.match.schema import MatchCreateRequest, MatchRead
 from app.domains.match.service import MatchService
 from app.domains.project.schema import (
@@ -23,9 +26,11 @@ router = APIRouter()
 def get_recent_projects(
     limit: int = Query(default=10, ge=1, le=50),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ProjectRecentListResponse:
     service = ProjectService(db)
-    projects = service.list_recent_project_cards(limit=limit)
+    owner_id = None if current_user.developer_mode_enabled else current_user.user_id
+    projects = service.list_recent_project_cards(limit=limit, owner_id=owner_id)
     return ProjectRecentListResponse(projects=projects)
 
 
@@ -38,9 +43,10 @@ def get_recent_projects(
 def create_project(
     payload: ProjectCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ProjectRead:
     service = ProjectService(db)
-    project = service.create_project(payload)
+    project = service.create_project(payload, owner_id=current_user.user_id)
     return project
 
 
@@ -52,17 +58,9 @@ def create_project(
 def get_project(
     project_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ProjectRead:
-    service = ProjectService(db)
-    project = service.get_project(project_id)
-
-    if project is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project not found",
-        )
-
-    return project
+    return require_project_access(db, project_id, current_user)
 
 
 @router.post(
@@ -75,7 +73,9 @@ def create_match_for_project(
     project_id: str,
     payload: MatchCreateRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> MatchRead:
+    require_project_access(db, project_id, current_user)
     service = MatchService(db)
 
     try:

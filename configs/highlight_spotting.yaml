@@ -37,10 +37,9 @@ inference:
   raw_video_fallback_enabled: true
 
 postprocess:
-  # champion validation 기준값.
-  # threshold sweep에서 0.05~0.30은 동일 결과였고,
-  # 기존 평가 기준은 0.20이었으므로 서비스 기본값은 0.20 유지.
-  default_threshold: 0.20
+  # 첨부 체크포인트에는 class-wise threshold가 저장되어 있지 않다.
+  # 초기 서비스 기본값은 sigmoid 0.50이며, 운영 영상 검증 후 조정한다.
+  default_threshold: 0.50
 
   # 모델 후보는 넉넉히 유지하고, 숏츠 개수 제한은 plan/ranking 단계에서 처리하는 게 안전함.
   max_candidates: 80
@@ -58,7 +57,11 @@ postprocess:
 
   # 아직 class-wise threshold는 champion 평가 기준으로 확정된 값이 아님.
   # 처음 API화 단계에서는 null 또는 동일 threshold를 권장.
-  class_thresholds: null
+  class_thresholds:
+    goal: 0.50
+    shot: 0.50
+    foul: 0.50
+    free_kick: 0.50
 
   # 나중에 class-wise threshold를 다시 실험해서 쓰고 싶으면 아래처럼 별도 활성화
   # class_thresholds:

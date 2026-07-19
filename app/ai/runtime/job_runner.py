@@ -1,8 +1,8 @@
 from app.ai.registry.model_registry import ModelRegistry
 from app.ai.runtime.task_context import TaskContext
+from app.ai.tasks.action_spotting.task import ActionSpottingPipelineTask
 from app.ai.tasks.dummy_analysis.task import DummyAnalysisTask
 from app.ai.tasks.full_match_analysis.task import FullMatchAnalysisTask
-from app.ai.tasks.highlight_spotting.task import HighlightSpottingTask
 from app.ai.tasks.player_tracking.task import PlayerTrackingTask
 from app.db.session import SessionLocal
 from app.domains.analysis.job_types import (
@@ -18,9 +18,9 @@ from app.domains.analysis.repository import AnalysisJobRepository
 class JobRunner:
     """Run AnalysisJob by job_type.
 
-    8회차 기준:
-    - FULL_MATCH_ANALYSIS: HighlightSpottingTask → PlayerTrackingTask
-    - HIGHLIGHT_SPOTTING: HighlightSpottingTask
+    현재 실행 구성:
+    - FULL_MATCH_ANALYSIS: feature/highlight/player 파이프라인
+    - HIGHLIGHT_SPOTTING: ActionSpottingPipelineTask
     - PLAYER_TRACKING: PlayerTrackingTask
     - BALL_TRACKING / TIMELINE_FUSION: 아직 dummy
     """
@@ -66,7 +66,7 @@ class JobRunner:
             return FullMatchAnalysisTask()
 
         if job_type == HIGHLIGHT_SPOTTING:
-            return HighlightSpottingTask()
+            return ActionSpottingPipelineTask()
 
         if job_type == PLAYER_TRACKING:
             return PlayerTrackingTask()

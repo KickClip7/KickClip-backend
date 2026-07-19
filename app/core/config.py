@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     QWEN_MODEL_ID: str = "Qwen/Qwen2.5-VL-3B-Instruct"
     QWEN_EXPORT_SAMPLE_FRAMES: int = 12
     QWEN_MAX_NEW_TOKENS: int = 384
+    AUTH_SECRET_KEY: str = "local-development-only-change-me-please-32chars"
+    AUTH_ACCESS_TOKEN_MINUTES: int = 15
+    AUTH_REFRESH_TOKEN_DAYS: int = 30
+    MEDIA_SIGNED_URL_MINUTES: int = 10
+
+    # 개발자 모드는 서버에서 명시적으로 허용하고 키를 설정해야 활성화할 수 있다.
+    DEVELOPER_MODE_ENABLED: bool = False
+    DEVELOPER_ACCESS_KEY: str = ""
 
     @property
     def cors_origins(self) -> list[str]:

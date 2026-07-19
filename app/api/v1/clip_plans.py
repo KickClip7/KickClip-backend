@@ -2,6 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.domains.auth.access import require_clip_plan_access, require_match_access
+from app.domains.auth.dependencies import get_current_user
+from app.domains.auth.model import User
 from app.domains.clip_plan.schema import (
     ClipPlanRead,
     ClipPlanUpdateRequest,
@@ -23,11 +26,16 @@ router = APIRouter()
 def create_clip_plan(
     data: ManualClipPlanCreateRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ClipPlanRead:
+    require_match_access(db, data.match_id, current_user)
     service = ClipPlanService(db)
 
     try:
-        return service.create_manual_clip_plan(data)
+        return service.create_manual_clip_plan(
+            data,
+            created_by=current_user.user_id,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -44,7 +52,9 @@ def update_clip_plan_export_options(
     clip_plan_id: str,
     data: ExportOptionsUpdateRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ClipPlanRead:
+    require_clip_plan_access(db, clip_plan_id, current_user)
     service = ClipPlanService(db)
     clip_plan = service.update_export_options(clip_plan_id, data)
 
@@ -65,7 +75,9 @@ def update_clip_plan_export_options(
 def get_clip_plan(
     clip_plan_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ClipPlanRead:
+    require_clip_plan_access(db, clip_plan_id, current_user)
     service = ClipPlanService(db)
     clip_plan = service.get_clip_plan(clip_plan_id)
 
@@ -87,7 +99,9 @@ def update_clip_plan(
     clip_plan_id: str,
     data: ClipPlanUpdateRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> ClipPlanRead:
+    require_clip_plan_access(db, clip_plan_id, current_user)
     service = ClipPlanService(db)
 
     try:

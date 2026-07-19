@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
@@ -22,7 +21,16 @@ from app.core.paths import get_project_root
 
 
 DEFAULT_CHAMPION_MODEL_DIR = "storage/models/highlight_spotting/champion"
-STATE_DICT_CANDIDATE_KEYS = ["model_state_dict", "state_dict", "model", "net"]
+STATE_DICT_CANDIDATE_KEYS = [
+    "model_state",
+    "model_state_dict",
+    "state_dict",
+    "model",
+    "net",
+]
+DEFAULT_CHAMPION_CONFIG_DIR = (
+    "configs/models/action_spotting/best_soccer_model"
+)
 
 
 class SoccerHighlightFormerAdapter:
@@ -66,7 +74,7 @@ class SoccerHighlightFormerAdapter:
 
         # Round 25 now includes a backend implementation of this architecture.
         # If torch and required artifacts are available, real adapter is ready.
-        if checkpoint.loadable and checkpoint.state_dict_key == "model_state_dict":
+        if checkpoint.loadable and checkpoint.state_dict_key:
             _validate_model_can_load(paths=self.paths, spec=spec, reasons=reasons)
 
         return ChampionAdapterPreflightReport(
@@ -119,17 +127,27 @@ class SoccerHighlightFormerAdapter:
                 ):
                     tensor = torch_module.from_numpy(batch_windows).float().to(resolved_device)
                     output = model(tensor)
-                    heatmap_logits = _extract_output_tensor(output, "heatmap")
-                    offset_logits = _extract_output_tensor(output, "offset")
-                    probabilities = torch_module.sigmoid(heatmap_logits).detach().cpu().numpy()
-                    offsets = None
-                    if offset_logits is not None:
-                        offsets = torch_module.tanh(offset_logits).detach().cpu().numpy()
+                    window_logits = _extract_output_tensor(output, "logits")
+                    frame_logits = _extract_output_tensor(output, "frame_logits")
+                    attention_logits = _extract_output_tensor(output, "attention_logits")
+                    if window_logits is None:
+                        raise RuntimeError("model output does not contain window logits")
+
+                    probabilities = (
+                        torch_module.sigmoid(window_logits).detach().cpu().numpy()
+                    )
+                    event_indices = _localize_window_events(
+                        torch_module=torch_module,
+                        frame_logits=frame_logits,
+                        attention_logits=attention_logits,
+                        window_size=int(self.spec.window_size or 64),
+                        num_classes=int(self.spec.num_classes or probabilities.shape[-1]),
+                    )
 
                     predictions.extend(
-                        self._window_outputs_to_predictions(
+                        self._window_scores_to_predictions(
                             probabilities=probabilities,
-                            offsets=offsets,
+                            event_indices=event_indices,
                             window_starts=batch_starts,
                             original_rows=original_rows,
                             segment=segment,
@@ -201,11 +219,11 @@ class SoccerHighlightFormerAdapter:
         # Combined feature is the default output from SoccerNetFeatureExtractionTask.
         return [FeatureSegment(path=feature_bundle.resolved_paths[0], offset_sec=0.0, half=None, fps=fps)]
 
-    def _window_outputs_to_predictions(
+    def _window_scores_to_predictions(
         self,
         *,
         probabilities: np.ndarray,
-        offsets: np.ndarray | None,
+        event_indices: np.ndarray,
         window_starts: np.ndarray,
         original_rows: int,
         segment: "FeatureSegment",
@@ -213,76 +231,73 @@ class SoccerHighlightFormerAdapter:
         debug_min_threshold: float | None = None,
     ) -> list[HighlightRawPrediction]:
         labels = self.spec.labels or [f"class_{idx}" for idx in range(int(self.spec.num_classes or probabilities.shape[-1]))]
-        thresholds = self.spec.thresholds or {label: 0.2 for label in labels}
+        thresholds = self.spec.thresholds or {label: 0.5 for label in labels}
         class_priority = self.spec.class_priority or {}
         output: list[HighlightRawPrediction] = []
 
-        batch_size, window_size, num_classes = probabilities.shape
+        if probabilities.ndim != 2:
+            raise ValueError(
+                f"window probabilities must be 2-D [B, C], got {probabilities.shape}"
+            )
+
+        batch_size, num_classes = probabilities.shape
         for batch_idx in range(batch_size):
             start = int(window_starts[batch_idx])
-            for local_idx in range(window_size):
-                feature_idx = start + local_idx
-                if feature_idx >= original_rows:
+            for class_idx in range(num_classes):
+                label = labels[class_idx] if class_idx < len(labels) else f"class_{class_idx}"
+                confidence = float(probabilities[batch_idx, class_idx])
+                configured_threshold = float(thresholds.get(label, 0.5))
+                if debug_min_threshold is None:
+                    threshold = configured_threshold
+                    threshold_source = "configured"
+                else:
+                    threshold = min(configured_threshold, float(debug_min_threshold))
+                    threshold_source = "debug_min_threshold"
+                if confidence < threshold:
                     continue
-                for class_idx in range(num_classes):
-                    label = labels[class_idx] if class_idx < len(labels) else f"class_{class_idx}"
-                    confidence = float(probabilities[batch_idx, local_idx, class_idx])
-                    configured_threshold = float(thresholds.get(label, 0.2))
-                    if debug_min_threshold is None:
-                        threshold = configured_threshold
-                        threshold_source = "configured"
-                    else:
-                        # Debug-only relaxation for timestamp/render inspection.
-                        # Production jobs should omit debug_min_threshold so the
-                        # trained class thresholds remain authoritative.
-                        threshold = min(configured_threshold, float(debug_min_threshold))
-                        threshold_source = "debug_min_threshold"
-                    if confidence < threshold:
-                        continue
 
-                    offset_value = 0.0
-                    if offsets is not None:
-                        # Offset target scale was trained in feature-index units. Keep it
-                        # conservative and bounded in the first service integration.
-                        offset_value = float(np.clip(offsets[batch_idx, local_idx, class_idx], -1.0, 1.0))
-
-                    timestamp_sec = segment.offset_sec + ((feature_idx + offset_value) / segment.fps)
-                    if match_duration_sec is not None:
-                        timestamp_sec = min(max(timestamp_sec, 0.0), max(float(match_duration_sec) - 0.001, 0.0))
-
-                    half = segment.half
-                    if half is None and match_duration_sec:
-                        half = 1 if timestamp_sec < float(match_duration_sec) / 2.0 else 2
-
-                    priority = float(class_priority.get(label, 0.5))
-                    highlight_score = round((confidence * 8.0) + (priority * 2.0), 4)
-
-                    output.append(
-                        HighlightRawPrediction(
-                            label=label,
-                            timestamp_sec=timestamp_sec,
-                            confidence=confidence,
-                            half=half,
-                            highlight_score=highlight_score,
-                            metadata={
-                                "predictor_mode": "real",
-                                "model_adapter": "soccer_highlight_former",
-                                "model_checkpoint": self.paths.checkpoint_path.as_posix(),
-                                "feature_path": segment.path.as_posix(),
-                                "feature_index": int(feature_idx),
-                                "window_start": int(start),
-                                "window_local_index": int(local_idx),
-                                "class_index": int(class_idx),
-                                "threshold": threshold,
-                                "configured_threshold": configured_threshold,
-                                "threshold_source": threshold_source,
-                                "debug_min_threshold": debug_min_threshold,
-                                "offset_feature_index": offset_value,
-                                "feature_fps": segment.fps,
-                                "segment_offset_sec": segment.offset_sec,
-                            },
-                        )
+                local_idx = int(event_indices[batch_idx, class_idx])
+                feature_idx = min(start + local_idx, original_rows - 1)
+                timestamp_sec = segment.offset_sec + (feature_idx / segment.fps)
+                if match_duration_sec is not None:
+                    timestamp_sec = min(
+                        max(timestamp_sec, 0.0),
+                        max(float(match_duration_sec) - 0.001, 0.0),
                     )
+
+                half = segment.half
+                if half is None and match_duration_sec:
+                    half = 1 if timestamp_sec < float(match_duration_sec) / 2.0 else 2
+
+                priority = float(class_priority.get(label, 0.5))
+                highlight_score = round((confidence * 8.0) + (priority * 2.0), 4)
+
+                output.append(
+                    HighlightRawPrediction(
+                        label=label,
+                        timestamp_sec=timestamp_sec,
+                        confidence=confidence,
+                        half=half,
+                        highlight_score=highlight_score,
+                        metadata={
+                            "predictor_mode": "real",
+                            "model_adapter": "window_attention_transformer",
+                            "model_checkpoint": self.paths.checkpoint_path.as_posix(),
+                            "feature_path": segment.path.as_posix(),
+                            "feature_index": int(feature_idx),
+                            "window_start": int(start),
+                            "window_local_index": int(local_idx),
+                            "class_index": int(class_idx),
+                            "threshold": threshold,
+                            "configured_threshold": configured_threshold,
+                            "threshold_source": threshold_source,
+                            "debug_min_threshold": debug_min_threshold,
+                            "localization": "class_attention_x_frame_probability",
+                            "feature_fps": segment.fps,
+                            "segment_offset_sec": segment.offset_sec,
+                        },
+                    )
+                )
         return output
 
     def _rank_and_deduplicate_predictions(
@@ -330,14 +345,20 @@ def resolve_champion_artifact_paths(model_dir: str | Path) -> ChampionArtifactPa
     if not model_dir_path.is_absolute():
         model_dir_path = project_root / model_dir_path
 
+    config_dir = project_root / DEFAULT_CHAMPION_CONFIG_DIR
+
+    def config_path(filename: str) -> Path:
+        colocated = model_dir_path / filename
+        return colocated if colocated.exists() else config_dir / filename
+
     return ChampionArtifactPaths(
         model_dir=model_dir_path,
         checkpoint_path=model_dir_path / "best.pt",
-        model_config_path=model_dir_path / "model.yaml",
-        inference_config_path=model_dir_path / "inference.yaml",
-        data_config_path=model_dir_path / "data.yaml",
-        manifest_path=model_dir_path / "manifest.json",
-        label_map_path=_optional_existing_path(model_dir_path / "label_map.json"),
+        model_config_path=config_path("model.yaml"),
+        inference_config_path=config_path("inference.yaml"),
+        data_config_path=config_path("data.yaml"),
+        manifest_path=config_path("manifest.json"),
+        label_map_path=_optional_existing_path(config_path("label_map.json")),
         threshold_sweep_path=_optional_existing_path(model_dir_path / "threshold_sweep.json"),
         valid_eval_path=_optional_existing_path(model_dir_path / "valid_eval.json"),
         train_history_path=_optional_existing_path(model_dir_path / "train_history.json"),
@@ -472,9 +493,9 @@ def build_implementation_todos(
             "Apply thresholds, class-aware NMS, max_candidates, and clip offsets from inference.yaml/highlight_spotting.yaml.",
         ]
 
-    if checkpoint.state_dict_key != "model_state_dict":
+    if checkpoint.state_dict_key not in STATE_DICT_CANDIDATE_KEYS:
         todos.append(
-            "Confirm state_dict key name before loading; expected model_state_dict for this champion."
+            "Confirm the state_dict key name before loading this checkpoint."
         )
     if spec.window_size is None or spec.stride_size is None:
         todos.append("Confirm window_size and stride_size from inference/data config before real inference.")
@@ -524,38 +545,37 @@ def _build_torch_model_from_spec(spec: ChampionModelSpec, nn_module):
     model_config = spec.raw_model_config or {}
     former = model_config.get("soccer_highlight_former") or {}
     transformer = former.get("transformer") or {}
-    temporal_stem = former.get("temporal_stem") or {}
-    projection = former.get("projection") or {}
+    local_block = former.get("local_block") or {}
 
     input_dim = int(spec.input_dim or 512)
-    d_model = int(former.get("d_model") or 256)
-    num_classes = int(spec.num_classes or len(spec.labels) or 6)
-    dropout = float(projection.get("dropout", former.get("dropout", 0.1)))
-    stem_dropout = float(temporal_stem.get("dropout", 0.1))
-    num_stem_layers = int(temporal_stem.get("num_layers", 2))
-    kernel_sizes = list(temporal_stem.get("multi_scale_kernel_sizes") or [3, 5, 9])
+    d_model = int(former.get("d_model") or 192)
+    num_classes = int(spec.num_classes or len(spec.labels) or 4)
+    dropout = float(former.get("dropout", 0.15))
 
-    num_transformer_layers = int(transformer.get("num_layers", 4))
-    num_heads = int(transformer.get("num_heads", 8))
-    dim_feedforward = int(transformer.get("dim_feedforward", 1024))
-    transformer_dropout = float(transformer.get("dropout", 0.1))
+    num_transformer_layers = int(transformer.get("num_layers", 3))
+    num_heads = int(transformer.get("num_heads", 4))
+    dim_feedforward = int(transformer.get("dim_feedforward", 576))
+    transformer_dropout = float(transformer.get("dropout", dropout))
     activation = str(transformer.get("activation", "gelu"))
-    max_len = int((former.get("positional_encoding") or {}).get("max_len", 4096))
+    norm_first = bool(transformer.get("norm_first", False))
+    max_len = int((former.get("positional_encoding") or {}).get("max_len", 256))
+    kernel_size = int(local_block.get("kernel_size", 5))
+    pool_topk_ratio = float(former.get("pool_topk_ratio", 0.125))
 
     return SoccerHighlightFormerTorch(
         input_dim=input_dim,
         d_model=d_model,
         num_classes=num_classes,
-        projection_dropout=dropout,
-        stem_num_layers=num_stem_layers,
-        stem_kernel_sizes=kernel_sizes,
-        stem_dropout=stem_dropout,
+        dropout=dropout,
+        local_kernel_size=kernel_size,
         transformer_num_layers=num_transformer_layers,
         transformer_num_heads=num_heads,
         transformer_dim_feedforward=dim_feedforward,
         transformer_dropout=transformer_dropout,
         transformer_activation=activation,
+        transformer_norm_first=norm_first,
         max_len=max_len,
+        pool_topk_ratio=pool_topk_ratio,
         nn_module=nn_module,
     )
 
@@ -575,74 +595,29 @@ def _install_torch_model_classes() -> None:
     if hasattr(SoccerHighlightFormerTorch, "_kickclip_installed"):
         return
 
-    class ConvBNAct(nn_module.Module):
-        def __init__(self, in_channels: int, out_channels: int, kernel_size: int, *, groups: int = 1, dropout: float = 0.1):
-            super().__init__()
-            padding = kernel_size // 2
-            self.net = nn_module.Sequential(
-                nn_module.Conv1d(in_channels, out_channels, kernel_size, padding=padding, groups=groups, bias=False),
-                nn_module.BatchNorm1d(out_channels),
-                nn_module.GELU(),
-                nn_module.Dropout(dropout),
-            )
+    class LocalTemporalBlock(nn_module.Module):
+        """Depthwise-separable residual block matching the checkpoint keys."""
 
-        def forward(self, x):
-            return self.net(x)
-
-    class MultiScaleTemporalLayer(nn_module.Module):
-        def __init__(self, d_model: int, kernel_sizes: list[int], dropout: float):
+        def __init__(self, d_model: int, kernel_size: int, dropout: float):
             super().__init__()
-            self.branches = nn_module.ModuleList(
-                [
-                    nn_module.Sequential(
-                        ConvBNAct(d_model, d_model, int(kernel), groups=d_model, dropout=dropout),
-                        ConvBNAct(d_model, d_model, 1, groups=1, dropout=dropout),
-                    )
-                    for kernel in kernel_sizes
-                ]
-            )
-            self.fuse = nn_module.Sequential(
-                nn_module.Conv1d(d_model * len(kernel_sizes), d_model, 1, bias=False),
-                nn_module.BatchNorm1d(d_model),
-                nn_module.GELU(),
-                nn_module.Dropout(dropout),
-            )
             self.norm = nn_module.LayerNorm(d_model)
+            self.depthwise = nn_module.Conv1d(
+                d_model,
+                d_model,
+                kernel_size,
+                padding=kernel_size // 2,
+                groups=d_model,
+            )
+            self.pointwise = nn_module.Conv1d(d_model, d_model, 1)
+            self.dropout = nn_module.Dropout(dropout)
 
         def forward(self, x):
             residual = x
-            x_conv = x.transpose(1, 2)
-            branches = [branch(x_conv) for branch in self.branches]
-            fused = self.fuse(torch_module.cat(branches, dim=1)).transpose(1, 2)
-            return self.norm(residual + fused)
-
-    class MultiScaleTemporalStem(nn_module.Module):
-        def __init__(self, d_model: int, num_layers: int, kernel_sizes: list[int], dropout: float):
-            super().__init__()
-            self.layers = nn_module.ModuleList(
-                [MultiScaleTemporalLayer(d_model, kernel_sizes, dropout) for _ in range(num_layers)]
-            )
-
-        def forward(self, x):
-            for layer in self.layers:
-                x = layer(x)
-            return x
-
-    class SinusoidalPositionalEncoding(nn_module.Module):
-        def __init__(self, d_model: int, max_len: int = 4096):
-            super().__init__()
-            position = torch_module.arange(max_len).unsqueeze(1).float()
-            div_term = torch_module.exp(
-                torch_module.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-            )
-            pe = torch_module.zeros(max_len, d_model)
-            pe[:, 0::2] = torch_module.sin(position * div_term)
-            pe[:, 1::2] = torch_module.cos(position * div_term)
-            self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
-
-        def forward(self, x):
-            length = x.size(1)
-            return x + self.pe[:, :length, :].to(dtype=x.dtype, device=x.device)
+            y = self.norm(x).transpose(1, 2)
+            y = self.depthwise(y)
+            y = torch_module.nn.functional.gelu(y)
+            y = self.pointwise(y).transpose(1, 2)
+            return residual + self.dropout(y)
 
     class _SoccerHighlightFormerTorch(nn_module.Module):
         _kickclip_installed = True
@@ -653,31 +628,29 @@ def _install_torch_model_classes() -> None:
             input_dim: int,
             d_model: int,
             num_classes: int,
-            projection_dropout: float,
-            stem_num_layers: int,
-            stem_kernel_sizes: list[int],
-            stem_dropout: float,
+            dropout: float,
+            local_kernel_size: int,
             transformer_num_layers: int,
             transformer_num_heads: int,
             transformer_dim_feedforward: int,
             transformer_dropout: float,
             transformer_activation: str,
+            transformer_norm_first: bool,
             max_len: int,
+            pool_topk_ratio: float,
             nn_module,
         ):
             super().__init__()
-            self.feature_projection = nn_module.Sequential(
-                nn_module.Linear(input_dim, d_model),
-                nn_module.LayerNorm(d_model),
-                nn_module.Dropout(projection_dropout),
+            self.pos_embed = nn_module.Parameter(
+                torch_module.zeros(1, max_len, d_model)
             )
-            self.temporal_stem = MultiScaleTemporalStem(
+            self.input_norm = nn_module.LayerNorm(input_dim)
+            self.input_proj = nn_module.Linear(input_dim, d_model)
+            self.local_block = LocalTemporalBlock(
                 d_model=d_model,
-                num_layers=stem_num_layers,
-                kernel_sizes=stem_kernel_sizes,
-                dropout=stem_dropout,
+                kernel_size=local_kernel_size,
+                dropout=dropout,
             )
-            self.positional_encoding = SinusoidalPositionalEncoding(d_model, max_len=max_len)
             encoder_layer = nn_module.TransformerEncoderLayer(
                 d_model=d_model,
                 nhead=transformer_num_heads,
@@ -685,31 +658,45 @@ def _install_torch_model_classes() -> None:
                 dropout=transformer_dropout,
                 activation=transformer_activation,
                 batch_first=True,
-                norm_first=False,
+                norm_first=transformer_norm_first,
             )
-            self.transformer_encoder = nn_module.TransformerEncoder(
+            self.encoder = nn_module.TransformerEncoder(
                 encoder_layer,
                 num_layers=transformer_num_layers,
             )
-            self.encoder_norm = nn_module.LayerNorm(d_model)
-            self.heatmap_head = nn_module.Sequential(
-                nn_module.LayerNorm(d_model),
-                nn_module.Linear(d_model, num_classes),
-            )
-            self.offset_head = nn_module.Sequential(
-                nn_module.LayerNorm(d_model),
-                nn_module.Linear(d_model, num_classes),
-            )
+            self.out_norm = nn_module.LayerNorm(d_model)
+            self.frame_classifier = nn_module.Linear(d_model, num_classes)
+            self.attention = nn_module.Linear(d_model, num_classes)
+            self.dropout = nn_module.Dropout(dropout)
+            self.pool_topk_ratio = pool_topk_ratio
 
         def forward(self, x):
-            x = self.feature_projection(x)
-            x = self.temporal_stem(x)
-            x = self.positional_encoding(x)
-            x = self.transformer_encoder(x)
-            x = self.encoder_norm(x)
+            length = x.size(1)
+            if length > self.pos_embed.size(1):
+                raise ValueError(
+                    f"input length {length} exceeds max_len {self.pos_embed.size(1)}"
+                )
+
+            x = self.input_proj(self.input_norm(x))
+            x = x + self.pos_embed[:, :length]
+            x = self.local_block(x)
+            x = self.encoder(x)
+            x = self.out_norm(x)
+
+            frame_logits = self.frame_classifier(self.dropout(x))
+            attention_logits = self.attention(x)
+            attention_weights = torch_module.softmax(attention_logits, dim=1)
+            attention_pooled = (attention_weights * frame_logits).sum(dim=1)
+
+            topk = max(1, int(round(length * self.pool_topk_ratio)))
+            topk = min(topk, length)
+            topk_pooled = frame_logits.topk(topk, dim=1).values.mean(dim=1)
+            logits = (attention_pooled + topk_pooled) * 0.5
+
             return {
-                "heatmap": self.heatmap_head(x),
-                "offset": self.offset_head(x),
+                "logits": logits,
+                "frame_logits": frame_logits,
+                "attention_logits": attention_logits,
             }
 
     SoccerHighlightFormerTorch = _SoccerHighlightFormerTorch
@@ -764,10 +751,6 @@ def _validate_checkpoint_for_adapter(
         reasons.append("checkpoint does not contain a recognized state_dict key")
     elif checkpoint.state_dict_num_tensors is None or checkpoint.state_dict_num_tensors <= 0:
         reasons.append("checkpoint state_dict is empty")
-    elif checkpoint.state_dict_key != "model_state_dict":
-        reasons.append(
-            f"expected checkpoint state_dict key 'model_state_dict', got {checkpoint.state_dict_key!r}"
-        )
 
 
 def _find_state_dict_key(checkpoint: dict[str, Any]) -> str | None:
@@ -902,6 +885,37 @@ def _extract_output_tensor(output: Any, key: str):
     if key == "heatmap":
         return output
     return None
+
+
+def _localize_window_events(
+    *,
+    torch_module,
+    frame_logits,
+    attention_logits,
+    window_size: int,
+    num_classes: int,
+) -> np.ndarray:
+    """Choose one feature index per class inside each classification window.
+
+    The checkpoint is trained as a window classifier, not as an offset-regression
+    model. Its class-specific attention head is therefore the best localization
+    signal available at serving time. Multiplying it by per-frame probabilities
+    suppresses frames that receive attention but have weak class evidence.
+    """
+
+    if frame_logits is None or attention_logits is None:
+        batch_size = 1
+        for value in (frame_logits, attention_logits):
+            if value is not None:
+                batch_size = int(value.shape[0])
+                break
+        center = max(window_size // 2, 0)
+        return np.full((batch_size, num_classes), center, dtype=np.int64)
+
+    frame_probabilities = torch_module.sigmoid(frame_logits)
+    attention_weights = torch_module.softmax(attention_logits, dim=1)
+    localization_scores = frame_probabilities * attention_weights
+    return localization_scores.argmax(dim=1).detach().cpu().numpy()
 
 
 def _require_torch():
