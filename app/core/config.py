@@ -1,5 +1,6 @@
 import json
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -9,7 +10,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=Path(__file__).resolve().parents[2] / ".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",
@@ -19,7 +20,7 @@ class Settings(BaseSettings):
     SERVICE_NAME: str = "kickclip-backend"
     VERSION: str = "0.1.0"
     ENV: str = Field(default="local", description="local, dev, prod 등 실행 환경")
-    DEBUG: bool = True
+    DEBUG: bool = Field(default=True, validation_alias="KICKCLIP_DEBUG")
 
     API_V1_PREFIX: str = "/api/v1"
 
@@ -37,6 +38,10 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql+psycopg://kickclip:kickclip@localhost:5432/kickclip"
     DB_ECHO: bool = False
+
+    QWEN_MODEL_ID: str = "Qwen/Qwen2.5-VL-3B-Instruct"
+    QWEN_EXPORT_SAMPLE_FRAMES: int = 12
+    QWEN_MAX_NEW_TOKENS: int = 384
 
     @property
     def cors_origins(self) -> list[str]:

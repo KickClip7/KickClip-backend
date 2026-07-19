@@ -1,4 +1,5 @@
 absl-py==2.4.0
+accelerate==1.14.0
 alembic==1.14.0
 annotated-doc==0.0.4
 annotated-types==0.7.0
@@ -75,6 +76,7 @@ python-dotenv==1.0.1
 python-multipart==0.0.20
 PyYAML==6.0.2
 requests==2.34.1
+qwen-vl-utils==0.0.8
 rich==15.0.0
 s3transfer==0.17.0
 scikit-learn==1.8.0
@@ -94,6 +96,7 @@ torch==2.12.0+cu126
 torchaudio==2.11.0+cu126
 torchvision==0.27.0+cu126
 tqdm==4.67.3
+transformers @ git+https://github.com/huggingface/transformers
 typer==0.25.1
 typing_extensions==4.15.0
 tzdata==2026.2

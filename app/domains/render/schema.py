@@ -14,6 +14,9 @@ class RenderOptions(BaseModel):
     music: str | None = None
     music_asset_id: str | None = None
     title: str | None = None
+    hashtags: list[str] = Field(default_factory=list)
+    thumbnail_timestamp_sec: float | None = None
+    thumbnail_source_timestamp_sec: float | None = None
 
     @field_validator("quality")
     @classmethod

@@ -1,6 +1,34 @@
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class ExportMetadataRecommendRequest(BaseModel):
+    clip_plan_id: str | None = None
+    match_id: str | None = None
+    language: str = "ko"
+
+    @model_validator(mode="after")
+    def validate_source(self):
+        if not self.clip_plan_id and not self.match_id:
+            raise ValueError("clip_plan_id 또는 match_id가 필요합니다.")
+        return self
+
+
+class ThumbnailRecommendation(BaseModel):
+    timestamp_sec: float
+    source_timestamp_sec: float
+    timestamp_label: str
+    reason: str
+    image_data_url: str
+
+
+class ExportMetadataRecommendResponse(BaseModel):
+    title: str
+    hashtags: list[str]
+    thumbnail: ThumbnailRecommendation
+    model_id: str
+    sampled_frame_count: int
 
 
 class AgentClipPlanRequest(BaseModel):
