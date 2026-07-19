@@ -1,0 +1,27 @@
+inference:
+  feature_dim: 512
+  feature_fps: 2.0
+  window_size: 64
+  window_sec: 32.0
+  stride_size: 2
+  stride_sec: 1.0
+  batch_size: 64
+
+thresholds:
+  Goal: 0.50
+  Shot: 0.50
+  Foul: 0.50
+  FreeKick: 0.50
+
+nms:
+  Goal: 15.0
+  Shot: 10.0
+  Foul: 10.0
+  FreeKick: 10.0
+
+ranking:
+  class_priority:
+    Goal: 1.0
+    Shot: 0.75
+    Foul: 0.60
+    FreeKick: 0.70

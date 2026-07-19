@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 from pathlib import Path
 
 
 TARGET_DIR = Path("storage/models/highlight_spotting/champion")
+DEFAULT_CONFIG_DIR = Path("configs/models/action_spotting/best_soccer_model")
 
 
 def _copy(src: str | None, dst: Path, overwrite: bool) -> str | None:
@@ -30,31 +32,53 @@ def main() -> None:
         description="Copy champion highlight model files into KickClip backend storage."
     )
     parser.add_argument("--checkpoint", required=True, help="Path to best.pt/checkpoint.pt")
-    parser.add_argument("--config", help="Path to the model config YAML/JSON used during training")
-    parser.add_argument("--label-map", help="Path to label_map.json used during training/evaluation")
     parser.add_argument("--target-dir", default=TARGET_DIR.as_posix())
+    parser.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR.as_posix())
+    parser.add_argument("--expected-sha256", default=None)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
     target_dir = Path(args.target_dir)
-    copied = {
-        "checkpoint_path": _copy(args.checkpoint, target_dir / "best.pt", args.overwrite),
-        "config_path": _copy(args.config, target_dir / "config.yaml", args.overwrite) if args.config else None,
-        "label_map_path": _copy(args.label_map, target_dir / "label_map.json", args.overwrite) if args.label_map else None,
-    }
+    checkpoint_path = target_dir / "best.pt"
+    copied_path = _copy(args.checkpoint, checkpoint_path, args.overwrite)
+    digest = _sha256(checkpoint_path)
+    if args.expected_sha256 and digest.lower() != args.expected_sha256.lower():
+        checkpoint_path.unlink(missing_ok=True)
+        raise ValueError(
+            f"checkpoint sha256 mismatch: expected={args.expected_sha256}, actual={digest}"
+        )
 
-    manifest = {
-        "note": "Set configs/model_registry.yaml highlight_spotting.champion.enabled=true only after the adapter and feature pipeline are ready.",
-        **copied,
-    }
-    manifest_path = target_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    config_dir = Path(args.config_dir)
+    required_configs = [
+        config_dir / "model.yaml",
+        config_dir / "data.yaml",
+        config_dir / "inference.yaml",
+        config_dir / "label_map.json",
+        config_dir / "manifest.json",
+    ]
+    missing_configs = [path.as_posix() for path in required_configs if not path.is_file()]
+    if missing_configs:
+        raise FileNotFoundError("missing model config artifact(s): " + ", ".join(missing_configs))
 
-    print(json.dumps(manifest, ensure_ascii=False, indent=2))
-    print("\nModel registry paths expected by 16회차 patch:")
-    print("  checkpoint_path: storage/models/highlight_spotting/champion/best.pt")
-    print("  config_path    : storage/models/highlight_spotting/champion/config.yaml")
-    print("  label_map_path : storage/models/highlight_spotting/champion/label_map.json")
+    print(
+        json.dumps(
+            {
+                "checkpoint_path": copied_path,
+                "checkpoint_sha256": digest,
+                "config_dir": config_dir.as_posix(),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 if __name__ == "__main__":

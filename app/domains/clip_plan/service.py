@@ -50,7 +50,12 @@ class ClipPlanService:
             raise RuntimeError("Created clip plan could not be loaded.")
         return loaded
 
-    def create_manual_clip_plan(self, data: ManualClipPlanCreateRequest) -> ClipPlan:
+    def create_manual_clip_plan(
+        self,
+        data: ManualClipPlanCreateRequest,
+        *,
+        created_by: str = "user",
+    ) -> ClipPlan:
         self._ensure_match_exists(data.match_id)
         validated_items = self._validate_items(data.match_id, data.items)
         actual_duration_sec = self._sum_item_duration(data.items)
@@ -62,7 +67,7 @@ class ClipPlanService:
                 summary=data.summary,
                 target_duration_sec=data.target_duration_sec,
                 actual_duration_sec=actual_duration_sec,
-                created_by="user",
+                created_by=created_by,
                 options={
                     **data.options,
                     "source": "manual",

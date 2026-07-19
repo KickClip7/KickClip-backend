@@ -2,6 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.domains.auth.access import require_match_access
+from app.domains.auth.dependencies import get_current_user
+from app.domains.auth.model import User
 from app.domains.agent.schema import (
     AgentClipPlanRequest,
     AgentClipPlanResponse,
@@ -22,7 +25,9 @@ router = APIRouter()
 def create_agent_clip_plan(
     data: AgentClipPlanRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> AgentClipPlanResponse:
+    require_match_access(db, data.match_id, current_user)
     service = AgentService(db)
 
     try:
@@ -42,7 +47,9 @@ def create_agent_clip_plan(
 def resolve_player_profile(
     data: PlayerProfileResolveRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> PlayerProfileResolveResponse:
+    require_match_access(db, data.match_id, current_user)
     service = AgentService(db)
 
     try:

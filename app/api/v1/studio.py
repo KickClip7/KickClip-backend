@@ -6,6 +6,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.domains.auth.access import require_match_access
+from app.domains.auth.dependencies import get_current_user
+from app.domains.auth.model import User
+from app.domains.media.signed_url import build_signed_media_url
 from app.domains.studio.schema import (
     StudioEditStateResponse,
     UploadMatchVideoResponse,
@@ -26,7 +30,6 @@ def upload_match_video(
     file: UploadFile = File(...),
     project_title: str | None = Form(default=None),
     project_description: str | None = Form(default=None),
-    owner_id: str | None = Form(default=None),
     home_team: str | None = Form(default=None),
     away_team: str | None = Form(default=None),
     home_score: int | None = Form(default=None),
@@ -37,6 +40,7 @@ def upload_match_video(
     duration_sec: float | None = Form(default=None),
     metadata: str | None = Form(default=None),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> UploadMatchVideoResponse:
     if not file.filename:
         raise HTTPException(
@@ -49,11 +53,11 @@ def upload_match_video(
     service = StudioService(db)
 
     try:
-        return service.upload_match_video(
+        response = service.upload_match_video(
             file=file,
             project_title=project_title,
             project_description=project_description,
-            owner_id=owner_id,
+            owner_id=current_user.user_id,
             home_team=home_team,
             away_team=away_team,
             home_score=home_score,
@@ -64,6 +68,16 @@ def upload_match_video(
             duration_sec=duration_sec,
             match_metadata=metadata_dict,
         )
+        response.video_url = build_signed_media_url(
+            response.video_asset_id,
+            current_user.user_id,
+        )[0]
+        if response.preview_video_asset_id is not None:
+            response.preview_url = build_signed_media_url(
+                response.preview_video_asset_id,
+                current_user.user_id,
+            )[0]
+        return response
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -100,7 +114,9 @@ def _parse_metadata(value: str | None) -> dict[str, Any]:
 def get_match_edit_state(
     match_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> StudioEditStateResponse:
+    require_match_access(db, match_id, current_user)
     service = StudioService(db)
     edit_state = service.get_edit_state(match_id)
 
@@ -110,5 +126,9 @@ def get_match_edit_state(
             detail="Match not found",
         )
 
+    if edit_state.video.asset_id is not None:
+        edit_state.video.url = build_signed_media_url(
+            edit_state.video.asset_id,
+            current_user.user_id,
+        )[0]
     return edit_state
-

@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, Field
 class ProjectCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     description: str | None = None
-    owner_id: str | None = None
 
 
 class ProjectUpdate(BaseModel):

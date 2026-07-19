@@ -1,0 +1,18 @@
+feature:
+  name: "ResNET_TF2_PCA512"
+  dim: 512
+  fps: 2.0
+
+labels:
+  num_classes: 4
+  classes:
+    - "Goal"
+    - "Shot"
+    - "Foul"
+    - "FreeKick"
+
+window:
+  window_size: 64
+  window_sec: 32.0
+  stride_size: 2
+  stride_sec: 1.0

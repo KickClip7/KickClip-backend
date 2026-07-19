@@ -42,6 +42,12 @@ def get_default_steps_for_job_type(job_type: str) -> list[dict]:
     if job_type == "HIGHLIGHT_SPOTTING":
         return [
             {
+                "step_key": "feature_extraction",
+                "label": "영상 피처 추출",
+                "status": QUEUED,
+                "progress": 0,
+            },
+            {
                 "step_key": "event_classification",
                 "label": "이벤트 분류",
                 "status": QUEUED,

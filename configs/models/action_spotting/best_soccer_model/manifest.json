@@ -1,0 +1,23 @@
+{
+  "model_name": "best_soccer_model",
+  "model_type": "window_attention_transformer",
+  "checkpoint_filename": "best.pt",
+  "checkpoint_sha256": "195ae99a62f122ed027550b010520ae9eaeed93a01d40bf81ff5819e5ed22a96",
+  "checkpoint_epoch": 6,
+  "feature_name": "ResNET_TF2_PCA512",
+  "feature_dim": 512,
+  "feature_fps": 2.0,
+  "window_size": 64,
+  "stride_size": 2,
+  "num_classes": 4,
+  "labels": ["Goal", "Shot", "Foul", "FreeKick"],
+  "validation_metrics": {
+    "valid_loss": 0.09748380454414982,
+    "valid_window_map": 0.8494952045567095,
+    "tight_average_map": 0.4642039596831581,
+    "macro_f1_at_3s": 0.3471093522023686
+  },
+  "recommended_postprocess": {
+    "max_candidates_per_match": 80
+  }
+}

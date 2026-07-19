@@ -1,0 +1,14 @@
+{
+  "id_to_label": {
+    "0": "Goal",
+    "1": "Shot",
+    "2": "Foul",
+    "3": "FreeKick"
+  },
+  "label_to_id": {
+    "Goal": 0,
+    "Shot": 1,
+    "Foul": 2,
+    "FreeKick": 3
+  }
+}

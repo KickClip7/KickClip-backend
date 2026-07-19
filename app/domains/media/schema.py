@@ -37,3 +37,9 @@ class MediaAssetRead(BaseModel):
 class MediaAssetResponse(MediaAssetRead):
     stream_url: str
     download_url: str
+
+
+class SignedMediaUrlResponse(BaseModel):
+    asset_id: str
+    url: str
+    expires_in: int

@@ -3,6 +3,9 @@ from sqlalchemy.orm import Session
 
 from app.ai.runtime.job_runner import run_analysis_job_background
 from app.db.session import get_db
+from app.domains.auth.access import require_analysis_job_access, require_match_access
+from app.domains.auth.dependencies import get_current_user
+from app.domains.auth.model import User
 from app.domains.analysis.schema import (
     AnalysisJobCreateRequest,
     AnalysisJobCreateResponse,
@@ -30,7 +33,9 @@ def create_analysis_job(
         description="true면 job 생성 후 dummy JobRunner를 background에서 실행한다.",
     ),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> AnalysisJobCreateResponse:
+    require_match_access(db, match_id, current_user)
     service = AnalysisJobService(db)
 
     try:
@@ -70,7 +75,9 @@ def create_analysis_job(
 def get_analysis_job(
     job_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> AnalysisJobStatusResponse:
+    require_analysis_job_access(db, job_id, current_user)
     service = AnalysisJobService(db)
     response = service.get_analysis_job_status(job_id)
 

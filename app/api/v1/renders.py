@@ -1,10 +1,11 @@
-from pathlib import Path
-
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal, get_db
+from app.domains.auth.access import require_clip_plan_access, require_render_job_access
+from app.domains.auth.dependencies import get_current_user
+from app.domains.auth.model import User
 from app.domains.render.schema import (
     RenderCreateRequest,
     RenderCreateResponse,
@@ -25,7 +26,9 @@ def create_render_job(
     data: RenderCreateRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> RenderCreateResponse:
+    require_clip_plan_access(db, data.clip_plan_id, current_user)
     service = RenderJobService(db)
 
     try:
@@ -53,7 +56,9 @@ def create_render_job(
 def get_render_job(
     render_job_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> RenderJobRead:
+    require_render_job_access(db, render_job_id, current_user)
     service = RenderJobService(db)
     render_job = service.get_render_job(render_job_id)
 
@@ -79,7 +84,9 @@ def get_render_job(
 def download_rendered_video(
     render_job_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> FileResponse:
+    require_render_job_access(db, render_job_id, current_user)
     service = RenderJobService(db)
     result = service.get_output_artifact_path(render_job_id)
 
