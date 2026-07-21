@@ -25,13 +25,16 @@ def list_match_timeline_events(
     match_id: str,
     category: str | None = Query(
         default=None,
-        description="Frontend category. 예: goal, shot, foul, card, freekick, corner",
+        description=(
+            "Frontend category. 예: goal, shot, penalty, card, "
+            "substitution, corner"
+        ),
     ),
     half: int | None = Query(default=None, ge=1, le=2),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> TimelineEventsResponse:
-    require_match_access(db, match_id, current_user)
+    match = require_match_access(db, match_id, current_user)
     backend_label = normalize_timeline_category_filter(category)
 
     repository = TimelineEventRepository(db)
@@ -40,7 +43,10 @@ def list_match_timeline_events(
         label=backend_label,
         half=half,
     )
-    frontend_events = [build_frontend_event(event) for event in events]
+    frontend_events = [
+        build_frontend_event(event, match_duration_sec=match.duration_sec)
+        for event in events
+    ]
 
     return TimelineEventsResponse(
         match_id=match_id,

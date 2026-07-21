@@ -250,7 +250,13 @@ class StudioService:
         return StudioEditStateResponse(
             match=self._build_edit_state_match(match),
             video=self._build_edit_state_video(video_asset),
-            events=[build_frontend_event(event) for event in events],
+            events=[
+                build_frontend_event(
+                    event,
+                    match_duration_sec=match.duration_sec,
+                )
+                for event in events
+            ],
             players=[build_frontend_player(player) for player in players],
             filters=EditStateFilters(
                 eventTypes=FRONTEND_EVENT_TYPES,
