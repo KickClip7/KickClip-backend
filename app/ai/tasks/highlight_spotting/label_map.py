@@ -1,8 +1,10 @@
 SUPPORTED_EVENT_LABELS = [
     "goal",
     "shot",
+    "penalty",
     "foul",
     "card",
+    "substitution",
     "free_kick",
     "corner",
 ]
@@ -19,6 +21,11 @@ LABEL_TO_DISPLAY = {
         "title": "SHOT",
         "description": "슈팅이 발생한 공격 장면입니다.",
     },
+    "penalty": {
+        "tag": "PENALTY",
+        "title": "PENALTY",
+        "description": "페널티 상황이 발생한 주요 장면입니다.",
+    },
     "foul": {
         "tag": "FOUL",
         "title": "FOUL",
@@ -28,6 +35,11 @@ LABEL_TO_DISPLAY = {
         "tag": "CARD",
         "title": "CARD",
         "description": "카드가 나온 주요 판정 장면입니다.",
+    },
+    "substitution": {
+        "tag": "SUBSTITUTION",
+        "title": "SUBSTITUTION",
+        "description": "선수 교체가 발생한 경기 전환 장면입니다.",
     },
     "free_kick": {
         "tag": "FREE KICK",
