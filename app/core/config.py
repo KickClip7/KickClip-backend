@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     QWEN_MODEL_ID: str = "Qwen/Qwen2.5-VL-3B-Instruct"
     QWEN_EXPORT_SAMPLE_FRAMES: int = 12
     QWEN_MAX_NEW_TOKENS: int = 384
+    OPENAI_API_KEY: str = ""
+    OPENAI_AGENT_MODEL: str = "gpt-4o-mini"
+    OPENAI_AGENT_TIMEOUT_SECONDS: float = 90.0
     AUTH_SECRET_KEY: str = "local-development-only-change-me-please-32chars"
     AUTH_ACCESS_TOKEN_MINUTES: int = 15
     AUTH_REFRESH_TOKEN_DAYS: int = 30
