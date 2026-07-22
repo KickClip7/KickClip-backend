@@ -34,7 +34,3 @@ def get_match_soccernet_feature_chunks_subdir(match_id: str) -> Path:
 
 def get_match_timeline_events_path(match_id: str) -> Path:
     return _match_root(match_id) / "timeline_events.json"
-
-
-def get_match_raw_video_path(match_id: str, filename: str = "source.mp4") -> Path:
-    return get_match_raw_video_subdir(match_id) / filename
