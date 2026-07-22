@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
@@ -5,6 +7,7 @@ from app.db.session import get_db
 from app.domains.auth.access import require_match_access
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
+from app.domains.auth.event_weights import resolve_event_weights
 from app.domains.timeline.fusion import (
     build_frontend_event,
     normalize_timeline_category_filter,
@@ -31,6 +34,7 @@ def list_match_timeline_events(
         ),
     ),
     half: int | None = Query(default=None, ge=1, le=2),
+    sort: Literal["time_asc", "importance_desc"] = Query(default="time_asc"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> TimelineEventsResponse:
@@ -43,10 +47,20 @@ def list_match_timeline_events(
         label=backend_label,
         half=half,
     )
+    event_weights = resolve_event_weights(current_user.event_weights)
     frontend_events = [
-        build_frontend_event(event, match_duration_sec=match.duration_sec)
+        build_frontend_event(
+            event,
+            match_duration_sec=match.duration_sec,
+            event_weights=event_weights,
+        )
         for event in events
     ]
+    if sort == "importance_desc":
+        frontend_events.sort(
+            key=lambda event: event.importance_score,
+            reverse=True,
+        )
 
     return TimelineEventsResponse(
         match_id=match_id,
