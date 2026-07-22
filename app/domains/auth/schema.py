@@ -5,6 +5,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.domains.auth.event_weights import normalize_event_weights
+
 
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -53,6 +55,19 @@ class LogoutRequest(BaseModel):
 class DeveloperModeRequest(BaseModel):
     enabled: bool
     developer_access_key: str | None = Field(default=None, max_length=512)
+
+
+class EventWeightsUpdateRequest(BaseModel):
+    event_weights: dict[str, float] = Field(..., min_length=1, max_length=100)
+
+    @field_validator("event_weights")
+    @classmethod
+    def validate_event_weights(cls, value: dict[str, float]) -> dict[str, float]:
+        return normalize_event_weights(value)
+
+
+class EventWeightsResponse(BaseModel):
+    event_weights: dict[str, float]
 
 
 class UserRead(BaseModel):

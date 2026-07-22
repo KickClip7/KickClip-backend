@@ -59,8 +59,10 @@ def normalize_label(label: str) -> str:
 
     if normalized == "freekick":
         normalized = "free_kick"
+    if normalized in {"corner_kick", "cornerkick"}:
+        normalized = "corner"
 
-    if normalized not in SUPPORTED_EVENT_LABELS:
+    if not normalized:
         return "shot"
 
     return normalized
@@ -68,4 +70,11 @@ def normalize_label(label: str) -> str:
 
 def get_display_info(label: str) -> dict:
     normalized = normalize_label(label)
-    return LABEL_TO_DISPLAY.get(normalized, LABEL_TO_DISPLAY["shot"])
+    return LABEL_TO_DISPLAY.get(
+        normalized,
+        {
+            "tag": normalized.upper().replace("_", " "),
+            "title": normalized.upper().replace("_", " "),
+            "description": "AI가 하이라이트 후보로 감지한 장면입니다.",
+        },
+    )

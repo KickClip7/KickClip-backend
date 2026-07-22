@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.domains.player.model import Player
+from app.domains.auth.event_weights import calculate_importance_score
 from app.domains.timeline.model import TimelineEvent
 from app.domains.timeline.schema import FrontendTimelineEvent
 from app.domains.player.schema import FrontendPlayer
@@ -110,6 +111,8 @@ def build_frontend_event(
     event: TimelineEvent,
     *,
     match_duration_sec: float | None = None,
+    event_weights: dict[str, float] | None = None,
+    context_bonus: float = 0.0,
 ) -> FrontendTimelineEvent:
     metadata = event.metadata_ or {}
     category = FRONTEND_CATEGORY_BY_BACKEND_LABEL.get(event.label, event.label)
@@ -132,8 +135,10 @@ def build_frontend_event(
         natural_end_sec=round(natural_end_sec, 3),
         half=_build_half(event.timestamp_sec, match_duration_sec, event.half),
         importance_score=_build_importance_score(
-            event.highlight_score,
+            event.label,
             event.confidence,
+            event_weights,
+            context_bonus,
         ),
         score=_build_score(event.confidence, event.highlight_score),
         highlightScore=_build_highlight_score(event.highlight_score, event.confidence),
@@ -191,18 +196,18 @@ def _build_highlight_score(
 
 
 def _build_importance_score(
-    highlight_score: float | None,
+    event_label: str,
     confidence: float | None,
+    event_weights: dict[str, float] | None,
+    context_bonus: float,
 ) -> float:
-    """Expose the existing highlight score as a sortable 0~100 value."""
-    if highlight_score is not None:
-        raw = highlight_score * 10 if highlight_score <= 10 else highlight_score
-    elif confidence is not None:
-        raw = confidence * 100 if confidence <= 1 else confidence
-    else:
-        raw = 0
-
-    return round(_clamp(raw, 0, 100), 2)
+    """Calculate the current user's event-weighted importance score."""
+    return calculate_importance_score(
+        event_label=event_label,
+        confidence_score=confidence,
+        event_weights=event_weights,
+        context_bonus=context_bonus,
+    )
 
 
 def _build_half(
