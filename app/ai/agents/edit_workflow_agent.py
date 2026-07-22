@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -12,10 +12,11 @@ from app.ai.agents.clip_tools import (
     adjust_clip_duration,
     compute_total_duration,
     get_clips_by_half,
-    get_clips_by_label,
+    get_clips_by_labels,
     rank_by_importance,
     remove_clip,
     select_clip_combination,
+    select_one_per_label,
 )
 from app.ai.agents.edit_intent_schema import EditIntent
 from app.core.config import get_settings
@@ -29,7 +30,6 @@ class EditWorkflowState(TypedDict, total=False):
     all_events: list[dict]
     current_clips: list[dict]
     user_message: str
-    conversation: list[dict]
     intent: dict
     plan_result: dict
     validation_ok: bool
@@ -70,39 +70,37 @@ def understand_request(state: EditWorkflowState) -> dict:
     system_prompt = (
         "당신은 축구 하이라이트 편집 에이전트의 의도 분석기입니다. "
         "사용자의 한국어 요청을 분석해 EditIntent 구조로 응답하세요. "
-        f"label 필드에 쓸 수 있는 값은 {full_label_taxonomy} 중 하나뿐입니다. "
-        "사용자가 언급한 장면 종류를 이 목록 중 하나로 매핑해서 채우세요(예: '득점'/'골'→Goal, '페널티'→Penalty). "
+        f"labels 필드는 문자열 리스트이며 각 값은 {full_label_taxonomy} 중 하나여야 합니다. "
+        "사용자가 언급한 장면 종류를 이 목록 중 하나 이상으로 매핑해서 채우세요(예: '득점'/'골'→Goal, '페널티'→Penalty). "
+        "'골, 슈팅 하나씩'처럼 여러 종류를 언급하면 labels에 여러 값을 모두 담으세요. "
         f"단, 현재 실제 데이터에 존재하는 라벨은 {available_labels}뿐이고 전/후반은 {available_halves}입니다 — "
         "요청한 라벨이 이 목록에 없다는 이유만으로는(즉 실제 데이터에 없는 장면이라는 이유만으로는) "
-        "needs_clarification을 true로 설정하지 마세요. label/half로 명확히 특정 가능하면 "
+        "needs_clarification을 true로 설정하지 마세요. labels/half로 명확히 특정 가능하면 "
         "그 라벨이 실제 데이터에 있든 없든 항상 needs_clarification=false로 두고 intent_type과 관련 필드만 채우세요. "
         "needs_clarification=true는 오직 '임팩트 있는', '멋진', '재밌는'처럼 위 라벨 목록 중 무엇에도 "
         "매핑할 수 없는 주관적 표현일 때만 사용하세요. 이 경우 clarification_question에 되물을 질문을, "
         f"clarification_options에는 실제 데이터에 존재하는 라벨 목록({available_labels}) 기반의 선택지를 채우세요. "
         "intent_type 의미: filter=조건에 맞는 장면만 보여달라, build=목표 길이/개수로 하이라이트를 구성해달라, "
         "remove=현재 구성에서 특정 순번 클립을 빼달라, adjust=특정 순번 클립 길이를 늘리거나 줄여달라, "
-        "confirm=지금 구성을 그대로 확정해달라."
+        "confirm=지금 구성을 그대로 확정해달라, "
+        "chitchat=편집 명령이 아닌 일반 질문/인사/잡담(예: '너는 뭘 할 수 있어?', '안녕'). "
+        "chitchat인 경우 needs_clarification은 항상 false로 두고, response_text에 친절한 한국어 답변을 채우세요 "
+        "(에이전트가 할 수 있는 것을 소개할 땐 라벨 필터/전후반 필터/목표 길이로 하이라이트 구성/클립 제거/클립 길이 조정을 예시로 드세요). "
+        "이번 요청은 이전 대화와 독립된 새 명령입니다 — 이전에 언급됐던 라벨/전후반 조건을 자동으로 이어붙이지 말고, "
+        "이번 메시지에 실제로 언급된 조건만 채우세요(언급 안 된 필드는 null). "
+        "메시지에 '(선택한 조건: X)'가 포함돼 있으면, 이는 직전에 되물어서 사용자가 이미 명확히 답변한 것입니다. "
+        "이 경우 메시지 앞부분에 남아있는 주관적 표현(예: '임팩트 있는')은 무시하고, 절대 needs_clarification을 "
+        "다시 true로 설정하지 말고 X를 labels 필드에 그대로 사용하세요."
     )
 
-    # ask_user에서 재개된 경우 conversation 마지막 항목이 이미 이번 user_message이므로 중복 추가하지 않는다.
-    conversation = list(state.get("conversation") or [])
-    last_turn = conversation[-1] if conversation else None
-    if not last_turn or last_turn.get("role") != "user" or last_turn.get("content") != state["user_message"]:
-        conversation.append({"role": "user", "content": state["user_message"]})
-
-    messages: list[Any] = [SystemMessage(content=system_prompt)]
-    for turn in conversation[-9:]:
-        content = str(turn.get("content", ""))
-        if turn.get("role") == "user":
-            messages.append(HumanMessage(content=content))
-        else:
-            messages.append(AIMessage(content=content))
+    # 매 턴을 독립된 새 요청으로 취급한다(이전 대화를 전부 보내면 LLM이 조건을 계속 이어붙이는 버그가 있었음).
+    # AskUser에서 재개된 경우에는 ask_user 노드가 원래 요청과 답변을 이미 하나의 user_message로 합쳐서 넘겨준다.
+    messages: list[Any] = [SystemMessage(content=system_prompt), HumanMessage(content=state["user_message"])]
 
     intent: EditIntent = structured_model.invoke(messages)
 
     return {
         "intent": intent.model_dump(),
-        "conversation": conversation,
         "retry_count": 0,
         "clarification_question": intent.clarification_question,
         "clarification_options": intent.clarification_options,
@@ -122,11 +120,10 @@ def ask_user(state: EditWorkflowState) -> dict:
 
     answer = interrupt(payload)
 
-    conversation = list(state.get("conversation") or [])
-    conversation.append({"role": "assistant", "content": payload["clarification_question"]})
-    conversation.append({"role": "user", "content": str(answer)})
+    # 원래 요청 + 되묻기 답변을 하나의 메시지로 합쳐서 다음 UnderstandRequest가 전체 맥락을 갖게 한다.
+    merged_message = f"{state['user_message']} (선택한 조건: {answer})"
 
-    return {"conversation": conversation, "user_message": str(answer)}
+    return {"user_message": merged_message}
 
 
 def plan_or_revise_edit(state: EditWorkflowState) -> dict:
@@ -140,27 +137,38 @@ def plan_or_revise_edit(state: EditWorkflowState) -> dict:
 
     if intent_type == "filter":
         pool = all_events
-        if intent.get("label"):
-            pool = get_clips_by_label(intent["label"], pool)
+        labels = intent.get("labels") or []
+        if labels:
+            pool = get_clips_by_labels(labels, pool)
         if intent.get("half") is not None:
             pool = get_clips_by_half(intent["half"], pool)
         plan_clips = rank_by_importance(pool)
-        action_summary = f"'{intent.get('label') or '전체'}' 조건으로 {len(plan_clips)}개 장면을 찾았어요."
+        action_summary = f"'{', '.join(labels) or '전체'}' 조건으로 {len(plan_clips)}개 장면을 찾았어요."
 
     elif intent_type == "build":
-        pool = all_events
-        if intent.get("label"):
-            pool = get_clips_by_label(intent["label"], pool)
-        if intent.get("half") is not None:
-            pool = get_clips_by_half(intent["half"], pool)
-        ranked = rank_by_importance(pool)
+        labels = intent.get("labels") or []
+        half_filtered = get_clips_by_half(intent["half"], all_events) if intent.get("half") is not None else all_events
         target_duration = intent.get("target_duration")
-        if target_duration:
-            plan_clips = select_clip_combination(ranked, float(target_duration))
+
+        if len(labels) > 1:
+            # "골, 슈팅 하나씩" 처럼 여러 라벨을 요청하면 라벨별 최고점 클립을 하나씩 골라 구성한다.
+            plan_clips = select_one_per_label(labels, half_filtered)
         else:
-            count = intent.get("target_clip_count") or 5
-            plan_clips = ranked[:count]
+            pool = get_clips_by_labels(labels, half_filtered) if labels else half_filtered
+            ranked = rank_by_importance(pool)
+            if target_duration:
+                plan_clips = select_clip_combination(ranked, float(target_duration))
+            else:
+                count = intent.get("target_clip_count") or 5
+                plan_clips = ranked[:count]
         action_summary = f"{len(plan_clips)}개 장면으로 하이라이트를 구성했어요."
+
+    elif intent_type == "chitchat":
+        plan_clips = current_clips
+        action_summary = intent.get("response_text") or (
+            "저는 축구 하이라이트 편집을 도와드려요. "
+            "'골 장면만 보여줘', '전반전만 보여줘', '그중에 두번째 빼줘' 같은 요청을 해보세요."
+        )
 
     elif intent_type == "remove":
         try:
@@ -195,8 +203,10 @@ def validate_plan(state: EditWorkflowState) -> dict:
     plan = state.get("plan_result") or {}
     clips = plan.get("clips") or []
     intent = state.get("intent") or {}
+    intent_type = intent.get("intent_type")
+    labels = intent.get("labels") or []
 
-    if not clips and intent.get("intent_type") != "confirm":
+    if not clips and intent_type not in ("confirm", "chitchat"):
         return {
             "validation_ok": False,
             "validation_reason": "empty_result",
@@ -204,7 +214,8 @@ def validate_plan(state: EditWorkflowState) -> dict:
         }
 
     target_duration = intent.get("target_duration")
-    if intent.get("intent_type") == "build" and target_duration:
+    # 라벨별 하나씩 고르는 다중 라벨 build는 목표 길이를 정확히 맞추는 게 목적이 아니라 생략한다.
+    if intent_type == "build" and target_duration and len(labels) <= 1:
         total = compute_total_duration(clips)
         tolerance = max(10.0, float(target_duration) * 0.3)
         if abs(total - float(target_duration)) > tolerance:
@@ -240,11 +251,11 @@ def save_and_respond(state: EditWorkflowState) -> dict:
 def fail_respond(state: EditWorkflowState) -> dict:
     intent = state.get("intent") or {}
     available_labels = sorted({str(clip.get("label")) for clip in (state.get("all_events") or []) if clip.get("label")})
-    label = intent.get("label")
+    labels = intent.get("labels") or []
 
-    if label:
+    if labels:
         message = (
-            f"'{label}' 라벨의 장면을 찾지 못했어요. "
+            f"'{', '.join(labels)}' 라벨의 장면을 찾지 못했어요. "
             f"사용 가능한 라벨은 {', '.join(available_labels)}입니다. 다시 요청해주시겠어요?"
         )
     else:

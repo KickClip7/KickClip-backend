@@ -4,8 +4,8 @@ from pydantic import BaseModel
 
 
 class EditIntent(BaseModel):
-    intent_type: Literal["filter", "build", "remove", "adjust", "confirm"]
-    label: Optional[str] = None
+    intent_type: Literal["filter", "build", "remove", "adjust", "confirm", "chitchat"]
+    labels: Optional[List[str]] = None
     half: Optional[int] = None
     target_duration: Optional[int] = None
     target_clip_count: Optional[int] = None
@@ -14,3 +14,4 @@ class EditIntent(BaseModel):
     needs_clarification: bool = False
     clarification_question: Optional[str] = None
     clarification_options: Optional[List[str]] = None
+    response_text: Optional[str] = None

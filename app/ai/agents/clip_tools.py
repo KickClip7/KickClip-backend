@@ -17,6 +17,27 @@ def get_clips_by_label(label: str, candidates: list[dict]) -> list[dict]:
     return [clip for clip in candidates if str(clip.get("label", "")).strip().lower() == normalized]
 
 
+def get_clips_by_labels(labels: list[str], candidates: list[dict]) -> list[dict]:
+    """labels 중 하나라도 일치하는 클립을 원래 순서 그대로 반환한다(합집합)."""
+    normalized = {str(label).strip().lower() for label in labels}
+    return [clip for clip in candidates if str(clip.get("label", "")).strip().lower() in normalized]
+
+
+def select_one_per_label(labels: list[str], candidates: list[dict]) -> list[dict]:
+    """각 라벨에서 highlight_score가 가장 높은 클립을 하나씩 골라 시간순으로 반환한다."""
+    picks: list[dict] = []
+    seen_ids: set[str] = set()
+    for label in labels:
+        ranked = rank_by_importance(get_clips_by_label(label, candidates))
+        for clip in ranked:
+            clip_id = clip.get("timeline_event_id")
+            if clip_id not in seen_ids:
+                picks.append(clip)
+                seen_ids.add(clip_id)
+                break
+    return sorted(picks, key=lambda clip: float(clip.get("timestamp_sec") or 0.0))
+
+
 def get_clips_by_half(half: int, candidates: list[dict]) -> list[dict]:
     return [clip for clip in candidates if clip.get("half") == half]
 
