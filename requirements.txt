@@ -33,7 +33,7 @@ hf-xet==1.5.0
 httpcore==1.0.9
 httptools==0.7.1
 httpx==0.28.1
-huggingface_hub==1.14.0
+huggingface_hub
 idna==3.15
 ImageIO==2.37.3
 imageio-ffmpeg==0.6.0
@@ -99,7 +99,7 @@ torch==2.12.0
 torchaudio==2.11.0
 torchvision==0.27.0
 tqdm==4.67.3
-transformers==4.57.6
+transformers
 typer==0.25.1
 typing_extensions==4.15.0
 tzdata==2026.2
