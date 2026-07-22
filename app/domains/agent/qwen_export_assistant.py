@@ -13,7 +13,11 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.domains.agent.schema import ExportMetadataRecommendResponse, ThumbnailRecommendation
+from app.domains.agent.schema import (
+    ExportAssistantRecommendation,
+    ExportMetadataRecommendResponse,
+    ThumbnailRecommendation,
+)
 from app.domains.clip_plan.model import ClipPlan
 from app.domains.clip_plan.repository import ClipPlanRepository
 from app.domains.media.repository import MediaAssetRepository
@@ -44,6 +48,43 @@ class QwenExportAssistant:
         match_id: str | None = None,
         language: str = "ko",
     ) -> ExportMetadataRecommendResponse:
+        payload = self._recommend_payload(
+            clip_plan_id=clip_plan_id,
+            match_id=match_id,
+            language=language,
+            targets={"title", "hashtags", "thumbnail"},
+        )
+        return ExportMetadataRecommendResponse.model_validate(payload)
+
+    def recommend_selected(
+        self,
+        *,
+        targets: list[str],
+        clip_plan_id: str | None = None,
+        match_id: str | None = None,
+        language: str = "ko",
+    ) -> ExportAssistantRecommendation:
+        normalized_targets = list(dict.fromkeys(targets))
+        allowed_targets = {"title", "hashtags", "thumbnail"}
+        if not normalized_targets or any(target not in allowed_targets for target in normalized_targets):
+            raise ValueError("추천 항목은 title, hashtags, thumbnail 중 하나 이상이어야 합니다.")
+        payload = self._recommend_payload(
+            clip_plan_id=clip_plan_id,
+            match_id=match_id,
+            language=language,
+            targets=set(normalized_targets),
+        )
+        payload["requested_fields"] = normalized_targets
+        return ExportAssistantRecommendation.model_validate(payload)
+
+    def _recommend_payload(
+        self,
+        *,
+        clip_plan_id: str | None,
+        match_id: str | None,
+        language: str,
+        targets: set[str],
+    ) -> dict[str, Any]:
         clip_plan = self.clip_plans.get_by_id(clip_plan_id) if clip_plan_id else None
         if clip_plan_id and clip_plan is None:
             raise ValueError("ClipPlan not found")
@@ -68,21 +109,25 @@ class QwenExportAssistant:
                 timeline_name = "원본"
 
             frames = self._extract_frames(points, source_path, Path(temp_dir))
-            result = self._run_qwen(frames, summary, timeline_name, language)
-            selected = self._select_frame(frames, result.get("thumbnail_candidate"))
-            return ExportMetadataRecommendResponse(
-                title=str(result.get("title") or summary or "KickClip Highlight").strip(),
-                hashtags=self._normalize_hashtags(result.get("hashtags")),
-                thumbnail=ThumbnailRecommendation(
+            result = self._run_qwen(frames, summary, timeline_name, language, targets)
+            payload: dict[str, Any] = {
+                "model_id": self.settings.QWEN_MODEL_ID,
+                "sampled_frame_count": len(frames),
+            }
+            if "title" in targets:
+                payload["title"] = str(result.get("title") or summary or "KickClip Highlight").strip()
+            if "hashtags" in targets:
+                payload["hashtags"] = self._normalize_hashtags(result.get("hashtags"))
+            if "thumbnail" in targets:
+                selected = self._select_frame(frames, result.get("thumbnail_candidate"))
+                payload["thumbnail"] = ThumbnailRecommendation(
                     timestamp_sec=round(selected.edited_timestamp_sec, 2),
                     source_timestamp_sec=round(selected.source_timestamp_sec, 2),
                     timestamp_label=self._format_timestamp(selected.edited_timestamp_sec),
                     reason=str(result.get("thumbnail_reason") or "경기 흐름이 가장 잘 드러나는 장면입니다.").strip(),
                     image_data_url=self._as_data_url(selected.path),
-                ),
-                model_id=self.settings.QWEN_MODEL_ID,
-                sampled_frame_count=len(frames),
-            )
+                ).model_dump(mode="json")
+            return payload
 
     def _extract_frames(
         self,
@@ -143,15 +188,30 @@ class QwenExportAssistant:
         summary: str,
         timeline_name: str,
         language: str,
+        targets: set[str],
     ) -> dict[str, Any]:
         model, processor, device = _load_qwen_runtime(self.settings.QWEN_MODEL_ID)
+        target_names = {
+            "title": "제목",
+            "hashtags": "해시태그",
+            "thumbnail": "썸네일 후보",
+        }
+        requested = ", ".join(target_names[target] for target in ("title", "hashtags", "thumbnail") if target in targets)
+        response_fields: list[str] = []
+        if "title" in targets:
+            response_fields.append('"title":"..."')
+        if "hashtags" in targets:
+            response_fields.append('"hashtags":["#축구"]')
+        if "thumbnail" in targets:
+            response_fields.extend(['"thumbnail_candidate":1', '"thumbnail_reason":"..."'])
+        response_example = "{" + ",".join(response_fields) + "}"
         content: list[dict[str, Any]] = [{
             "type": "text",
             "text": (
                 "당신은 축구 하이라이트 숏폼 콘텐츠 에디터입니다. 이어지는 이미지는 편집본에서 시간순으로 뽑은 후보 프레임입니다. "
-                "경기 맥락을 과장하지 말고 시청을 유도하는 한국어 제목 1개, 검색에 유용한 해시태그 6~10개, "
-                "가장 강한 썸네일 후보 번호를 고르세요. 반드시 JSON 객체만 출력하세요. "
-                '{"title":"...","hashtags":["#축구"],"thumbnail_candidate":1,"thumbnail_reason":"..."} 형식입니다. '
+                f"요청된 항목({requested})만 생성하고 요청되지 않은 항목은 분석하거나 응답에 포함하지 마세요. "
+                "제목은 시청을 유도하는 한국어 한 문장, 해시태그는 검색에 유용한 6~10개, 썸네일은 가장 강한 후보 번호와 이유를 뜻합니다. "
+                f"반드시 {response_example} 형식의 JSON 객체만 출력하세요. "
                 f"영상 범위: {summary}, 응답 언어: {language}."
             ),
         }]
