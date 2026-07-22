@@ -17,9 +17,9 @@ def create_app() -> FastAPI:
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
         description="KickClip Studio Backend API",
-        docs_url=f"{settings.API_V1_PREFIX}/docs",
-        redoc_url=f"{settings.API_V1_PREFIX}/redoc",
-        openapi_url=f"{settings.API_V1_PREFIX}/openapi.json",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
     )
 
     app.add_middleware(
@@ -37,7 +37,7 @@ def create_app() -> FastAPI:
         return {
             "service": settings.SERVICE_NAME,
             "version": settings.VERSION,
-            "docs_url": f"{settings.API_V1_PREFIX}/docs",
+            "docs_url": "/docs",
             "health_url": f"{settings.API_V1_PREFIX}/health",
         }
 

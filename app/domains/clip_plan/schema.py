@@ -60,6 +60,9 @@ class ExportOptionsUpdateRequest(BaseModel):
     captions_enabled: bool | None = None
     music: str | None = None
     quality: str | None = None
+    hashtags: list[str] = Field(default_factory=list)
+    thumbnail_timestamp_sec: float | None = None
+    thumbnail_source_timestamp_sec: float | None = None
 
     @field_validator("quality")
     @classmethod
