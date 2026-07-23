@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
+from app.domains.auth.event_weights import default_event_weights
 from app.utils.id_generator import generate_prefixed_id
 
 
@@ -25,6 +26,11 @@ class User(Base, TimestampMixin):
     developer_mode_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
+        nullable=False,
+    )
+    event_weights: Mapped[dict[str, float]] = mapped_column(
+        JSON,
+        default=default_event_weights,
         nullable=False,
     )
     last_login_at: Mapped[datetime | None] = mapped_column(

@@ -231,7 +231,12 @@ class StudioService:
 
             raise
 
-    def get_edit_state(self, match_id: str) -> StudioEditStateResponse | None:
+    def get_edit_state(
+        self,
+        match_id: str,
+        *,
+        event_weights: dict[str, float] | None = None,
+    ) -> StudioEditStateResponse | None:
         """Build the edit screen initial state for KickClip Studio.
 
         이 메서드는 DB 표준 모델인 Match / MediaAsset / TimelineEvent / Player를
@@ -250,7 +255,14 @@ class StudioService:
         return StudioEditStateResponse(
             match=self._build_edit_state_match(match),
             video=self._build_edit_state_video(video_asset),
-            events=[build_frontend_event(event) for event in events],
+            events=[
+                build_frontend_event(
+                    event,
+                    match_duration_sec=match.duration_sec,
+                    event_weights=event_weights,
+                )
+                for event in events
+            ],
             players=[build_frontend_player(player) for player in players],
             filters=EditStateFilters(
                 eventTypes=FRONTEND_EVENT_TYPES,
