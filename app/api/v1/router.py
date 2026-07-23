@@ -12,6 +12,7 @@ from app.api.v1 import (
     players,
     projects,
     renders,
+    session,
     studio,
     timelines,
 )
@@ -37,6 +38,7 @@ api_router.include_router(timelines.router, tags=["timelines"], dependencies=aut
 api_router.include_router(players.router, tags=["players"], dependencies=authenticated)
 api_router.include_router(agent.router, prefix="/agent", tags=["agent"], dependencies=authenticated)
 api_router.include_router(clip_plans.router, prefix="/clip-plans", tags=["clip-plans"], dependencies=authenticated)
+api_router.include_router(session.router, prefix="/session", tags=["session"], dependencies=authenticated)
 api_router.include_router(renders.router, tags=["renders"], dependencies=authenticated)
 
 # analysis_jobs router는 다음 두 경로를 동시에 제공해야 하므로 prefix 없이 연결한다.

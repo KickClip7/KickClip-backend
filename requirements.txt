@@ -1,50 +1,111 @@
-# KickClip backend dependencies
-#
-# Supported development environment: Python 3.12 on macOS, Windows, and Linux.
-# Install the same file on every operating system:
-#   python -m pip install -r requirements.txt
-#
-# Do not add OS-specific CUDA build suffixes (for example, +cu126) here.
-# pip selects the wheel matching the current operating system and architecture.
-
-# API and database
+--extra-index-url https://download.pytorch.org/whl/cpu
+absl-py==2.4.0
+accelerate==1.14.0
 alembic==1.14.0
+annotated-doc==0.0.4
+annotated-types==0.7.0
+anyio==4.13.0
+astunparse==1.6.3
+babel==2.18.0
+boto3==1.43.7
+botocore==1.43.7
+certifi==2026.4.22
+charset-normalizer==3.4.7
+click==8.3.3
+colorama==0.4.6
+contourpy==1.3.3
+cycler==0.12.1
+decorator==4.4.2
 fastapi==0.115.6
+ffmpeg-python==0.2.0
+filelock==3.29.0
+flatbuffers==25.12.19
+fonttools==4.63.0
+fsspec==2026.4.0
+future==1.0.0
+gast==0.7.0
+google-measurement-protocol==1.1.0
+google-pasta==0.2.0
+grpcio==1.80.0
+h11==0.16.0
+h5py==3.14.0
+hf-xet==1.5.0
+httpcore==1.0.9
+httptools==0.7.1
 httpx==0.28.1
-psycopg[binary]==3.2.3
+huggingface_hub
+idna==3.15
+ImageIO==2.37.3
+imageio-ffmpeg==0.6.0
+imutils==0.5.4
+Jinja2==3.1.6
+jmespath==1.1.0
+joblib==1.5.3
+keras==3.14.1
+kiwisolver==1.5.0
+libclang==18.1.1
+Mako==1.3.12
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+matplotlib==3.10.9
+mdurl==0.1.2
+ml_dtypes==0.5.4
+moviepy==1.0.3
+mpmath==1.3.0
+namex==0.1.0
+networkx==3.6.1
+numpy==2.4.4
+opencv-python==4.13.0.92
+opt_einsum==3.4.0
+optree==0.19.1
+packaging==26.2
+pillow==11.3.0
+prices==1.1.1
+proglog==0.1.12
+protobuf==7.34.1
+psycopg==3.2.3
+psycopg-binary==3.2.3
+pycocoevalcap==1.2
+pycocotools==2.0.11
 pydantic==2.10.4
 pydantic-settings==2.7.1
+pydantic_core==2.27.2
+Pygments==2.20.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
 python-multipart==0.0.20
-SQLAlchemy==2.0.36
-uvicorn[standard]==0.34.0
-
-# Video and shared data processing
-numpy>=2.0,<3.0
-opencv-python>=4.10,<6.0
-pillow>=11.0,<13.0
 PyYAML==6.0.2
-requests>=2.32,<3.0
-tqdm>=4.67,<5.0
-
-# Soccer analysis pipeline
-imutils==0.5.4
-scikit-learn>=1.6,<2.0
-scikit-video==1.1.11
-SoccerNet==0.1.62
-tensorflow==2.20.0
-
-# Qwen vision-language runtime
-accelerate==1.14.0
+requests==2.34.1
 qwen-vl-utils==0.0.8
-torch==2.13.0
-torchvision==0.28.0
-transformers @ git+https://github.com/huggingface/transformers@7ea2320c76117e6742364808a666ef6f2fb40a67
-
-# LangGraph export agent
-langchain-core>=1.0,<2.0
-langchain-openai>=1.0,<2.0
 langgraph>=1.0,<2.0
-
-# Imported directly by application modules
-typing-extensions>=4.12,<5.0
+langchain-openai>=1.0,<2.0
+rich==15.0.0
+s3transfer==0.17.0
+scikit-learn==1.8.0
+scikit-video==1.1.11
+scipy==1.17.1
+setuptools==70.2.0
+shellingham==1.5.4
+six==1.17.0
+SoccerNet==0.1.62
+SQLAlchemy==2.0.36
+starlette==0.41.3
+sympy==1.14.0
+tensorflow==2.21.0
+termcolor==3.3.0
+threadpoolctl==3.6.0
+torch==2.12.0
+torchaudio==2.11.0
+torchvision==0.27.0
+tqdm==4.67.3
+transformers
+typer==0.25.1
+typing_extensions==4.15.0
+tzdata==2026.2
+urllib3==2.7.0
+uvicorn==0.34.0
+watchfiles==1.1.1
+websockets==16.0
+wheel==0.47.0
+wrapt==2.1.2

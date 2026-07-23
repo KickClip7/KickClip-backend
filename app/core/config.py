@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     )
 
     STORAGE_ROOT: str = "storage"
+    USE_MOCK_DATA: bool = True
 
     DATABASE_URL: str = "postgresql+psycopg://kickclip:kickclip@localhost:5432/kickclip"
     DB_ECHO: bool = False

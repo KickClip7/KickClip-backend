@@ -30,3 +30,7 @@ def get_match_soccernet_features_subdir(match_id: str) -> Path:
 
 def get_match_soccernet_feature_chunks_subdir(match_id: str) -> Path:
     return get_match_soccernet_features_subdir(match_id) / "chunks"
+
+
+def get_match_timeline_events_path(match_id: str) -> Path:
+    return _match_root(match_id) / "timeline_events.json"
