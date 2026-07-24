@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 
 class EditIntent(BaseModel):
-    intent_type: Literal["filter", "build", "remove", "adjust", "confirm", "chitchat"]
+    intent_type: Literal["filter", "build", "add", "remove", "adjust", "confirm", "chitchat"]
     labels: Optional[List[str]] = None
     half: Optional[int] = None
     target_duration: Optional[int] = None

@@ -37,7 +37,9 @@ class SessionService:
         config = self._config(session_id)
         self.graph.update_state(
             config,
-            {"match_id": match_id, "all_events": events, "current_clips": events},
+            # current_clips는 "하이라이트 구성본"이므로 챗봇과 대화하기 전엔 빈 상태로 시작해야 한다.
+            # "원본 전체 경기" 탭에서 보여줄 전체 후보 목록은 all_events가 따로 담당한다.
+            {"match_id": match_id, "all_events": events, "current_clips": []},
         )
 
         return {

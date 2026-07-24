@@ -80,12 +80,18 @@ def understand_request(state: EditWorkflowState) -> dict:
         "needs_clarification=true는 오직 '임팩트 있는', '멋진', '재밌는'처럼 위 라벨 목록 중 무엇에도 "
         "매핑할 수 없는 주관적 표현일 때만 사용하세요. 이 경우 clarification_question에 되물을 질문을, "
         f"clarification_options에는 실제 데이터에 존재하는 라벨 목록({available_labels}) 기반의 선택지를 채우세요. "
-        "intent_type 의미: filter=조건에 맞는 장면만 보여달라, build=목표 길이/개수로 하이라이트를 구성해달라, "
+        "intent_type 의미: filter=조건에 맞는 장면만 보여달라, "
+        "build=지금까지의 구성은 무시하고 목표 길이/개수로 하이라이트를 처음부터 새로 구성해달라, "
+        "add=지금 구성에 있는 클립들은 그대로 유지한 채 새로운 조건의 장면을 추가로 더 넣어달라"
+        "(예: '~도 추가해줘', '~더 넣어줘', '그대로 두고 ~ 추가해줘'), "
         "remove=현재 구성에서 특정 순번 클립을 빼달라, adjust=특정 순번 클립 길이를 늘리거나 줄여달라, "
         "confirm=지금 구성을 그대로 확정해달라, "
         "chitchat=편집 명령이 아닌 일반 질문/인사/잡담(예: '너는 뭘 할 수 있어?', '안녕'). "
         "chitchat인 경우 needs_clarification은 항상 false로 두고, response_text에 친절한 한국어 답변을 채우세요 "
         "(에이전트가 할 수 있는 것을 소개할 땐 라벨 필터/전후반 필터/목표 길이로 하이라이트 구성/클립 제거/클립 길이 조정을 예시로 드세요). "
+        "add일 때 target_duration이 있으면 이는 새로 추가되는 클립만의 목표 길이가 아니라 "
+        "'기존 클립 + 새로 추가되는 클립' 전체 합계의 목표 길이입니다(예: 이미 40초짜리 구성이 있는데 "
+        "'60초 이내로 슈팅 추가해줘'라고 하면 남는 20초 예산 안에서만 슈팅을 채워 넣으라는 뜻). "
         "이번 요청은 이전 대화와 독립된 새 명령입니다 — 이전에 언급됐던 라벨/전후반 조건을 자동으로 이어붙이지 말고, "
         "이번 메시지에 실제로 언급된 조건만 채우세요(언급 안 된 필드는 null). "
         "메시지에 '(선택한 조건: X)'가 포함돼 있으면, 이는 직전에 되물어서 사용자가 이미 명확히 답변한 것입니다. "
@@ -162,6 +168,36 @@ def plan_or_revise_edit(state: EditWorkflowState) -> dict:
                 count = intent.get("target_clip_count") or 5
                 plan_clips = ranked[:count]
         action_summary = f"{len(plan_clips)}개 장면으로 하이라이트를 구성했어요."
+
+    elif intent_type == "add":
+        labels = intent.get("labels") or []
+        half_filtered = get_clips_by_half(intent["half"], all_events) if intent.get("half") is not None else all_events
+        existing_ids = {clip.get("timeline_event_id") for clip in current_clips}
+        candidate_pool = get_clips_by_labels(labels, half_filtered) if labels else half_filtered
+        pool = [clip for clip in candidate_pool if clip.get("timeline_event_id") not in existing_ids]
+        ranked = rank_by_importance(pool)
+        target_duration = intent.get("target_duration")
+        label_desc = "/".join(labels) if labels else "새"
+
+        if target_duration:
+            # target_duration은 "기존 + 새로 추가" 전체 합계 목표다. 이미 채운 만큼을 뺀 남는 예산만큼만 채운다.
+            current_total = compute_total_duration(current_clips)
+            remaining_budget = float(target_duration) - current_total
+            new_clips = select_clip_combination(ranked, remaining_budget) if remaining_budget > 0 else []
+        else:
+            count = intent.get("target_clip_count") or 1
+            new_clips = ranked[:count]
+
+        plan_clips = sorted([*current_clips, *new_clips], key=lambda clip: float(clip.get("timestamp_sec") or 0.0))
+
+        if target_duration and not new_clips and (float(target_duration) - compute_total_duration(current_clips)) <= 0:
+            action_summary = f"이미 {round(compute_total_duration(current_clips))}초로 목표 {target_duration}초를 채워서 더 추가하지 못했어요."
+        elif not new_clips:
+            action_summary = f"'{label_desc}' 조건에 맞는 새 장면을 더 찾지 못해서 추가하지 못했어요."
+        elif target_duration:
+            action_summary = f"기존 {len(current_clips)}개 클립은 그대로 두고, 전체 {target_duration}초 이내로 맞추려고 '{label_desc}' 장면 {len(new_clips)}개를 추가했어요."
+        else:
+            action_summary = f"기존 {len(current_clips)}개 클립은 그대로 두고, '{label_desc}' 장면 {len(new_clips)}개를 추가했어요."
 
     elif intent_type == "chitchat":
         plan_clips = current_clips
