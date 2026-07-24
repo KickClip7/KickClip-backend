@@ -51,7 +51,7 @@ def select_clip_combination(
     target_duration: float,
     max_pool: int = 8,
 ) -> list[dict]:
-    """highlight_score 상위 max_pool개 중 n=2/3/4 조합을 비교해 target_duration에 가장 가까운 조합을 고른다."""
+    """highlight_score 상위 max_pool개 중 n=1/2/3/4 조합을 비교해 target_duration에 가장 가까운 조합을 고른다."""
     if not candidates:
         return []
 
@@ -59,7 +59,7 @@ def select_clip_combination(
 
     best_combo: tuple[dict, ...] | None = None
     best_diff: float | None = None
-    for size in (2, 3, 4):
+    for size in (1, 2, 3, 4):
         if size > len(pool):
             continue
         for combo in itertools.combinations(pool, size):

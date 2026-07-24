@@ -1,7 +1,8 @@
 """한일전 raw action spotting JSON을 TimelineEventRead 스키마의 목업 timeline_events.json으로 변환한다.
 
+raw JSON 파일은 팀원마다 로컬 경로가 다르므로 --input은 필수 인자다(하드코딩된 기본 경로 없음).
+
 사용 예시:
-    python scripts/build_mock_timeline_events.py
     python scripts/build_mock_timeline_events.py --input path/to/events.json --match-id korjpn_2026
 """
 
@@ -24,7 +25,6 @@ from app.domains.action_spotting.schema import ActionSpottingEventsResponse
 from app.domains.timeline.schema import TimelineEventRead
 from app.storage.workspace import get_match_timeline_events_path
 
-DEFAULT_INPUT = Path(r"c:\Prometheus_Project\KickClip\events.json")
 DEFAULT_MATCH_ID = "korjpn_2026"
 ANALYSIS_JOB_ID = "job_actionspotting_v1"
 SOURCE_ARTIFACT_ID_TEMPLATE = "video_{match_id}"
@@ -42,7 +42,12 @@ CLASS_CONFIG: dict[str, tuple[float, float, float]] = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="원본 action spotting raw JSON 경로. 로컬 파일 위치라 팀원마다 다르므로 기본값 없이 항상 직접 지정해야 한다.",
+    )
     parser.add_argument("--match-id", type=str, default=DEFAULT_MATCH_ID)
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args()
