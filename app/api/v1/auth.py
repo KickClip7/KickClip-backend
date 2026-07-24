@@ -6,6 +6,8 @@ from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
 from app.domains.auth.schema import (
     DeveloperModeRequest,
+    EventWeightsResponse,
+    EventWeightsUpdateRequest,
     LoginRequest,
     LogoutRequest,
     MessageResponse,
@@ -53,6 +55,26 @@ def logout(payload: LogoutRequest, db: Session = Depends(get_db)) -> MessageResp
 @router.get("/me", response_model=UserRead)
 def me(current_user: User = Depends(get_current_user)) -> UserRead:
     return UserRead.model_validate(current_user)
+
+
+@router.get("/me/event-weights", response_model=EventWeightsResponse)
+def get_event_weights(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> EventWeightsResponse:
+    return AuthService(db).get_event_weights(current_user)
+
+
+@router.patch("/me/event-weights", response_model=EventWeightsResponse)
+def update_event_weights(
+    payload: EventWeightsUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> EventWeightsResponse:
+    return AuthService(db).update_event_weights(
+        user=current_user,
+        data=payload,
+    )
 
 
 @router.post("/developer-mode", response_model=UserRead)

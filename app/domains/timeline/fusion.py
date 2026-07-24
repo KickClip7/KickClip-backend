@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.domains.player.model import Player
+from app.domains.auth.event_weights import calculate_importance_score
 from app.domains.timeline.model import TimelineEvent
 from app.domains.timeline.schema import FrontendTimelineEvent
 from app.domains.player.schema import FrontendPlayer
@@ -9,8 +10,10 @@ from app.domains.player.schema import FrontendPlayer
 FRONTEND_CATEGORY_BY_BACKEND_LABEL = {
     "goal": "goal",
     "shot": "shot",
+    "penalty": "penalty",
     "foul": "foul",
     "card": "card",
+    "substitution": "substitution",
     "free_kick": "freekick",
     "freekick": "freekick",
     "corner": "corner",
@@ -20,8 +23,10 @@ BACKEND_LABEL_BY_FRONTEND_CATEGORY = {
     "all": None,
     "goal": "goal",
     "shot": "shot",
+    "penalty": "penalty",
     "foul": "foul",
     "card": "card",
+    "substitution": "substitution",
     "free_kick": "free_kick",
     "freekick": "free_kick",
     "corner": "corner",
@@ -30,8 +35,10 @@ BACKEND_LABEL_BY_FRONTEND_CATEGORY = {
 FRONTEND_EVENT_TYPES = [
     "goal",
     "shot",
+    "penalty",
     "foul",
     "card",
+    "substitution",
     "freekick",
     "corner",
 ]
@@ -39,8 +46,10 @@ FRONTEND_EVENT_TYPES = [
 BACKEND_EVENT_LABELS = [
     "goal",
     "shot",
+    "penalty",
     "foul",
     "card",
+    "substitution",
     "free_kick",
     "corner",
 ]
@@ -48,8 +57,10 @@ BACKEND_EVENT_LABELS = [
 DEFAULT_TAG_BY_CATEGORY = {
     "goal": "GOAL",
     "shot": "SHOT",
+    "penalty": "PENALTY",
     "foul": "FOUL",
     "card": "CARD",
+    "substitution": "SUBSTITUTION",
     "freekick": "FREEKICK",
     "corner": "CORNER",
 }
@@ -57,8 +68,10 @@ DEFAULT_TAG_BY_CATEGORY = {
 DEFAULT_TITLE_BY_CATEGORY = {
     "goal": "득점 장면",
     "shot": "슈팅 장면",
+    "penalty": "페널티 장면",
     "foul": "파울 장면",
     "card": "카드 장면",
+    "substitution": "선수 교체 장면",
     "freekick": "프리킥 장면",
     "corner": "코너킥 장면",
 }
@@ -66,8 +79,10 @@ DEFAULT_TITLE_BY_CATEGORY = {
 DEFAULT_DESCRIPTION_BY_CATEGORY = {
     "goal": "AI가 하이라이트 후보로 감지한 득점 장면입니다.",
     "shot": "AI가 하이라이트 후보로 감지한 슈팅 장면입니다.",
+    "penalty": "AI가 하이라이트 후보로 감지한 페널티 장면입니다.",
     "foul": "AI가 하이라이트 후보로 감지한 파울 장면입니다.",
     "card": "AI가 하이라이트 후보로 감지한 카드 장면입니다.",
+    "substitution": "AI가 하이라이트 후보로 감지한 선수 교체 장면입니다.",
     "freekick": "AI가 하이라이트 후보로 감지한 프리킥 장면입니다.",
     "corner": "AI가 하이라이트 후보로 감지한 코너킥 장면입니다.",
 }
@@ -92,9 +107,18 @@ def normalize_timeline_category_filter(category: str | None) -> str | None:
     return BACKEND_LABEL_BY_FRONTEND_CATEGORY[normalized]
 
 
-def build_frontend_event(event: TimelineEvent) -> FrontendTimelineEvent:
+def build_frontend_event(
+    event: TimelineEvent,
+    *,
+    match_duration_sec: float | None = None,
+    event_weights: dict[str, float] | None = None,
+    context_bonus: float = 0.0,
+) -> FrontendTimelineEvent:
     metadata = event.metadata_ or {}
     category = FRONTEND_CATEGORY_BY_BACKEND_LABEL.get(event.label, event.label)
+    duration_sec = max(0.0, float(event.duration_sec or 0.0))
+    min_start_sec = max(0.0, float(event.start_sec or 0.0))
+    natural_end_sec = max(min_start_sec, float(event.end_sec or min_start_sec))
 
     return FrontendTimelineEvent(
         id=event.timeline_event_id,
@@ -106,6 +130,16 @@ def build_frontend_event(event: TimelineEvent) -> FrontendTimelineEvent:
         duration=max(1, _safe_int(round(event.duration_sec))),
         start=_format_clip_timecode(event.start_sec),
         end=_format_clip_timecode(event.end_sec),
+        duration_sec=round(duration_sec, 3),
+        min_start_sec=round(min_start_sec, 3),
+        natural_end_sec=round(natural_end_sec, 3),
+        half=_build_half(event.timestamp_sec, match_duration_sec, event.half),
+        importance_score=_build_importance_score(
+            event.label,
+            event.confidence,
+            event_weights,
+            context_bonus,
+        ),
         score=_build_score(event.confidence, event.highlight_score),
         highlightScore=_build_highlight_score(event.highlight_score, event.confidence),
         description=(
@@ -159,6 +193,32 @@ def _build_highlight_score(
         raw = 1
 
     return int(round(_clamp(raw, 1, 10)))
+
+
+def _build_importance_score(
+    event_label: str,
+    confidence: float | None,
+    event_weights: dict[str, float] | None,
+    context_bonus: float,
+) -> float:
+    """Calculate the current user's event-weighted importance score."""
+    return calculate_importance_score(
+        event_label=event_label,
+        confidence_score=confidence,
+        event_weights=event_weights,
+        context_bonus=context_bonus,
+    )
+
+
+def _build_half(
+    timestamp_sec: float | None,
+    match_duration_sec: float | None,
+    stored_half: int | None,
+) -> int | None:
+    """Split the video at its midpoint; use the stored value if duration is unknown."""
+    if match_duration_sec is not None and match_duration_sec > 0:
+        return 1 if float(timestamp_sec or 0.0) < match_duration_sec / 2 else 2
+    return stored_half
 
 
 def _format_match_time(seconds: float | None) -> str:

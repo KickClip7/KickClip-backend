@@ -7,9 +7,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.domains.auth.event_weights import (
+    default_event_weights,
+    resolve_event_weights,
+)
 from app.domains.auth.model import User
 from app.domains.auth.repository import RefreshTokenRepository, UserRepository
-from app.domains.auth.schema import LoginRequest, SignUpRequest, TokenResponse, UserRead
+from app.domains.auth.schema import (
+    EventWeightsResponse,
+    EventWeightsUpdateRequest,
+    LoginRequest,
+    SignUpRequest,
+    TokenResponse,
+    UserRead,
+)
 from app.domains.auth.security import (
     create_access_token,
     create_refresh_token,
@@ -42,6 +53,7 @@ class AuthService:
                 role="USER",
                 is_active=True,
                 developer_mode_enabled=False,
+                event_weights=default_event_weights(),
             )
             response = self._issue_token_pair(user)
             self.db.commit()
@@ -116,6 +128,22 @@ class AuthService:
         self.db.commit()
         self.db.refresh(user)
         return user
+
+    def get_event_weights(self, user: User) -> EventWeightsResponse:
+        return EventWeightsResponse(
+            event_weights=resolve_event_weights(user.event_weights),
+        )
+
+    def update_event_weights(
+        self,
+        *,
+        user: User,
+        data: EventWeightsUpdateRequest,
+    ) -> EventWeightsResponse:
+        user.event_weights = dict(data.event_weights)
+        self.db.commit()
+        self.db.refresh(user)
+        return self.get_event_weights(user)
 
     def _issue_token_pair(
         self,

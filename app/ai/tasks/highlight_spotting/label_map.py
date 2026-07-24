@@ -1,8 +1,10 @@
 SUPPORTED_EVENT_LABELS = [
     "goal",
     "shot",
+    "penalty",
     "foul",
     "card",
+    "substitution",
     "free_kick",
     "corner",
 ]
@@ -19,6 +21,11 @@ LABEL_TO_DISPLAY = {
         "title": "SHOT",
         "description": "슈팅이 발생한 공격 장면입니다.",
     },
+    "penalty": {
+        "tag": "PENALTY",
+        "title": "PENALTY",
+        "description": "페널티 상황이 발생한 주요 장면입니다.",
+    },
     "foul": {
         "tag": "FOUL",
         "title": "FOUL",
@@ -28,6 +35,11 @@ LABEL_TO_DISPLAY = {
         "tag": "CARD",
         "title": "CARD",
         "description": "카드가 나온 주요 판정 장면입니다.",
+    },
+    "substitution": {
+        "tag": "SUBSTITUTION",
+        "title": "SUBSTITUTION",
+        "description": "선수 교체가 발생한 경기 전환 장면입니다.",
     },
     "free_kick": {
         "tag": "FREE KICK",
@@ -47,8 +59,10 @@ def normalize_label(label: str) -> str:
 
     if normalized == "freekick":
         normalized = "free_kick"
+    if normalized in {"corner_kick", "cornerkick"}:
+        normalized = "corner"
 
-    if normalized not in SUPPORTED_EVENT_LABELS:
+    if not normalized:
         return "shot"
 
     return normalized
@@ -56,4 +70,11 @@ def normalize_label(label: str) -> str:
 
 def get_display_info(label: str) -> dict:
     normalized = normalize_label(label)
-    return LABEL_TO_DISPLAY.get(normalized, LABEL_TO_DISPLAY["shot"])
+    return LABEL_TO_DISPLAY.get(
+        normalized,
+        {
+            "tag": normalized.upper().replace("_", " "),
+            "title": normalized.upper().replace("_", " "),
+            "description": "AI가 하이라이트 후보로 감지한 장면입니다.",
+        },
+    )

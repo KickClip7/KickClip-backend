@@ -9,6 +9,7 @@ from app.db.session import get_db
 from app.domains.auth.access import require_match_access
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
+from app.domains.auth.event_weights import resolve_event_weights
 from app.domains.media.signed_url import build_signed_media_url
 from app.domains.studio.schema import (
     StudioEditStateResponse,
@@ -118,7 +119,10 @@ def get_match_edit_state(
 ) -> StudioEditStateResponse:
     require_match_access(db, match_id, current_user)
     service = StudioService(db)
-    edit_state = service.get_edit_state(match_id)
+    edit_state = service.get_edit_state(
+        match_id,
+        event_weights=resolve_event_weights(current_user.event_weights),
+    )
 
     if edit_state is None:
         raise HTTPException(

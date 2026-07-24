@@ -78,6 +78,11 @@ class FrontendTimelineEvent(BaseModel):
     duration: int
     start: str
     end: str
+    duration_sec: float
+    min_start_sec: float
+    natural_end_sec: float
+    half: int | None
+    importance_score: float
     score: float
     highlightScore: int
     description: str
@@ -89,4 +94,3 @@ class TimelineEventsResponse(BaseModel):
     match_id: str
     events: list[FrontendTimelineEvent] = Field(default_factory=list)
     count: int
-
