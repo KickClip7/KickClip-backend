@@ -55,6 +55,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--match-id", type=str, default=DEFAULT_MATCH_ID)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument(
+        "--video-path",
+        type=Path,
+        default=None,
+        help="--seed-db와 함께 사용할 로컬 원본 영상 경로. 생략 시 MOCK_VIDEO_SOURCE_PATH 사용.",
+    )
+    parser.add_argument(
         "--seed-db",
         action="store_true",
         help=(
@@ -170,6 +176,7 @@ def seed_database(
 ) -> None:
     from app.core.config import get_settings
     from app.db.session import SessionLocal
+    from app.domains.media.mock_seed import seed_mock_video_asset
     from app.domains.timeline.mock_seed import seed_mock_timeline_fixture
 
     settings = get_settings()
@@ -194,12 +201,24 @@ def seed_database(
             away_score=args.away_score,
         )
 
+    required_duration_sec = max(float(event["end_sec"]) for event in payload["events"])
+    with SessionLocal() as db:
+        video_result = seed_mock_video_asset(
+            db,
+            match_id=args.match_id,
+            source_path=args.video_path or settings.MOCK_VIDEO_SOURCE_PATH,
+            required_duration_sec=required_duration_sec,
+            link_mode=settings.MOCK_VIDEO_LINK_MODE,
+        )
+
     print("DB 시드 완료:")
     print(f"  - project_id: {result.project_id}")
     print(f"  - match_id: {result.match_id}")
     print(f"  - owner_id: {result.owner_id}")
     print(f"  - event_count: {result.event_count}")
     print(f"  - replaced_event_count: {result.replaced_event_count}")
+    print(f"  - video_asset_id: {video_result.asset_id}")
+    print(f"  - video_duration_sec: {video_result.duration_sec:.3f}")
 
 
 def main() -> None:

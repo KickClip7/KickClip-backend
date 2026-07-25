@@ -1,12 +1,13 @@
-"""Shared mock timeline fixture를 로컬 개발 DB에 시드한다.
+"""Shared mock match를 로컬 개발 DB에 시드한다.
 
-팀 저장소에는 작은 fixture 파일만 공유한다.
+저장소에는 작은 timeline fixture만 공유하고, 영상은 각 팀원이 로컬의
+``test_data.mp4``를 사용한다. 스크립트는 다음을 반복 실행 가능하게 만든다.
 
-    storage/matches/korjpn_2026/timeline_events.json
-
-각 팀원은 DB 마이그레이션과 회원가입을 마친 뒤 이 스크립트를 한 번 실행한다.
-스크립트는 deterministic Project/Match를 만들고, 이전에 시드된 mock event만 교체한다.
-실제 Match나 실제 timeline event는 덮어쓰지 않는다.
+1. deterministic mock Project / Match 생성 또는 갱신
+2. mock TimelineEvent 교체
+3. 로컬 영상을 STORAGE_ROOT 아래 hard link 또는 copy로 배치
+4. RAW_VIDEO MediaAsset 생성 또는 갱신
+5. 영상 길이가 모든 이벤트를 포함하는지 검증
 
 사용 예시:
     python scripts/seed_mock_timeline_events.py --match-id korjpn_2026
@@ -18,6 +19,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -27,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.core.config import get_settings
 from app.core.paths import get_storage_root
 from app.db.session import SessionLocal
+from app.domains.media.mock_seed import seed_mock_video_asset
 from app.domains.timeline.mock_seed import seed_mock_timeline_fixture
 from app.storage.workspace import get_match_timeline_events_path
 
@@ -37,14 +40,17 @@ DEFAULT_MATCH_ID = "korjpn_2026"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--match-id", default=DEFAULT_MATCH_ID)
+    parser.add_argument("--input", type=Path, default=None)
+    parser.add_argument("--video-path", type=Path, default=None)
     parser.add_argument(
-        "--input",
-        type=Path,
+        "--skip-video",
+        action="store_true",
+        help="TimelineEvent만 시드한다. 에이전트 렌더링 개발에는 권장하지 않는다.",
+    )
+    parser.add_argument(
+        "--video-link-mode",
+        choices=["auto", "hardlink", "copy"],
         default=None,
-        help=(
-            "Timeline fixture JSON 경로. 생략하면 "
-            "storage/matches/{match_id}/timeline_events.json을 사용한다."
-        ),
     )
     parser.add_argument("--owner-user-id", default=None)
     parser.add_argument("--project-title", default="KickClip 한일전 공유 목업")
@@ -69,13 +75,15 @@ def main() -> None:
     input_path = args.input or (
         get_storage_root() / get_match_timeline_events_path(args.match_id)
     )
+    input_path = input_path.resolve()
     if not input_path.is_file():
         raise FileNotFoundError(f"목업 timeline fixture가 없습니다: {input_path}")
 
     payload = json.loads(input_path.read_text(encoding="utf-8"))
+    required_duration_sec = _max_event_end_sec(payload)
 
     with SessionLocal() as db:
-        result = seed_mock_timeline_fixture(
+        timeline_result = seed_mock_timeline_fixture(
             db,
             payload,
             target_match_id=args.match_id,
@@ -88,16 +96,54 @@ def main() -> None:
             away_score=args.away_score,
         )
 
-    print("KickClip mock timeline DB 시드 완료")
-    print(f"Fixture     : {input_path}")
-    print(f"Project ID  : {result.project_id}")
-    print(f"Match ID    : {result.match_id}")
-    print(f"Owner ID    : {result.owner_id}")
-    print(f"Events      : {result.event_count}")
-    print(f"Replaced    : {result.replaced_event_count}")
+    video_result = None
+    if not args.skip_video:
+        video_path = args.video_path or settings.MOCK_VIDEO_SOURCE_PATH
+        video_link_mode = args.video_link_mode or settings.MOCK_VIDEO_LINK_MODE
+        with SessionLocal() as db:
+            video_result = seed_mock_video_asset(
+                db,
+                match_id=args.match_id,
+                source_path=video_path,
+                required_duration_sec=required_duration_sec,
+                link_mode=video_link_mode,
+            )
+
+    print("KickClip 공유 mock match 시드 완료")
+    print(f"Fixture       : {input_path}")
+    print(f"Project ID    : {timeline_result.project_id}")
+    print(f"Match ID      : {timeline_result.match_id}")
+    print(f"Owner ID      : {timeline_result.owner_id}")
+    print(f"Events        : {timeline_result.event_count}")
+    print(f"Replaced      : {timeline_result.replaced_event_count}")
+    print(f"Max event end : {required_duration_sec:.3f}s")
+
+    if video_result is None:
+        print("Video          : SKIPPED")
+    else:
+        print(f"Video source   : {video_result.source_path}")
+        print(f"Video stored   : {video_result.stored_path}")
+        print(f"Materialized   : {video_result.materialization}")
+        print(f"Video asset ID : {video_result.asset_id}")
+        print(f"Video duration : {video_result.duration_sec:.3f}s")
+        print(
+            "Video geometry : "
+            f"{video_result.width}x{video_result.height} @ {video_result.fps}fps"
+        )
+
     print()
-    print("프론트 활성 match_id도 동일하게 설정하세요:")
-    print(f"  {result.match_id}")
+    print("프론트 VITE_AGENT_DEV_MATCH_ID도 다음 값으로 설정하세요:")
+    print(f"  {timeline_result.match_id}")
+
+
+def _max_event_end_sec(payload: dict[str, Any]) -> float:
+    events = payload.get("events")
+    if not isinstance(events, list) or not events:
+        raise ValueError("목업 timeline fixture에 events가 없습니다.")
+    try:
+        return max(float(event["end_sec"]) for event in events)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("모든 목업 event에는 유효한 end_sec가 필요합니다.") from exc
 
 
 if __name__ == "__main__":

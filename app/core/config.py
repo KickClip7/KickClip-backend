@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     USE_MOCK_DATA: bool = False
     MOCK_SHARED_ACCESS_ENABLED: bool = False
     MOCK_TIMELINE_SOURCE_MATCH_ID: str = "korjpn_2026"
+    MOCK_VIDEO_SOURCE_PATH: Path = Path("test_data.mp4")
+    MOCK_VIDEO_LINK_MODE: Literal["auto", "hardlink", "copy"] = "auto"
     AGENT_DEV_MATCH_ID: str = ""
 
     # -------------------------------------------------------------------------
