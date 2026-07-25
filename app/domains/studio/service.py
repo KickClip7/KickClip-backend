@@ -3,6 +3,7 @@ from datetime import datetime
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.domains.match.model import Match
 from app.domains.match.repository import MatchRepository
 from app.domains.media.metadata_extractor import extract_video_metadata
@@ -27,6 +28,7 @@ from app.domains.timeline.fusion import (
     build_frontend_event,
     build_frontend_player,
 )
+from app.domains.timeline.dev_context import select_dev_timeline_events
 from app.domains.timeline.repository import TimelineEventRepository
 from app.storage.local_storage import LocalStorage
 from app.storage.workspace import (
@@ -249,7 +251,11 @@ class StudioService:
             return None
 
         video_asset = self._select_representative_video_asset(match_id)
-        events = self.timeline_event_repository.list_by_match(match_id)
+        events = select_dev_timeline_events(
+            self.timeline_event_repository.list_by_match(match_id),
+            match_id=match_id,
+            settings=get_settings(),
+        )
         players = self.player_repository.list_by_match(match_id)
 
         return StudioEditStateResponse(

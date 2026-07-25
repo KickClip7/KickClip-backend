@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.domains.auth.access import require_clip_plan_access, require_match_access
 from app.domains.auth.dependencies import get_current_user
@@ -21,6 +22,7 @@ from app.domains.agent.export_workflow_agent import (
 )
 from app.domains.agent.qwen_export_assistant import QwenExportAssistant
 from app.domains.agent.service import AgentService
+from app.domains.timeline.dev_context import resolve_agent_match_id
 
 
 router = APIRouter()
@@ -95,7 +97,8 @@ def create_agent_clip_plan(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AgentClipPlanResponse:
-    require_match_access(db, data.match_id, current_user)
+    match_id = resolve_agent_match_id(data.match_id, get_settings())
+    require_match_access(db, match_id, current_user)
     service = AgentService(db)
 
     try:
