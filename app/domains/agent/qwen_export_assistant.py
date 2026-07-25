@@ -91,7 +91,9 @@ class QwenExportAssistant:
         if clip_plan is not None and not clip_plan.items:
             raise ValueError("추천할 편집 장면이 없습니다.")
 
-        source_match_id = clip_plan.match_id if clip_plan is not None else match_id
+        source_match_id = (
+            clip_plan.project.match_id if clip_plan is not None else match_id
+        )
         if not source_match_id:
             raise ValueError("분석할 경기 영상 정보가 없습니다.")
         source_path, source_duration = self._source_video(source_match_id)

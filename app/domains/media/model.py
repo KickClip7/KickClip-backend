@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Float, ForeignKey, Integer, String
+from sqlalchemy import BigInteger, Float, ForeignKey, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -7,6 +7,20 @@ from app.utils.id_generator import generate_prefixed_id
 
 class MediaAsset(Base, TimestampMixin):
     __tablename__ = "media_assets"
+    __table_args__ = (
+        Index(
+            "uq_media_assets_match_singleton_video",
+            "match_id",
+            "asset_type",
+            unique=True,
+            postgresql_where=text(
+                "asset_type IN ('RAW_VIDEO', 'WEB_PREVIEW_VIDEO')"
+            ),
+            sqlite_where=text(
+                "asset_type IN ('RAW_VIDEO', 'WEB_PREVIEW_VIDEO')"
+            ),
+        ),
+    )
 
     asset_id: Mapped[str] = mapped_column(
         String(64),

@@ -77,7 +77,8 @@ class ExportAssistantResponse(BaseModel):
 
 
 class AgentClipPlanRequest(BaseModel):
-    match_id: str
+    project_id: str
+    match_id: str | None = None
     mode: str = "AGENT_GENERATED"
     prompt: str
     target_duration_sec: int | None = 30

@@ -2,13 +2,14 @@
 
 14회차 목적:
 1. 영상 업로드
-2. 분석 job 생성 및 polling
-3. edit-state 조회
-4. timeline-events / players 조회
-5. Agent ClipPlan 생성
-6. export-options 저장
-7. RenderJob 생성 및 polling
-8. 결과 mp4 다운로드
+2. Match 아래 Project 생성
+3. 분석 job 생성 및 polling
+4. project_id 기준 edit-state 조회
+5. timeline-events / players 조회
+6. Agent ClipPlan 생성
+7. export-options 저장
+8. RenderJob 생성 및 polling
+9. 결과 mp4 다운로드
 
 사용 예시:
     python scripts/smoke_test_studio_flow.py --video-path sample.mp4
@@ -65,7 +66,6 @@ def main() -> None:
     upload = upload_match_video(
         base_url=base_url,
         video_path=video_path,
-        project_title=args.project_title,
         home_team=args.home_team,
         away_team=args.away_team,
         home_score=args.home_score,
@@ -79,7 +79,19 @@ def main() -> None:
     if not raw_video_asset_id:
         raise SmokeTestError("Upload response did not include raw_video_asset_id.")
 
-    print_step("3. Start analysis job")
+    print_step("3. Create project under match")
+    project = request_json(
+        "POST",
+        f"{base_url}/api/v1/matches/{match_id}/projects",
+        json_body={
+            "title": args.project_title,
+            "description": "Studio E2E smoke test project",
+        },
+    )
+    project_id = project["project_id"]
+    print_json(project)
+
+    print_step("4. Start analysis job")
     job = request_json(
         "POST",
         f"{base_url}/api/v1/matches/{match_id}/analysis-jobs",
@@ -99,7 +111,7 @@ def main() -> None:
     if not job_id:
         raise SmokeTestError("Analysis job response did not include analysis_job_id.")
 
-    print_step("4. Poll analysis job")
+    print_step("5. Poll analysis job")
     job_status = poll_status(
         url=f"{base_url}/api/v1/analysis-jobs/{job_id}",
         timeout_sec=args.analysis_timeout_sec,
@@ -111,8 +123,11 @@ def main() -> None:
     )
     print_json(job_status)
 
-    print_step("5. Fetch edit-state")
-    edit_state = request_json("GET", f"{base_url}/api/v1/studio/matches/{match_id}/edit-state")
+    print_step("6. Fetch project edit-state")
+    edit_state = request_json(
+        "GET",
+        f"{base_url}/api/v1/projects/{project_id}/edit-state",
+    )
     print_json(compact_edit_state(edit_state))
 
     video = edit_state.get("video") or {}
@@ -126,7 +141,7 @@ def main() -> None:
     if not events:
         raise SmokeTestError("No timeline events found. Analysis job did not create editable events.")
 
-    print_step("6. Fetch timeline-events and players")
+    print_step("7. Fetch timeline-events and players")
     timeline_events = request_json("GET", f"{base_url}/api/v1/matches/{match_id}/timeline-events")
     player_list = request_json("GET", f"{base_url}/api/v1/matches/{match_id}/players")
     print_json({"timeline_event_count": timeline_events.get("count"), "player_count": player_list.get("count")})
@@ -135,12 +150,12 @@ def main() -> None:
     if players:
         selected_player_id = players[0].get("id")
 
-    print_step("7. Create Agent ClipPlan")
+    print_step("8. Create Agent ClipPlan")
     agent_plan = request_json(
         "POST",
         f"{base_url}/api/v1/agent/clip-plan",
         json_body={
-            "match_id": match_id,
+            "project_id": project_id,
             "mode": "AGENT_GENERATED",
             "prompt": args.prompt,
             "target_duration_sec": args.target_duration_sec,
@@ -161,14 +176,14 @@ def main() -> None:
     if args.auto_render_safe_plan:
         source_duration = infer_source_duration(upload=upload, edit_state=edit_state, fallback=args.demo_duration_sec)
         if plan_exceeds_source_duration(agent_plan, source_duration):
-            print_step("7-1. Agent plan exceeds source video duration. Create render-safe manual plan.")
+            print_step("8-1. Agent plan exceeds source video duration. Create render-safe manual plan.")
             first_event_id = events[0]["id"]
             safe_end = max(1.0, min(float(args.safe_clip_duration_sec), source_duration))
             manual_plan = request_json(
                 "POST",
                 f"{base_url}/api/v1/clip-plans",
                 json_body={
-                    "match_id": match_id,
+                    "project_id": project_id,
                     "mode": "MANUAL",
                     "summary": "E2E smoke test render-safe manual plan",
                     "target_duration_sec": safe_end,
@@ -187,7 +202,7 @@ def main() -> None:
             print_json(manual_plan)
             render_clip_plan_id = manual_plan["clip_plan_id"]
 
-    print_step("8. Save export options")
+    print_step("9. Save export options")
     export_options = request_json(
         "PATCH",
         f"{base_url}/api/v1/clip-plans/{render_clip_plan_id}/export-options",
@@ -208,7 +223,7 @@ def main() -> None:
         print_step("Render skipped by --skip-render")
         return
 
-    print_step("9. Start render job")
+    print_step("10. Start render job")
     render = request_json(
         "POST",
         f"{base_url}/api/v1/renders",
@@ -226,7 +241,7 @@ def main() -> None:
 
     render_job_id = render["render_job_id"]
 
-    print_step("10. Poll render job")
+    print_step("11. Poll render job")
     render_status = poll_status(
         url=f"{base_url}/api/v1/renders/{render_job_id}",
         timeout_sec=args.render_timeout_sec,
@@ -238,7 +253,7 @@ def main() -> None:
     )
     print_json(render_status)
 
-    print_step("11. Download rendered video")
+    print_step("12. Download rendered video")
     output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     download_file(
@@ -253,6 +268,7 @@ def main() -> None:
     print_json(
         {
             "match_id": match_id,
+            "project_id": project_id,
             "analysis_job_id": job_id,
             "agent_clip_plan_id": agent_plan["clip_plan_id"],
             "render_clip_plan_id": render_clip_plan_id,
@@ -327,16 +343,14 @@ def upload_match_video(
     *,
     base_url: str,
     video_path: Path,
-    project_title: str,
     home_team: str,
     away_team: str,
     home_score: int,
     away_score: int,
     duration_sec: float | None,
 ) -> dict[str, Any]:
-    url = f"{base_url}/api/v1/studio/upload-match-video"
+    url = f"{base_url}/api/v1/matches"
     data: dict[str, str] = {
-        "project_title": project_title,
         "home_team": home_team,
         "away_team": away_team,
         "home_score": str(home_score),

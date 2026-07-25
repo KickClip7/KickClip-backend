@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.domains.auth.access import require_clip_plan_access, require_match_access
+from app.domains.auth.access import require_clip_plan_access, require_project_access
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
 from app.domains.clip_plan.schema import (
@@ -28,7 +28,7 @@ def create_clip_plan(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ClipPlanRead:
-    require_match_access(db, data.match_id, current_user)
+    require_project_access(db, data.project_id, current_user)
     service = ClipPlanService(db)
 
     try:

@@ -1,6 +1,9 @@
 from pydantic import BaseModel
 
 from app.domains.player.schema import FrontendPlayer
+from app.domains.project.schema import ProjectRead
+from app.domains.clip_plan.schema import ClipPlanRead
+from app.domains.render.schema import RenderJobRead
 from app.domains.timeline.schema import FrontendTimelineEvent
 
 
@@ -23,7 +26,6 @@ class UploadedVideoInfo(BaseModel):
 
 
 class UploadMatchVideoResponse(BaseModel):
-    project_id: str
     match_id: str
 
     # 원본 보관/AI 분석용 asset
@@ -53,7 +55,6 @@ class UploadMatchVideoResponse(BaseModel):
 
 class EditStateMatch(BaseModel):
     match_id: str
-    project_id: str
     home_team: str | None = None
     away_team: str | None = None
     home_score: int | None = None
@@ -85,3 +86,8 @@ class StudioEditStateResponse(BaseModel):
     players: list[FrontendPlayer]
     filters: EditStateFilters
 
+
+class ProjectEditStateResponse(StudioEditStateResponse):
+    project: ProjectRead
+    clip_plans: list[ClipPlanRead]
+    render_jobs: list[RenderJobRead]

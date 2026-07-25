@@ -19,6 +19,7 @@ class ProjectRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     project_id: str
+    match_id: str
     owner_id: str | None
     title: str
     description: str | None
@@ -31,6 +32,7 @@ class ProjectRead(BaseModel):
 
 class ProjectRecentItem(BaseModel):
     project_id: str
+    match_id: str
     title: str
     status: str
     thumbnail_url: str | None = None

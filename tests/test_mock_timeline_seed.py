@@ -3,6 +3,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from app.db import models  # noqa: F401
+from app.db.base import Base
+from app.domains.match.model import Match
+from app.domains.project.model import Project
 from app.domains.timeline.dev_context import (
     resolve_agent_match_id,
     select_dev_timeline_events,
@@ -10,6 +17,7 @@ from app.domains.timeline.dev_context import (
 from app.domains.timeline.mock_seed import (
     MOCK_SEED_METADATA_KEY,
     build_mock_timeline_rows,
+    seed_mock_timeline_fixture,
 )
 
 
@@ -135,6 +143,63 @@ class MockTimelineSeedTest(unittest.TestCase):
         )
 
         self.assertEqual(selected, [seeded])
+
+    def test_seed_creates_match_owner_and_project_in_new_direction(self) -> None:
+        engine = create_engine("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        now = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "events": [
+                {
+                    "timeline_event_id": "E0001",
+                    "match_id": "fixture",
+                    "source_artifact_id": None,
+                    "source_job_id": None,
+                    "event_type": "action_spotting",
+                    "label": "Goal",
+                    "half": 1,
+                    "timestamp_sec": 10.0,
+                    "start_sec": 8.0,
+                    "end_sec": 12.0,
+                    "duration_sec": 4.0,
+                    "confidence": 0.9,
+                    "highlight_score": 0.9,
+                    "title": None,
+                    "description": None,
+                    "team_name": None,
+                    "player_ids": [],
+                    "metadata": {},
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            ]
+        }
+        with Session(engine) as db:
+            result = seed_mock_timeline_fixture(
+                db,
+                payload,
+                target_match_id="match_mock_new",
+                source_path=Path("fixture.json"),
+            )
+            match = db.get(Match, result.match_id)
+            project = db.get(Project, result.project_id)
+            self.assertIsNotNone(match)
+            self.assertIsNotNone(project)
+            self.assertEqual(project.match_id, match.match_id)
+            self.assertEqual(project.owner_id, match.owner_id)
+            self.assertEqual(
+                len(
+                    list(
+                        db.scalars(
+                            select(Project).where(
+                                Project.match_id == match.match_id
+                            )
+                        ).all()
+                    )
+                ),
+                1,
+            )
+        engine.dispose()
 
 
 if __name__ == "__main__":

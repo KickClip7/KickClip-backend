@@ -17,6 +17,26 @@ from app.domains.analysis.service import AnalysisJobService
 router = APIRouter()
 
 
+@router.get(
+    "/matches/{match_id}/analysis-jobs",
+    response_model=list[AnalysisJobStatusResponse],
+    tags=["analysis-jobs"],
+    summary="경기별 분석 작업 목록 조회",
+    description="가장 최근에 생성된 작업부터 반환한다.",
+)
+def list_match_analysis_jobs(
+    match_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[AnalysisJobStatusResponse]:
+    require_match_access(db, match_id, current_user)
+    service = AnalysisJobService(db)
+    return [
+        service.to_status_response(job)
+        for job in service.list_match_analysis_jobs(match_id)
+    ]
+
+
 @router.post(
     "/matches/{match_id}/analysis-jobs",
     response_model=AnalysisJobCreateResponse,

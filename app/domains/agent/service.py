@@ -13,6 +13,7 @@ from app.domains.agent.schema import (
 from app.domains.clip_plan.repository import ClipPlanRepository
 from app.domains.match.repository import MatchRepository
 from app.domains.player.repository import PlayerRepository
+from app.domains.project.repository import ProjectRepository
 from app.domains.timeline.dev_context import (
     resolve_agent_match_id,
     select_dev_timeline_events,
@@ -27,12 +28,20 @@ class AgentService:
         self.timeline_event_repository = TimelineEventRepository(db)
         self.player_repository = PlayerRepository(db)
         self.clip_plan_repository = ClipPlanRepository(db)
+        self.project_repository = ProjectRepository(db)
         self.planner = RuleBasedClipPlanner()
         self.profile_resolver = PlayerProfileResolver()
 
     def create_clip_plan(self, data: AgentClipPlanRequest) -> AgentClipPlanResponse:
         settings = get_settings()
-        match_id = resolve_agent_match_id(data.match_id, settings)
+        project = self.project_repository.get_by_id(data.project_id)
+        if project is None:
+            raise ValueError("Project not found")
+        match_id = project.match_id
+        if data.match_id is not None:
+            requested_match_id = resolve_agent_match_id(data.match_id, settings)
+            if requested_match_id != match_id:
+                raise ValueError("Project does not belong to requested match")
         match = self.match_repository.get_by_id(match_id)
         if match is None:
             raise ValueError("Match not found")
@@ -55,7 +64,7 @@ class AgentService:
 
         try:
             clip_plan = self.clip_plan_repository.create_plan(
-                match_id=match_id,
+                project_id=project.project_id,
                 mode=data.mode or "AGENT_GENERATED",
                 summary=planned.summary,
                 target_duration_sec=planned.target_duration_sec,
@@ -65,6 +74,7 @@ class AgentService:
                     **data.options,
                     "prompt": data.prompt,
                     "requested_match_id": data.match_id,
+                    "project_id": project.project_id,
                     "parsed_labels": planned.parsed_labels,
                     "parsed_half": planned.parsed_half,
                     "selected_player_id": planned.selected_player_id,

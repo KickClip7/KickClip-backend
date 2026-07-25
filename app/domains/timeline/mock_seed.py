@@ -131,6 +131,8 @@ def seed_mock_timeline_fixture(
     timeline_repository = TimelineEventRepository(db)
 
     owner_id = owner_id or _resolve_single_active_user_id(db)
+    if owner_id is None:
+        owner_id = _ensure_mock_owner(db)
     project_id = _mock_project_id(target_match_id)
     match = match_repository.get_by_id(target_match_id)
 
@@ -142,10 +144,24 @@ def seed_mock_timeline_fixture(
 
     try:
         if match is None:
+            match = match_repository.create(
+                match_id=target_match_id,
+                owner_id=owner_id,
+                home_team=home_team,
+                away_team=away_team,
+                home_score=home_score,
+                away_score=away_score,
+                duration_sec=_infer_duration(rows),
+                metadata_=build_mock_match_metadata(
+                    source_path=str(source_path),
+                    event_count=len(rows),
+                ),
+            )
             project = project_repository.get_by_id(project_id)
             if project is None:
                 project = project_repository.create(
                     project_id=project_id,
+                    match_id=match.match_id,
                     owner_id=owner_id,
                     title=project_title,
                     description=(
@@ -159,21 +175,9 @@ def seed_mock_timeline_fixture(
                 if owner_id is not None:
                     project.owner_id = owner_id
 
-            match = match_repository.create(
-                match_id=target_match_id,
-                project_id=project.project_id,
-                home_team=home_team,
-                away_team=away_team,
-                home_score=home_score,
-                away_score=away_score,
-                duration_sec=_infer_duration(rows),
-                metadata_=build_mock_match_metadata(
-                    source_path=str(source_path),
-                    event_count=len(rows),
-                ),
-            )
         else:
-            project_id = match.project_id
+            if owner_id is not None:
+                match.owner_id = owner_id
             match.home_team = home_team
             match.away_team = away_team
             match.home_score = home_score
@@ -187,7 +191,29 @@ def seed_mock_timeline_fixture(
                 ),
             }
 
-            project = project_repository.get_by_id(match.project_id)
+            project = project_repository.get_by_id(project_id)
+            if project is not None and project.match_id != match.match_id:
+                raise ValueError(
+                    "목업 Project ID가 다른 Match에 연결되어 있습니다: "
+                    f"{project_id}"
+                )
+            if project is None:
+                projects = project_repository.list_by_match(match.match_id)
+                project = projects[0] if projects else None
+                if project is not None:
+                    project_id = project.project_id
+            if project is None:
+                project = project_repository.create(
+                    project_id=project_id,
+                    match_id=match.match_id,
+                    owner_id=match.owner_id,
+                    title=project_title,
+                    description=(
+                        "Local/shared development fixture. "
+                        "Do not use as production match data."
+                    ),
+                    status="MOCK",
+                )
             if project is not None:
                 project.title = project_title
                 if owner_id is not None:
@@ -222,6 +248,24 @@ def _resolve_single_active_user_id(db: Session) -> str | None:
     stmt = select(User.user_id).where(User.is_active.is_(True)).limit(2)
     user_ids = list(db.scalars(stmt).all())
     return user_ids[0] if len(user_ids) == 1 else None
+
+
+def _ensure_mock_owner(db: Session) -> str:
+    user_id = "usr_mock_shared"
+    user = db.get(User, user_id)
+    if user is None:
+        user = User(
+            user_id=user_id,
+            email="mock-shared@kickclip.invalid",
+            password_hash="!",
+            display_name="KickClip shared mock owner",
+            role="SYSTEM",
+            is_active=False,
+            developer_mode_enabled=False,
+        )
+        db.add(user)
+        db.flush()
+    return user_id
 
 
 def _mock_project_id(match_id: str) -> str:

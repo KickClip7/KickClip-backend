@@ -5,14 +5,16 @@ from app.db.session import get_db
 from app.domains.auth.access import require_project_access
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
-from app.domains.match.schema import MatchCreateRequest, MatchRead
-from app.domains.match.service import MatchService
+from app.domains.auth.event_weights import resolve_event_weights
+from app.domains.media.signed_url import build_signed_media_url
 from app.domains.project.schema import (
     ProjectCreate,
     ProjectRead,
     ProjectRecentListResponse,
 )
 from app.domains.project.service import ProjectService
+from app.domains.studio.schema import ProjectEditStateResponse
+from app.domains.studio.service import StudioService
 
 
 router = APIRouter()
@@ -36,18 +38,19 @@ def get_recent_projects(
 
 @router.post(
     "",
-    response_model=ProjectRead,
-    status_code=status.HTTP_201_CREATED,
-    summary="프로젝트 생성",
+    status_code=status.HTTP_410_GONE,
+    summary="폐기된 프로젝트 생성 API",
+    deprecated=True,
 )
 def create_project(
     payload: ProjectCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> ProjectRead:
-    service = ProjectService(db)
-    project = service.create_project(payload, owner_id=current_user.user_id)
-    return project
+) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Use POST /api/v1/matches/{match_id}/projects instead.",
+    )
 
 
 @router.get(
@@ -65,28 +68,44 @@ def get_project(
 
 @router.post(
     "/{project_id}/matches",
-    response_model=MatchRead,
-    status_code=status.HTTP_201_CREATED,
-    summary="프로젝트에 경기 생성",
+    status_code=status.HTTP_410_GONE,
+    summary="폐기된 프로젝트→경기 생성 API",
+    deprecated=True,
 )
 def create_match_for_project(
     project_id: str,
-    payload: MatchCreateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> MatchRead:
-    require_project_access(db, project_id, current_user)
-    service = MatchService(db)
+) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Matches are created by video upload and cannot be attached to projects.",
+    )
 
-    try:
-        match = service.create_match_for_project(
-            project_id=project_id,
-            data=payload,
-        )
-    except ValueError as exc:
+
+@router.get(
+    "/{project_id}/edit-state",
+    response_model=ProjectEditStateResponse,
+    summary="프로젝트별 편집 화면 초기 상태 조회",
+)
+def get_project_edit_state(
+    project_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ProjectEditStateResponse:
+    require_project_access(db, project_id, current_user)
+    edit_state = StudioService(db).get_project_edit_state(
+        project_id,
+        event_weights=resolve_event_weights(current_user.event_weights),
+    )
+    if edit_state is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        ) from exc
-
-    return match
+            detail="Project not found",
+        )
+    if edit_state.video.asset_id is not None:
+        edit_state.video.url = build_signed_media_url(
+            edit_state.video.asset_id,
+            current_user.user_id,
+        )[0]
+    return edit_state

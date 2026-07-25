@@ -3,7 +3,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.domains.auth.access import require_clip_plan_access, require_match_access
+from app.domains.auth.access import (
+    require_clip_plan_access,
+    require_match_access,
+    require_project_access,
+)
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
 from app.domains.agent.schema import (
@@ -97,8 +101,14 @@ def create_agent_clip_plan(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AgentClipPlanResponse:
-    match_id = resolve_agent_match_id(data.match_id, get_settings())
-    require_match_access(db, match_id, current_user)
+    project = require_project_access(db, data.project_id, current_user)
+    if data.match_id is not None:
+        match_id = resolve_agent_match_id(data.match_id, get_settings())
+        if match_id != project.match_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="project_id and match_id do not refer to the same match",
+            )
     service = AgentService(db)
 
     try:

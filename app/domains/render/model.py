@@ -58,6 +58,6 @@ class RenderJob(Base, TimestampMixin):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    clip_plan = relationship("ClipPlan")
+    clip_plan = relationship("ClipPlan", back_populates="render_jobs")
     output_artifact = relationship("Artifact", foreign_keys=[output_artifact_id])
     subtitle_artifact = relationship("Artifact", foreign_keys=[subtitle_artifact_id])
