@@ -26,6 +26,7 @@ router = APIRouter()
     response_model=UploadMatchVideoResponse,
     status_code=status.HTTP_201_CREATED,
     summary="경기 영상 업로드",
+    deprecated=True,
 )
 def upload_match_video(
     file: UploadFile = File(...),
@@ -56,8 +57,6 @@ def upload_match_video(
     try:
         response = service.upload_match_video(
             file=file,
-            project_title=project_title,
-            project_description=project_description,
             owner_id=current_user.user_id,
             home_team=home_team,
             away_team=away_team,

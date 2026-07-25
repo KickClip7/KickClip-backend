@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.session import get_db
+from app.domains.auth.access import require_match_access
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
 from app.domains.session.schema import (
@@ -12,6 +14,7 @@ from app.domains.session.schema import (
     SessionStateResponse,
 )
 from app.domains.session.service import SessionNotFoundError, SessionService
+from app.domains.timeline.dev_context import resolve_agent_match_id
 
 
 router = APIRouter()
@@ -20,13 +23,15 @@ router = APIRouter()
 @router.post(
     "/start",
     response_model=SessionStartResponse,
-    summary="목업 timeline_events 기반 편집 세션 시작",
+    summary="DB timeline_events 기반 편집 세션 시작",
 )
 def start_session(
     data: SessionStartRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> SessionStartResponse:
+    match_id = resolve_agent_match_id(data.match_id, get_settings())
+    require_match_access(db, match_id, current_user)
     try:
         result = SessionService(db).start(data.match_id, current_user.user_id)
     except FileNotFoundError as exc:

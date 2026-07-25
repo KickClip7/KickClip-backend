@@ -85,7 +85,9 @@ class RenderJobService:
             self.db.commit()
 
             clip_plan = self._get_clip_plan_or_raise(render_job.clip_plan_id)
-            source_asset = self._select_source_video_asset(clip_plan.match_id)
+            match_id = clip_plan.project.match_id
+            project_id = clip_plan.project_id
+            source_asset = self._select_source_video_asset(match_id)
             source_video_path = self.storage.resolve_path(source_asset.file_path)
 
             template = self.template_builder.build(
@@ -93,7 +95,8 @@ class RenderJobService:
                 quality=render_job.quality,
             )
             output_dir = self._build_output_dir(
-                match_id=clip_plan.match_id,
+                match_id=match_id,
+                project_id=project_id,
                 render_job_id=render_job.render_job_id,
             )
 
@@ -113,7 +116,8 @@ class RenderJobService:
             self.db.commit()
 
             output_artifact = self.artifact_repository.create(
-                match_id=clip_plan.match_id,
+                match_id=match_id,
+                project_id=project_id,
                 analysis_job_id=None,
                 artifact_type="RENDERED_VIDEO",
                 file_path=self._to_project_relative_path(result.output_path),
@@ -131,7 +135,8 @@ class RenderJobService:
             subtitle_artifact_id = None
             if result.subtitle_path is not None:
                 subtitle_artifact = self.artifact_repository.create(
-                    match_id=clip_plan.match_id,
+                    match_id=match_id,
+                    project_id=project_id,
                     analysis_job_id=None,
                     artifact_type="SUBTITLE_FILE",
                     file_path=self._to_project_relative_path(result.subtitle_path),
@@ -207,8 +212,22 @@ class RenderJobService:
 
         raise ValueError("No source video asset found for render. RAW_VIDEO is required.")
 
-    def _build_output_dir(self, *, match_id: str, render_job_id: str) -> Path:
-        return self.storage.storage_root / "matches" / match_id / "renders" / render_job_id
+    def _build_output_dir(
+        self,
+        *,
+        match_id: str,
+        project_id: str,
+        render_job_id: str,
+    ) -> Path:
+        return (
+            self.storage.storage_root
+            / "matches"
+            / match_id
+            / "projects"
+            / project_id
+            / "renders"
+            / render_job_id
+        )
 
     def _to_project_relative_path(self, path: Path) -> str:
         try:

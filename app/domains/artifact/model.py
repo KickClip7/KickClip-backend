@@ -25,6 +25,12 @@ class Artifact(Base, TimestampMixin):
         nullable=True,
         index=True,
     )
+    project_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
 
     artifact_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
@@ -39,3 +45,4 @@ class Artifact(Base, TimestampMixin):
 
     match = relationship("Match", back_populates="artifacts")
     analysis_job = relationship("AnalysisJob", back_populates="artifacts")
+    project = relationship("Project", back_populates="artifacts")

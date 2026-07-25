@@ -2,6 +2,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.domains.clip_plan.model import ClipPlan, ClipPlanItem
+from app.domains.project.model import Project
 
 
 class ClipPlanRepository:
@@ -11,7 +12,7 @@ class ClipPlanRepository:
     def create_plan(
         self,
         *,
-        match_id: str,
+        project_id: str,
         mode: str,
         summary: str | None,
         target_duration_sec: float | None,
@@ -20,7 +21,7 @@ class ClipPlanRepository:
         options: dict,
     ) -> ClipPlan:
         clip_plan = ClipPlan(
-            match_id=match_id,
+            project_id=project_id,
             mode=mode,
             summary=summary,
             target_duration_sec=target_duration_sec,
@@ -61,16 +62,22 @@ class ClipPlanRepository:
     def get_by_id(self, clip_plan_id: str) -> ClipPlan | None:
         stmt = (
             select(ClipPlan)
-            .options(selectinload(ClipPlan.items))
+            .options(
+                selectinload(ClipPlan.items),
+                selectinload(ClipPlan.project).selectinload(Project.match),
+            )
             .where(ClipPlan.clip_plan_id == clip_plan_id)
         )
         return self.db.scalar(stmt)
 
-    def list_by_match(self, match_id: str) -> list[ClipPlan]:
+    def list_by_project(self, project_id: str) -> list[ClipPlan]:
         stmt = (
             select(ClipPlan)
-            .options(selectinload(ClipPlan.items))
-            .where(ClipPlan.match_id == match_id)
+            .options(
+                selectinload(ClipPlan.items),
+                selectinload(ClipPlan.project).selectinload(Project.match),
+            )
+            .where(ClipPlan.project_id == project_id)
             .order_by(ClipPlan.created_at.desc())
         )
         return list(self.db.scalars(stmt).all())

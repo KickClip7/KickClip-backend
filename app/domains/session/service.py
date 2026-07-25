@@ -7,9 +7,15 @@ from sqlalchemy.orm import Session
 
 from app.ai.agents.clip_tools import get_current_state
 from app.ai.agents.edit_workflow_agent import build_edit_workflow_graph
+from app.core.config import get_settings
 from app.domains.media.repository import MediaAssetRepository
 from app.domains.media.signed_url import build_signed_media_url
-from app.domains.timeline.service import get_timeline_events
+from app.domains.timeline.dev_context import (
+    resolve_agent_match_id,
+    select_dev_timeline_events,
+)
+from app.domains.timeline.repository import TimelineEventRepository
+from app.domains.timeline.schema import TimelineEventRead
 
 _VIDEO_ASSET_TYPE_PRIORITY = ("RAW_VIDEO", "RAW_VIDEO_HALF1", "WEB_PREVIEW_VIDEO")
 
@@ -25,27 +31,50 @@ class SessionNotFoundError(LookupError):
 class SessionService:
     def __init__(self, db: Session):
         self.media_assets = MediaAssetRepository(db)
+        self.timeline_events = TimelineEventRepository(db)
         self.graph = build_edit_workflow_graph()
 
     def start(self, match_id: str, user_id: str) -> dict:
-        data = get_timeline_events(match_id)
-        events = data["events"]
+        settings = get_settings()
+        effective_match_id = resolve_agent_match_id(match_id, settings)
+        rows = select_dev_timeline_events(
+            self.timeline_events.list_by_match(effective_match_id),
+            match_id=effective_match_id,
+            settings=settings,
+        )
+        if not rows:
+            raise FileNotFoundError(
+                "DB에 에이전트용 timeline event가 없습니다: "
+                f"match_id={effective_match_id}. "
+                "scripts/seed_mock_timeline_events.py를 먼저 실행하세요."
+            )
+        events = [
+            TimelineEventRead.model_validate(row).model_dump(
+                mode="json",
+                by_alias=True,
+            )
+            for row in rows
+        ]
 
         session_id = uuid.uuid4().hex
-        _SESSION_MATCH_IDS[session_id] = match_id
+        _SESSION_MATCH_IDS[session_id] = effective_match_id
 
         config = self._config(session_id)
         self.graph.update_state(
             config,
             # current_clips는 "하이라이트 구성본"이므로 챗봇과 대화하기 전엔 빈 상태로 시작해야 한다.
             # "원본 전체 경기" 탭에서 보여줄 전체 후보 목록은 all_events가 따로 담당한다.
-            {"match_id": match_id, "all_events": events, "current_clips": []},
+            {
+                "match_id": effective_match_id,
+                "all_events": events,
+                "current_clips": [],
+            },
         )
 
         return {
             "session_id": session_id,
             "total_events": len(events),
-            "video_url": self._resolve_video_url(match_id, user_id),
+            "video_url": self._resolve_video_url(effective_match_id, user_id),
         }
 
     def chat(self, session_id: str, message: str) -> dict:

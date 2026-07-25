@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class ArtifactCreate(BaseModel):
     match_id: str
+    project_id: str | None = None
     analysis_job_id: str | None = None
     artifact_type: str
     file_path: str
@@ -17,6 +18,7 @@ class ArtifactRead(BaseModel):
 
     artifact_id: str
     match_id: str
+    project_id: str | None
     analysis_job_id: str | None
     artifact_type: str
     file_path: str

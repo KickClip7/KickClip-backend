@@ -16,7 +16,7 @@ class MatchCreateRequest(BaseModel):
 
 
 class MatchCreate(MatchCreateRequest):
-    project_id: str
+    owner_id: str
 
 
 class MatchUpdate(BaseModel):
@@ -38,7 +38,7 @@ class MatchRead(BaseModel):
     )
 
     match_id: str
-    project_id: str
+    owner_id: str
     home_team: str | None
     away_team: str | None
     home_score: int | None
@@ -52,5 +52,10 @@ class MatchRead(BaseModel):
         validation_alias="metadata_",
         serialization_alias="metadata",
     )
+    raw_video_asset_id: str | None = None
+    video_asset_id: str | None = None
+    video_url: str | None = None
+    preview_video_asset_id: str | None = None
+    preview_url: str | None = None
     created_at: datetime
     updated_at: datetime

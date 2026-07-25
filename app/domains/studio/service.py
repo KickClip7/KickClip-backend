@@ -3,6 +3,8 @@ from datetime import datetime
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
+from app.domains.clip_plan.repository import ClipPlanRepository
 from app.domains.match.model import Match
 from app.domains.match.repository import MatchRepository
 from app.domains.media.metadata_extractor import extract_video_metadata
@@ -12,10 +14,13 @@ from app.domains.media.video_compatibility import check_browser_playability
 from app.domains.media.video_transcoder import create_browser_preview_clip
 from app.domains.player.repository import PlayerRepository
 from app.domains.project.repository import ProjectRepository
+from app.domains.render.repository import RenderJobRepository
+from app.domains.render.schema import RenderJobRead
 from app.domains.studio.schema import (
     EditStateFilters,
     EditStateMatch,
     EditStateVideo,
+    ProjectEditStateResponse,
     StudioEditStateResponse,
     UploadedVideoInfo,
     UploadMatchVideoResponse,
@@ -27,6 +32,7 @@ from app.domains.timeline.fusion import (
     build_frontend_event,
     build_frontend_player,
 )
+from app.domains.timeline.dev_context import select_dev_timeline_events
 from app.domains.timeline.repository import TimelineEventRepository
 from app.storage.local_storage import LocalStorage
 from app.storage.workspace import (
@@ -53,14 +59,14 @@ class StudioService:
         self.media_asset_repository = MediaAssetRepository(db)
         self.timeline_event_repository = TimelineEventRepository(db)
         self.player_repository = PlayerRepository(db)
+        self.clip_plan_repository = ClipPlanRepository(db)
+        self.render_job_repository = RenderJobRepository(db)
         self.storage = LocalStorage()
 
     def upload_match_video(
         self,
         file: UploadFile,
-        project_title: str | None = None,
-        project_description: str | None = None,
-        owner_id: str | None = None,
+        owner_id: str,
         home_team: str | None = None,
         away_team: str | None = None,
         home_score: int | None = None,
@@ -74,17 +80,8 @@ class StudioService:
         created_file_paths: list[str] = []
 
         try:
-            title = project_title or self._build_project_title(home_team, away_team)
-
-            project = self.project_repository.create(
-                owner_id=owner_id,
-                title=title,
-                description=project_description,
-                status="UPLOADED",
-            )
-
             match = self.match_repository.create(
-                project_id=project.project_id,
+                owner_id=owner_id,
                 home_team=home_team,
                 away_team=away_team,
                 home_score=home_score,
@@ -182,7 +179,6 @@ class StudioService:
                     preview_status = "PREVIEW_READY"
 
             self.db.commit()
-            self.db.refresh(project)
             self.db.refresh(match)
             self.db.refresh(raw_asset)
 
@@ -190,7 +186,6 @@ class StudioService:
                 self.db.refresh(preview_asset)
 
             return UploadMatchVideoResponse(
-                project_id=project.project_id,
                 match_id=match.match_id,
                 raw_video_asset_id=raw_asset.asset_id,
                 video_asset_id=video_asset.asset_id,
@@ -249,7 +244,11 @@ class StudioService:
             return None
 
         video_asset = self._select_representative_video_asset(match_id)
-        events = self.timeline_event_repository.list_by_match(match_id)
+        events = select_dev_timeline_events(
+            self.timeline_event_repository.list_by_match(match_id),
+            match_id=match_id,
+            settings=get_settings(),
+        )
         players = self.player_repository.list_by_match(match_id)
 
         return StudioEditStateResponse(
@@ -268,6 +267,43 @@ class StudioService:
                 eventTypes=FRONTEND_EVENT_TYPES,
                 backendLabels=BACKEND_EVENT_LABELS,
             ),
+        )
+
+    def get_project_edit_state(
+        self,
+        project_id: str,
+        *,
+        event_weights: dict[str, float] | None = None,
+    ) -> ProjectEditStateResponse | None:
+        project = self.project_repository.get_by_id(project_id)
+        if project is None:
+            return None
+        common = self.get_edit_state(
+            project.match_id,
+            event_weights=event_weights,
+        )
+        if common is None:
+            return None
+        clip_plans = self.clip_plan_repository.list_by_project(project_id)
+        render_jobs: list[RenderJobRead] = []
+        for clip_plan in clip_plans:
+            for render_job in self.render_job_repository.list_by_clip_plan(
+                clip_plan.clip_plan_id
+            ):
+                render_job_read = RenderJobRead.model_validate(render_job)
+                if (
+                    render_job.status == "completed"
+                    and render_job.output_artifact_id is not None
+                ):
+                    render_job_read.download_url = (
+                        f"/api/v1/renders/{render_job.render_job_id}/download"
+                    )
+                render_jobs.append(render_job_read)
+        return ProjectEditStateResponse(
+            **common.model_dump(),
+            project=project,
+            clip_plans=clip_plans,
+            render_jobs=render_jobs,
         )
 
     def _select_representative_video_asset(
@@ -293,7 +329,6 @@ class StudioService:
     def _build_edit_state_match(match: Match) -> EditStateMatch:
         return EditStateMatch(
             match_id=match.match_id,
-            project_id=match.project_id,
             home_team=match.home_team,
             away_team=match.away_team,
             home_score=match.home_score,
@@ -314,16 +349,3 @@ class StudioService:
             width=asset.width,
             height=asset.height,
         )
-
-    @staticmethod
-    def _build_project_title(
-        home_team: str | None,
-        away_team: str | None,
-    ) -> str:
-        if home_team and away_team:
-            return f"{home_team} vs {away_team}"
-        if home_team:
-            return f"{home_team} 경기 영상"
-        if away_team:
-            return f"{away_team} 경기 영상"
-        return "KickClip 업로드 프로젝트"

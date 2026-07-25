@@ -3,6 +3,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.domains.auth.access import require_match_access
 from app.domains.auth.dependencies import get_current_user
@@ -12,6 +13,7 @@ from app.domains.timeline.fusion import (
     build_frontend_event,
     normalize_timeline_category_filter,
 )
+from app.domains.timeline.dev_context import select_dev_timeline_events
 from app.domains.timeline.repository import TimelineEventRepository
 from app.domains.timeline.schema import TimelineEventsResponse
 
@@ -42,10 +44,14 @@ def list_match_timeline_events(
     backend_label = normalize_timeline_category_filter(category)
 
     repository = TimelineEventRepository(db)
-    events = repository.list_by_match(
+    events = select_dev_timeline_events(
+        repository.list_by_match(
+            match_id=match_id,
+            label=backend_label,
+            half=half,
+        ),
         match_id=match_id,
-        label=backend_label,
-        half=half,
+        settings=get_settings(),
     )
     event_weights = resolve_event_weights(current_user.event_weights)
     frontend_events = [

@@ -14,9 +14,9 @@ class ClipPlan(Base, TimestampMixin):
         default=lambda: generate_prefixed_id("clip"),
     )
 
-    match_id: Mapped[str] = mapped_column(
+    project_id: Mapped[str] = mapped_column(
         String(64),
-        ForeignKey("matches.match_id", ondelete="CASCADE"),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -45,12 +45,17 @@ class ClipPlan(Base, TimestampMixin):
         nullable=False,
     )
 
-    match = relationship("Match")
+    project = relationship("Project", back_populates="clip_plans")
     items = relationship(
         "ClipPlanItem",
         back_populates="clip_plan",
         cascade="all, delete-orphan",
         order_by="ClipPlanItem.order_index",
+    )
+    render_jobs = relationship(
+        "RenderJob",
+        back_populates="clip_plan",
+        cascade="all, delete-orphan",
     )
 
 

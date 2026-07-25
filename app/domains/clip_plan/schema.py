@@ -25,7 +25,7 @@ class ClipPlanItemCreate(BaseModel):
 
 
 class ClipPlanCreate(BaseModel):
-    match_id: str
+    project_id: str
     mode: ClipPlanMode = "AGENT_GENERATED"
     summary: str | None = None
     target_duration_sec: float | None = None
@@ -36,7 +36,7 @@ class ClipPlanCreate(BaseModel):
 
 
 class ManualClipPlanCreateRequest(BaseModel):
-    match_id: str
+    project_id: str
     mode: ClipPlanMode = "MANUAL"
     summary: str | None = None
     target_duration_sec: float | None = None
@@ -114,7 +114,7 @@ class ClipPlanRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     clip_plan_id: str
-    match_id: str
+    project_id: str
     mode: str
     summary: str | None
     target_duration_sec: float | None

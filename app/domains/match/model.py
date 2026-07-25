@@ -15,9 +15,9 @@ class Match(Base, TimestampMixin):
         primary_key=True,
         default=lambda: generate_prefixed_id("match"),
     )
-    project_id: Mapped[str] = mapped_column(
+    owner_id: Mapped[str] = mapped_column(
         String(64),
-        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        ForeignKey("users.user_id", ondelete="RESTRICT"),
         nullable=False,
         index=True,
     )
@@ -39,7 +39,12 @@ class Match(Base, TimestampMixin):
         nullable=False,
     )
 
-    project = relationship("Project", back_populates="matches")
+    owner = relationship("User")
+    projects = relationship(
+        "Project",
+        back_populates="match",
+        cascade="all, delete-orphan",
+    )
 
     media_assets = relationship(
         "MediaAsset",

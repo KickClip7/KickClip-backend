@@ -9,7 +9,8 @@ from app.domains.clip_plan.schema import (
     ExportOptionsUpdateRequest,
     ManualClipPlanCreateRequest,
 )
-from app.domains.match.repository import MatchRepository
+from app.domains.project.model import Project
+from app.domains.project.repository import ProjectRepository
 from app.domains.timeline.model import TimelineEvent
 from app.domains.timeline.repository import TimelineEventRepository
 
@@ -20,17 +21,17 @@ class ClipPlanService:
     def __init__(self, db: Session):
         self.db = db
         self.repository = ClipPlanRepository(db)
-        self.match_repository = MatchRepository(db)
+        self.project_repository = ProjectRepository(db)
         self.timeline_event_repository = TimelineEventRepository(db)
 
     def create_clip_plan(self, data: ClipPlanCreate) -> ClipPlan:
         """Agent 등 내부 코드에서 재사용 가능한 ClipPlan 생성 메서드."""
-        self._ensure_match_exists(data.match_id)
-        validated_items = self._validate_items(data.match_id, data.items)
+        project = self._get_project(data.project_id)
+        validated_items = self._validate_items(project.match_id, data.items)
         actual_duration_sec = self._sum_item_duration(data.items)
 
         clip_plan = self.repository.create_plan(
-            match_id=data.match_id,
+            project_id=data.project_id,
             mode=data.mode,
             summary=data.summary,
             target_duration_sec=data.target_duration_sec,
@@ -56,13 +57,13 @@ class ClipPlanService:
         *,
         created_by: str = "user",
     ) -> ClipPlan:
-        self._ensure_match_exists(data.match_id)
-        validated_items = self._validate_items(data.match_id, data.items)
+        project = self._get_project(data.project_id)
+        validated_items = self._validate_items(project.match_id, data.items)
         actual_duration_sec = self._sum_item_duration(data.items)
 
         try:
             clip_plan = self.repository.create_plan(
-                match_id=data.match_id,
+                project_id=data.project_id,
                 mode=data.mode,
                 summary=data.summary,
                 target_duration_sec=data.target_duration_sec,
@@ -106,7 +107,10 @@ class ClipPlanService:
         try:
             if "items" in fields_set:
                 items = data.items or []
-                validated_items = self._validate_items(clip_plan.match_id, items)
+                validated_items = self._validate_items(
+                    clip_plan.project.match_id,
+                    items,
+                )
                 self.repository.delete_items_by_plan(clip_plan.clip_plan_id)
                 self._create_items(
                     clip_plan_id=clip_plan.clip_plan_id,
@@ -178,9 +182,11 @@ class ClipPlanService:
 
         return self.repository.get_by_id(clip_plan_id)
 
-    def _ensure_match_exists(self, match_id: str) -> None:
-        if self.match_repository.get_by_id(match_id) is None:
-            raise ValueError("Match not found")
+    def _get_project(self, project_id: str) -> Project:
+        project = self.project_repository.get_by_id(project_id)
+        if project is None:
+            raise ValueError("Project not found")
+        return project
 
     def _validate_items(
         self,
