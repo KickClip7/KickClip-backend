@@ -3,11 +3,13 @@ from __future__ import annotations
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.domains.analysis.model import AnalysisJob
 from app.domains.analysis.repository import AnalysisJobRepository
 from app.domains.auth.model import User
 from app.domains.clip_plan.model import ClipPlan
 from app.domains.clip_plan.repository import ClipPlanRepository
+from app.domains.match.mock import is_mock_match
 from app.domains.match.model import Match
 from app.domains.match.repository import MatchRepository
 from app.domains.media.model import MediaAsset
@@ -33,6 +35,19 @@ def require_match_access(db: Session, match_id: str, user: User) -> Match:
     match = MatchRepository(db).get_by_id(match_id)
     if match is None:
         _not_found("Match")
+
+    settings = get_settings()
+    shared_mock_access = (
+        settings.ENV in {"local", "dev", "test"}
+        and settings.USE_MOCK_DATA
+        and settings.MOCK_SHARED_ACCESS_ENABLED
+        and is_mock_match(match)
+    )
+    if shared_mock_access:
+        # 인증은 그대로 유지하되, 명시적으로 시드된 목업 Match만
+        # 로컬/개발 환경의 모든 로그인 사용자에게 공유한다.
+        return match
+
     require_project_access(db, match.project_id, user)
     return match
 

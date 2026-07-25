@@ -60,7 +60,10 @@ class Settings(BaseSettings):
     # Storage
     # -------------------------------------------------------------------------
     STORAGE_ROOT: Path = Path("storage")
-    USE_MOCK_DATA: bool = True
+    # 목업 데이터 사용은 반드시 .env에서 명시적으로 켠다.
+    # 기본값을 False로 두어 실제 데이터 운영 경로가 기본 동작이 되도록 한다.
+    USE_MOCK_DATA: bool = False
+    MOCK_SHARED_ACCESS_ENABLED: bool = False
     MOCK_TIMELINE_SOURCE_MATCH_ID: str = "korjpn_2026"
     AGENT_DEV_MATCH_ID: str = ""
 
@@ -173,6 +176,22 @@ class Settings(BaseSettings):
             raise ValueError(
                 "운영 환경에서는 DEVELOPER_MODE_ENABLED를 "
                 "활성화할 수 없습니다."
+            )
+
+        if self.USE_MOCK_DATA:
+            raise ValueError(
+                "운영 환경에서는 USE_MOCK_DATA를 활성화할 수 없습니다."
+            )
+
+        if self.MOCK_SHARED_ACCESS_ENABLED:
+            raise ValueError(
+                "운영 환경에서는 MOCK_SHARED_ACCESS_ENABLED를 "
+                "활성화할 수 없습니다."
+            )
+
+        if self.AGENT_DEV_MATCH_ID.strip():
+            raise ValueError(
+                "운영 환경에서는 AGENT_DEV_MATCH_ID를 설정할 수 없습니다."
             )
 
         insecure_secret_keys = {

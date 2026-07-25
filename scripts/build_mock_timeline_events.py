@@ -3,7 +3,11 @@
 raw JSON 파일은 팀원마다 로컬 경로가 다르므로 --input은 필수 인자다(하드코딩된 기본 경로 없음).
 
 사용 예시:
+    # JSON fixture만 생성
     python scripts/build_mock_timeline_events.py --input path/to/events.json --match-id korjpn_2026
+
+    # JSON fixture 생성 + Project/Match/TimelineEvent DB 시드
+    python scripts/build_mock_timeline_events.py --input path/to/events.json --match-id korjpn_2026 --seed-db
 """
 
 from __future__ import annotations
@@ -50,6 +54,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--match-id", type=str, default=DEFAULT_MATCH_ID)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--seed-db",
+        action="store_true",
+        help=(
+            "생성한 fixture를 DB의 mock Project/Match/TimelineEvent로 함께 시드한다. "
+            "동일 match_id의 기존 mock event만 안전하게 교체한다."
+        ),
+    )
+    parser.add_argument(
+        "--owner-user-id",
+        default=None,
+        help=(
+            "선택 사항. mock project owner로 저장할 user_id. "
+            "MOCK_SHARED_ACCESS_ENABLED=true이면 생략해도 모든 로그인 팀원이 접근할 수 있다."
+        ),
+    )
+    parser.add_argument("--project-title", default="KickClip 한일전 공유 목업")
+    parser.add_argument("--home-team", default="대한민국")
+    parser.add_argument("--away-team", default="일본")
+    parser.add_argument("--home-score", type=int, default=2)
+    parser.add_argument("--away-score", type=int, default=0)
     return parser.parse_args()
 
 
@@ -137,8 +162,51 @@ def print_summary(events: list[dict]) -> None:
         )
 
 
+def seed_database(
+    *,
+    payload: dict,
+    source_path: Path,
+    args: argparse.Namespace,
+) -> None:
+    from app.core.config import get_settings
+    from app.db.session import SessionLocal
+    from app.domains.timeline.mock_seed import seed_mock_timeline_fixture
+
+    settings = get_settings()
+    if settings.is_production:
+        raise RuntimeError("운영 환경에서는 목업 DB 시드를 실행할 수 없습니다.")
+    if not settings.USE_MOCK_DATA:
+        raise RuntimeError(
+            ".env에서 USE_MOCK_DATA=true를 설정한 뒤 --seed-db를 실행하세요."
+        )
+
+    with SessionLocal() as db:
+        result = seed_mock_timeline_fixture(
+            db,
+            payload,
+            target_match_id=args.match_id,
+            source_path=source_path,
+            project_title=args.project_title,
+            owner_id=args.owner_user_id,
+            home_team=args.home_team,
+            away_team=args.away_team,
+            home_score=args.home_score,
+            away_score=args.away_score,
+        )
+
+    print("DB 시드 완료:")
+    print(f"  - project_id: {result.project_id}")
+    print(f"  - match_id: {result.match_id}")
+    print(f"  - owner_id: {result.owner_id}")
+    print(f"  - event_count: {result.event_count}")
+    print(f"  - replaced_event_count: {result.replaced_event_count}")
+
+
 def main() -> None:
     args = parse_args()
+
+    if not args.input.is_file():
+        raise FileNotFoundError(f"원본 action spotting JSON이 없습니다: {args.input}")
 
     raw_payload = json.loads(args.input.read_text(encoding="utf-8"))
     events = build_events(raw_payload["events"], args.match_id)
@@ -162,6 +230,13 @@ def main() -> None:
 
     print(f"저장 위치: {output_path}")
     print_summary(events)
+
+    if args.seed_db:
+        seed_database(
+            payload=response.model_dump(mode="json", by_alias=True),
+            source_path=output_path,
+            args=args,
+        )
 
 
 if __name__ == "__main__":

@@ -46,7 +46,23 @@ temp/
 *.sqlite3
 
 # Generated storage, uploads, renders, and AI artifacts
-storage/
+storage/*
+
+# 디렉터리만 열기
+!storage/matches/
+!storage/matches/korjpn_2026/
+
+# matches 아래는 다시 전부 무시
+storage/matches/*
+
+# korjpn_2026만 다시 열기
+!storage/matches/korjpn_2026/
+
+# korjpn_2026 아래는 다시 전부 무시
+storage/matches/korjpn_2026/*
+
+# 이 파일만 허용
+!storage/matches/korjpn_2026/timeline_events.json
 !app/storage/
 !app/storage/*.py
 app/storage/workspaces/

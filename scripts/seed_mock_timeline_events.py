@@ -1,11 +1,15 @@
-"""고정 개발용 경기에 timeline fixture를 DB 이벤트로 시드한다.
+"""Shared mock timeline fixture를 로컬 개발 DB에 시드한다.
 
-기본 입력은 storage/matches/{MOCK_TIMELINE_SOURCE_MATCH_ID}/timeline_events.json이고,
-대상 경기는 --match-id 또는 AGENT_DEV_MATCH_ID로 지정한다.
+팀 저장소에는 작은 fixture 파일만 공유한다.
+
+    storage/matches/korjpn_2026/timeline_events.json
+
+각 팀원은 DB 마이그레이션과 회원가입을 마친 뒤 이 스크립트를 한 번 실행한다.
+스크립트는 deterministic Project/Match를 만들고, 이전에 시드된 mock event만 교체한다.
+실제 Match나 실제 timeline event는 덮어쓰지 않는다.
 
 사용 예시:
-    python scripts/seed_mock_timeline_events.py
-    python scripts/seed_mock_timeline_events.py --match-id match_abc123
+    python scripts/seed_mock_timeline_events.py --match-id korjpn_2026
 """
 
 from __future__ import annotations
@@ -15,97 +19,85 @@ import json
 import sys
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import get_settings
 from app.core.paths import get_storage_root
 from app.db.session import SessionLocal
-from app.domains.match.repository import MatchRepository
-from app.domains.timeline.mock_seed import (
-    MOCK_SEED_METADATA_KEY,
-    build_mock_timeline_rows,
-)
-from app.domains.timeline.model import TimelineEvent
-from app.domains.timeline.repository import TimelineEventRepository
+from app.domains.timeline.mock_seed import seed_mock_timeline_fixture
 from app.storage.workspace import get_match_timeline_events_path
 
 
-def parse_args() -> argparse.Namespace:
-    settings = get_settings()
-    default_input = (
-        get_storage_root()
-        / get_match_timeline_events_path(settings.MOCK_TIMELINE_SOURCE_MATCH_ID)
-    )
+DEFAULT_MATCH_ID = "korjpn_2026"
 
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--match-id",
-        default=settings.AGENT_DEV_MATCH_ID or None,
-        help="시드 대상 경기 ID. 생략하면 AGENT_DEV_MATCH_ID를 사용합니다.",
-    )
+    parser.add_argument("--match-id", default=DEFAULT_MATCH_ID)
     parser.add_argument(
         "--input",
         type=Path,
-        default=default_input,
-        help="timeline fixture JSON 경로",
+        default=None,
+        help=(
+            "Timeline fixture JSON 경로. 생략하면 "
+            "storage/matches/{match_id}/timeline_events.json을 사용한다."
+        ),
     )
+    parser.add_argument("--owner-user-id", default=None)
+    parser.add_argument("--project-title", default="KickClip 한일전 공유 목업")
+    parser.add_argument("--home-team", default="대한민국")
+    parser.add_argument("--away-team", default="일본")
+    parser.add_argument("--home-score", type=int, default=2)
+    parser.add_argument("--away-score", type=int, default=0)
     return parser.parse_args()
-
-
-def is_mock_seed_event(event: TimelineEvent) -> bool:
-    return bool((event.metadata_ or {}).get(MOCK_SEED_METADATA_KEY))
 
 
 def main() -> None:
     args = parse_args()
-    if not args.match_id:
-        raise SystemExit(
-            "--match-id 또는 .env의 AGENT_DEV_MATCH_ID를 지정해야 합니다."
-        )
-    if not args.input.is_file():
-        raise SystemExit(f"timeline fixture를 찾을 수 없습니다: {args.input}")
+    settings = get_settings()
 
-    payload = json.loads(args.input.read_text(encoding="utf-8"))
-    rows = build_mock_timeline_rows(
-        payload,
-        target_match_id=args.match_id,
-        source_path=args.input,
+    if settings.is_production:
+        raise RuntimeError("운영 환경에서는 목업 DB 시드를 실행할 수 없습니다.")
+    if not settings.USE_MOCK_DATA:
+        raise RuntimeError(
+            ".env에서 USE_MOCK_DATA=true를 설정한 뒤 다시 실행하세요."
+        )
+
+    input_path = args.input or (
+        get_storage_root() / get_match_timeline_events_path(args.match_id)
     )
+    if not input_path.is_file():
+        raise FileNotFoundError(f"목업 timeline fixture가 없습니다: {input_path}")
+
+    payload = json.loads(input_path.read_text(encoding="utf-8"))
 
     with SessionLocal() as db:
-        match = MatchRepository(db).get_by_id(args.match_id)
-        if match is None:
-            raise SystemExit(f"DB에서 대상 경기를 찾을 수 없습니다: {args.match_id}")
-
-        repository = TimelineEventRepository(db)
-        existing_events = repository.list_by_match(args.match_id)
-        old_mock_events = [
-            event for event in existing_events if is_mock_seed_event(event)
-        ]
-
-        try:
-            for event in old_mock_events:
-                db.delete(event)
-            db.flush()
-
-            repository.bulk_create(rows)
-            db.commit()
-        except Exception:
-            db.rollback()
-            raise
-
-    print(f"고정 개발 경기: {args.match_id}")
-    print(f"목업 원본: {args.input}")
-    print(f"기존 목업 이벤트 교체: {len(old_mock_events)}개")
-    print(f"DB 시드 완료: {len(rows)}개")
-    max_event_end_sec = max((row["end_sec"] for row in rows), default=0.0)
-    if match.duration_sec and max_event_end_sec > match.duration_sec:
-        print(
-            "경고: 목업 이벤트의 마지막 시각"
-            f"({max_event_end_sec:.3f}초)이 영상 길이"
-            f"({match.duration_sec:.3f}초)를 초과합니다. "
-            "에이전트 로직 개발에는 사용할 수 있지만 재생/렌더링에는 맞지 않습니다."
+        result = seed_mock_timeline_fixture(
+            db,
+            payload,
+            target_match_id=args.match_id,
+            source_path=input_path,
+            project_title=args.project_title,
+            owner_id=args.owner_user_id,
+            home_team=args.home_team,
+            away_team=args.away_team,
+            home_score=args.home_score,
+            away_score=args.away_score,
         )
+
+    print("KickClip mock timeline DB 시드 완료")
+    print(f"Fixture     : {input_path}")
+    print(f"Project ID  : {result.project_id}")
+    print(f"Match ID    : {result.match_id}")
+    print(f"Owner ID    : {result.owner_id}")
+    print(f"Events      : {result.event_count}")
+    print(f"Replaced    : {result.replaced_event_count}")
+    print()
+    print("프론트 활성 match_id도 동일하게 설정하세요:")
+    print(f"  {result.match_id}")
 
 
 if __name__ == "__main__":
