@@ -1,0 +1,29 @@
+champion_identifier: sampling_v1_loss_v2_ms_stem_v1
+checkpoint_sha256: c3aa72c3d5be98fb8c6104818da69d2e8ac9a993696830fa1a0588cd58ffaee1
+class_order:
+  - goal
+  - shot
+  - foul
+  - card
+  - free_kick
+  - corner
+predictor:
+  feature_fps: 2.0
+  feature_dim: 512
+  window_size: 128
+  stride_size: 32
+  batch_size: 16
+  offset_merge: weighted
+postprocess:
+  threshold: 0.20
+  class_thresholds: null
+  local_peak_window_sec: 3.0
+  nms_window_sec: 10.0
+  apply_offset: true
+  class_aware_nms: true
+  max_candidates_per_class_per_half: 100
+  max_candidates_per_match: 80
+  min_timestamp_sec: 0.0
+provenance:
+  source: storage/eval/validation/transformer_sampling_v1_loss_v2_ms_stem_v1_eval_t020.json
+  note: Exact predictor and postprocess configuration stored with the Champion validation evaluation.

@@ -1,0 +1,64 @@
+model:
+  name: "SoccerHighlightFormer"
+  type: "soccer_highlight_former"
+
+  input_dim: 512
+  num_classes: 6
+
+# Temporal CNN baseline 설정
+temporal_cnn:
+  input_dim: 512
+  hidden_dim: 256
+  num_classes: 6
+  num_layers: 4
+  kernel_size: 3
+  dropout: 0.1
+
+  use_offset_head: true
+  use_highlight_score_head: false
+
+# Transformer 기반 SoccerHighlightFormer 설정
+soccer_highlight_former:
+  input_dim: 512
+  d_model: 256
+  num_classes: 6
+
+  projection:
+    use_layer_norm: true
+    dropout: 0.1
+
+  temporal_stem:
+    enabled: true
+
+    # 29회차 핵심 변경
+    type: "multi_scale"
+
+    # 기존 conv stem 호환용 값
+    kernel_size: 3
+
+    # multi-scale stem 공통 설정
+    num_layers: 2
+    dropout: 0.1
+
+    # multi-scale stem 전용 설정
+    multi_scale_kernel_sizes: [3, 5, 9]
+    multi_scale_use_depthwise: true
+    multi_scale_use_residual: true
+    multi_scale_activation: "gelu"
+
+  transformer:
+    num_layers: 4
+    num_heads: 8
+    dim_feedforward: 1024
+    dropout: 0.1
+    activation: "gelu"
+    batch_first: true
+
+  positional_encoding:
+    type: "sinusoidal"
+    max_len: 4096
+
+  heads:
+    use_heatmap_head: true
+    use_offset_head: true
+    use_highlight_score_head: false

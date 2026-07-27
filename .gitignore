@@ -139,6 +139,15 @@ models/
 !configs/models/action_spotting/best_soccer_model/
 !configs/models/action_spotting/best_soccer_model/**
 
+# Exact runtime bundle for the current Action Spotting Champion.
+!storage/models/
+storage/models/*
+!storage/models/action_spotting/
+storage/models/action_spotting/*
+!storage/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/
+!storage/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/**
+!storage/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/transformer_best.pt
+
 
 # =============================================================================
 # Video, audio, and media files

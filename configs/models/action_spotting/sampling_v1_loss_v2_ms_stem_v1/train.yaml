@@ -1,0 +1,119 @@
+experiment:
+  name: "sampling_v1_loss_v2_ms_stem_v1"
+  description: >
+    29회차 모델 구조 개선 실험.
+    sampling_v1 + loss_v2 설정은 유지하고,
+    SoccerHighlightFormer의 temporal stem만 multi-scale convolution stem으로 교체한다.
+    목표는 free_kick/shot/foul처럼 전후 문맥이 중요한 이벤트의 AP와 Recall@Top20을 개선하는 것이다.
+
+train:
+  seed: 42
+  device: "auto"
+  epochs: 30
+  batch_size: 32
+  num_workers: 0
+  log_interval: 20
+  validation_interval: 1
+  gradient_clip_norm: 1.0
+
+  mixed_precision:
+    enabled: false
+
+optimizer:
+  name: "adamw"
+  lr: 0.0003
+  weight_decay: 0.01
+
+scheduler:
+  name: "cosine"
+  warmup_epochs: 3
+  min_lr: 0.000001
+
+loss:
+  heatmap_loss: "focal_bce"
+  offset_loss: "smooth_l1"
+
+  heatmap_loss_weight: 1.0
+  offset_loss_weight: 0.3
+
+  focal:
+    gamma: 2.0
+    alpha: "auto"
+
+  positive_label_smoothing: 0.0
+
+  class_weight:
+    enabled: true
+    formula: "1 / log(1.2 + count_c)"
+    normalize: true
+    override_mode: "multiply"
+    min: 0.25
+    max: 4.0
+
+    override:
+      goal: 1.00
+      shot: 1.00
+      foul: 0.95
+      card: 1.00
+      free_kick: 1.15
+      corner: 1.00
+
+dataset:
+  dataset_index_path: "./storage/cache/dataset_index_linux.json"
+  
+  feature_fps: 2.0
+  window_sec: 64
+  window_size: 128
+  stride_sec: 16
+  stride_size: 32
+
+  heatmap_sigma_sec: 2.0
+  positive_radius_sec: 4.0
+
+  sampling:
+    positive_event_centered_ratio: 0.70
+    hard_negative_ratio: 0.20
+    random_negative_ratio: 0.10
+
+    hard_negative_context_sec: 45.0
+    max_negative_only_samples: 256
+
+    class_positive_multipliers:
+      goal: 2
+      shot: 3
+      foul: 1
+      card: 6
+      free_kick: 4
+      corner: 3
+
+    positive_jitter_sec_by_class:
+      goal: [-8, -4, 4, 8]
+      shot: [-10, -5, 5, 10]
+      foul: [-6, 6]
+      card: [-12, -6, 6, 12]
+      free_kick: [-10, -5, 5, 10]
+      corner: [-10, -5, 5, 10]
+
+    hard_negative_class_multipliers:
+      goal: 2
+      shot: 3
+      foul: 3
+      card: 2
+      free_kick: 3
+      corner: 2
+
+split:
+  train_ratio: 0.8
+  valid_ratio: 0.1
+  test_ratio: 0.1
+  split_unit: "match"
+
+checkpoint:
+  dir: "./storage/checkpoints_sampling_v1_loss_v2_ms_stem_v1"
+  save_last: true
+  save_best: true
+  monitor: "valid_loss"
+  mode: "min"
+
+output:
+  log_dir: "./storage/logs_sampling_v1_loss_v2_ms_stem_v1"

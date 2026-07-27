@@ -17,12 +17,12 @@ from app.ai.tasks.highlight_spotting.adapters.soccer_highlight_former import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Inspect KickClip highlight spotting champion artifacts before real adapter implementation."
+        description="Inspect the checkpoint-paired Action Spotting Champion runtime."
     )
     parser.add_argument(
         "--model-dir",
         default=DEFAULT_CHAMPION_MODEL_DIR,
-        help="Champion model artifact directory. Default: storage/models/highlight_spotting/champion",
+        help=f"Champion model artifact directory. Default: {DEFAULT_CHAMPION_MODEL_DIR}",
     )
     parser.add_argument(
         "--out",

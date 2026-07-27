@@ -11,13 +11,15 @@ models:
 
   highlight_spotting:
     champion:
-      id: "best_soccer_model_sha256_195ae99a"
-      model_name: "BestSoccerActionSpotter"
-      model_version: "epoch-6"
-      description: "4-class SoccerNet PCA512 window-attention Transformer action spotting champion."
-      checkpoint_path: "storage/models/highlight_spotting/champion/best.pt"
-      config_path: "configs/models/action_spotting/best_soccer_model/model.yaml"
-      label_map_path: "configs/models/action_spotting/best_soccer_model/label_map.json"
+      id: "sampling_v1_loss_v2_ms_stem_v1"
+      model_name: "SoccerHighlightFormer"
+      model_version: "sampling_v1_loss_v2_ms_stem_v1"
+      description: "6-class SoccerNet PCA512 Champion with MultiScaleTemporalStem and heatmap/offset heads."
+      checkpoint_path: "storage/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/transformer_best.pt"
+      config_path: "configs/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/model.yaml"
+      train_config_path: "configs/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/train.yaml"
+      inference_policy_path: "configs/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/inference_policy.yaml"
+      expected_checkpoint_sha256: "c3aa72c3d5be98fb8c6104818da69d2e8ac9a993696830fa1a0588cd58ffaee1"
       postprocess_config_path: "configs/highlight_spotting.yaml"
       enabled: true
 

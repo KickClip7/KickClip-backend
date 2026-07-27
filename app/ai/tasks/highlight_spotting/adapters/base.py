@@ -12,24 +12,32 @@ class ChampionArtifactPaths:
     model_dir: Path
     checkpoint_path: Path
     model_config_path: Path
-    inference_config_path: Path
-    data_config_path: Path
+    train_config_path: Path
+    config_snapshot_path: Path
+    inference_policy_path: Path
     manifest_path: Path
-    label_map_path: Path | None = None
-    threshold_sweep_path: Path | None = None
     valid_eval_path: Path | None = None
     train_history_path: Path | None = None
 
-    def to_metadata(self) -> dict[str, Any]:
+    def to_metadata(self, *, include_paths: bool = False) -> dict[str, Any]:
+        if not include_paths:
+            return {
+                "model_dir_exists": self.model_dir.is_dir(),
+                "checkpoint_exists": self.checkpoint_path.is_file(),
+                "model_config_exists": self.model_config_path.is_file(),
+                "train_config_exists": self.train_config_path.is_file(),
+                "config_snapshot_exists": self.config_snapshot_path.is_file(),
+                "inference_policy_exists": self.inference_policy_path.is_file(),
+                "manifest_exists": self.manifest_path.is_file(),
+            }
         return {
             "model_dir": self.model_dir.as_posix(),
             "checkpoint_path": self.checkpoint_path.as_posix(),
             "model_config_path": self.model_config_path.as_posix(),
-            "inference_config_path": self.inference_config_path.as_posix(),
-            "data_config_path": self.data_config_path.as_posix(),
+            "train_config_path": self.train_config_path.as_posix(),
+            "config_snapshot_path": self.config_snapshot_path.as_posix(),
+            "inference_policy_path": self.inference_policy_path.as_posix(),
             "manifest_path": self.manifest_path.as_posix(),
-            "label_map_path": self.label_map_path.as_posix() if self.label_map_path else None,
-            "threshold_sweep_path": self.threshold_sweep_path.as_posix() if self.threshold_sweep_path else None,
             "valid_eval_path": self.valid_eval_path.as_posix() if self.valid_eval_path else None,
             "train_history_path": self.train_history_path.as_posix() if self.train_history_path else None,
         }
@@ -50,12 +58,19 @@ class ChampionModelSpec:
     window_sec: float | None
     stride_size: int | None
     stride_sec: float | None
-    thresholds: dict[str, float] = field(default_factory=dict)
-    nms_windows: dict[str, float] = field(default_factory=dict)
-    class_priority: dict[str, float] = field(default_factory=dict)
+    threshold: float | None = None
+    local_peak_window_sec: float | None = None
+    nms_window_sec: float | None = None
+    apply_offset: bool | None = None
+    class_aware_nms: bool | None = None
+    max_candidates_per_class_per_half: int | None = None
+    max_candidates_per_match: int | None = None
+    offset_merge: str | None = None
+    champion_identifier: str | None = None
+    checkpoint_sha256: str | None = None
     raw_model_config: dict[str, Any] = field(default_factory=dict)
-    raw_inference_config: dict[str, Any] = field(default_factory=dict)
-    raw_data_config: dict[str, Any] = field(default_factory=dict)
+    raw_inference_policy: dict[str, Any] = field(default_factory=dict)
+    raw_config_snapshot: dict[str, Any] = field(default_factory=dict)
     raw_manifest: dict[str, Any] = field(default_factory=dict)
     raw_label_map: dict[str, Any] = field(default_factory=dict)
 
@@ -72,9 +87,16 @@ class ChampionModelSpec:
             "window_sec": self.window_sec,
             "stride_size": self.stride_size,
             "stride_sec": self.stride_sec,
-            "thresholds": self.thresholds,
-            "nms_windows": self.nms_windows,
-            "class_priority": self.class_priority,
+            "threshold": self.threshold,
+            "local_peak_window_sec": self.local_peak_window_sec,
+            "nms_window_sec": self.nms_window_sec,
+            "apply_offset": self.apply_offset,
+            "class_aware_nms": self.class_aware_nms,
+            "max_candidates_per_class_per_half": self.max_candidates_per_class_per_half,
+            "max_candidates_per_match": self.max_candidates_per_match,
+            "offset_merge": self.offset_merge,
+            "champion_identifier": self.champion_identifier,
+            "checkpoint_sha256": self.checkpoint_sha256,
         }
 
 
@@ -110,7 +132,7 @@ class ChampionCheckpointSummary:
 
 @dataclass(frozen=True)
 class ChampionAdapterPreflightReport:
-    """Readiness report before implementing real torch inference."""
+    """Path-redacted readiness report for Champion torch inference."""
 
     ready_for_real_adapter: bool
     reasons: list[str]
@@ -155,7 +177,7 @@ class HighlightRawPrediction:
 
 
 class HighlightModelAdapter(Protocol):
-    """Interface expected from future real highlight model adapters."""
+    """Interface implemented by Action Spotting model adapters."""
 
     def preflight(self) -> ChampionAdapterPreflightReport:
         ...

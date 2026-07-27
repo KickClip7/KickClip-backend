@@ -1,10 +1,8 @@
 SUPPORTED_EVENT_LABELS = [
     "goal",
     "shot",
-    "penalty",
     "foul",
     "card",
-    "substitution",
     "free_kick",
     "corner",
 ]
@@ -14,57 +12,42 @@ LABEL_TO_DISPLAY = {
     "goal": {
         "tag": "GOAL",
         "title": "GOAL",
-        "description": "득점으로 이어진 핵심 장면입니다.",
+        "description": "A goal event detected by Action Spotting.",
     },
     "shot": {
         "tag": "SHOT",
         "title": "SHOT",
-        "description": "슈팅이 발생한 공격 장면입니다.",
-    },
-    "penalty": {
-        "tag": "PENALTY",
-        "title": "PENALTY",
-        "description": "페널티 상황이 발생한 주요 장면입니다.",
+        "description": "A shot event detected by Action Spotting.",
     },
     "foul": {
         "tag": "FOUL",
         "title": "FOUL",
-        "description": "파울이 발생한 경기 흐름 전환 장면입니다.",
+        "description": "A foul event detected by Action Spotting.",
     },
     "card": {
         "tag": "CARD",
         "title": "CARD",
-        "description": "카드가 나온 주요 판정 장면입니다.",
-    },
-    "substitution": {
-        "tag": "SUBSTITUTION",
-        "title": "SUBSTITUTION",
-        "description": "선수 교체가 발생한 경기 전환 장면입니다.",
+        "description": "A card event detected by Action Spotting.",
     },
     "free_kick": {
         "tag": "FREE KICK",
         "title": "FREE KICK",
-        "description": "프리킥으로 이어진 세트피스 장면입니다.",
+        "description": "A free-kick event detected by Action Spotting.",
     },
     "corner": {
         "tag": "CORNER",
         "title": "CORNER",
-        "description": "코너킥으로 이어진 세트피스 장면입니다.",
+        "description": "A corner event detected by Action Spotting.",
     },
 }
 
 
 def normalize_label(label: str) -> str:
     normalized = label.strip().lower().replace("-", "_").replace(" ", "_")
-
     if normalized == "freekick":
         normalized = "free_kick"
     if normalized in {"corner_kick", "cornerkick"}:
         normalized = "corner"
-
-    if not normalized:
-        return "shot"
-
     return normalized
 
 
@@ -75,6 +58,6 @@ def get_display_info(label: str) -> dict:
         {
             "tag": normalized.upper().replace("_", " "),
             "title": normalized.upper().replace("_", " "),
-            "description": "AI가 하이라이트 후보로 감지한 장면입니다.",
+            "description": "An event detected by the configured model.",
         },
     )

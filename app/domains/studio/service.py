@@ -122,6 +122,7 @@ class StudioService:
                 width=raw_metadata.get("width"),
                 height=raw_metadata.get("height"),
                 size_bytes=raw_metadata.get("size_bytes") or stored_raw.size_bytes,
+                sha256=stored_raw.sha256,
             )
 
             # 4. 브라우저 재생 가능 여부 판단

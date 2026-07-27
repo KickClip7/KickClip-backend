@@ -13,7 +13,7 @@ class ActionSpottingJobRequest(BaseModel):
     feature_extraction_mode: Literal["auto", "force", "skip"] = "auto"
     device: str = "auto"
     real_adapter_batch_size: int | None = Field(default=None, ge=1, le=1024)
-    real_adapter_max_candidates: int | None = Field(default=None, ge=1, le=1000)
+    real_adapter_max_candidates: Literal[80] | None = None
     halftime_split_sec: float | None = Field(default=None, gt=0)
     options: dict[str, Any] = Field(default_factory=dict)
 
@@ -26,6 +26,8 @@ class ActionSpottingJobRequest(BaseModel):
             "allow_fallback_when_missing": False,
             "feature_extraction_allow_continue_on_failure": False,
             "device": self.device,
+            "action_spotting_state": "ACTION_SPOTTING_QUEUED",
+            "action_spotting_state_history": ["ACTION_SPOTTING_QUEUED"],
         }
         if self.real_adapter_batch_size is not None:
             values["real_adapter_batch_size"] = self.real_adapter_batch_size
@@ -54,6 +56,10 @@ class ActionSpottingJobResponse(BaseModel):
     steps: list[AnalysisJobStepCompactRead]
     status_url: str
     events_url: str
+    workflow_status: str
+    workflow_state_history: list[str] = Field(default_factory=list)
+    error: dict[str, Any] | None = None
+    cache_reused: bool = False
 
 
 class ActionSpottingEventsResponse(BaseModel):
@@ -61,6 +67,9 @@ class ActionSpottingEventsResponse(BaseModel):
     status: str
     count: int
     events: list[TimelineEventRead] = Field(default_factory=list)
+    workflow_status: str
+    workflow_state_history: list[str] = Field(default_factory=list)
+    error: dict[str, Any] | None = None
 
 
 class ActionSpottingModelResponse(BaseModel):
@@ -69,7 +78,10 @@ class ActionSpottingModelResponse(BaseModel):
     model_name: str
     model_version: str | None
     classes: list[str]
-    checkpoint_path: str | None
     checkpoint_sha256: str | None
     device_requested: str
     preflight: dict[str, Any]
+
+
+class ActionSpottingDiagnosticsResponse(BaseModel):
+    diagnostics: dict[str, Any]

@@ -136,19 +136,14 @@ class RuleBasedClipPlanner:
             if half is not None and event.half != half:
                 continue
 
-            if selected_player_id and selected_player_id not in (event.player_ids or []):
+            if (
+                selected_player_id
+                and self._player_involvement_status(event) != "unknown"
+                and selected_player_id not in (event.player_ids or [])
+            ):
                 continue
 
             filtered.append(event)
-
-        # 선수 필터를 걸었는데 결과가 0개라면, 프론트 UX를 위해 같은 조건의 선수 필터만 완화한다.
-        if selected_player_id and not filtered:
-            return self._filter_events(
-                events=events,
-                labels=labels,
-                half=half,
-                selected_player_id=None,
-            )
 
         return filtered
 
@@ -191,12 +186,19 @@ class RuleBasedClipPlanner:
 
         return selected
 
-    @staticmethod
+    @classmethod
     def _ranking_key(
+        cls,
         event: TimelineEvent,
         selected_player_id: str | None,
     ) -> tuple[float, float, float, float]:
-        player_bonus = 20.0 if selected_player_id in (event.player_ids or []) else 0.0
+        player_bonus = (
+            20.0
+            if selected_player_id
+            and cls._player_involvement_status(event) == "verified"
+            and selected_player_id in (event.player_ids or [])
+            else 0.0
+        )
         highlight_score = float(event.highlight_score or 0.0)
         confidence = float(event.confidence or 0.0)
         label_priority = float(LABEL_PRIORITY.get(event.label, 0))
@@ -209,15 +211,38 @@ class RuleBasedClipPlanner:
             time_score,
         )
 
-    @staticmethod
+    @classmethod
     def _build_reason(
+        cls,
         event: TimelineEvent,
         selected_player_id: str | None,
     ) -> str:
         base = f"{event.label} event with high highlight score"
-        if selected_player_id and selected_player_id in (event.player_ids or []):
+        involvement = cls._player_involvement_status(event)
+        if (
+            selected_player_id
+            and involvement == "verified"
+            and selected_player_id in (event.player_ids or [])
+        ):
             return f"{base}; selected player is involved"
+        if selected_player_id and involvement != "verified":
+            return (
+                f"{base}; Action Spotting does not establish the selected "
+                "player's involvement"
+            )
         return base
+
+    @staticmethod
+    def _player_involvement_status(event: TimelineEvent) -> str:
+        metadata = event.metadata_ or {}
+        involvement = metadata.get("player_involvement") or {}
+        explicit = involvement.get("status")
+        if explicit is not None:
+            return str(explicit).lower()
+        # Preserve the pre-Champion planner contract for legacy events that
+        # explicitly list players, without interpreting that list as a
+        # model-proven scorer/actor identity.
+        return "listed" if event.player_ids else "unknown"
 
     def _parse_labels(self, normalized_prompt: str, options: dict) -> list[str]:
         labels: list[str] = []

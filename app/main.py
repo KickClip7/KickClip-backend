@@ -1,11 +1,15 @@
 """KickClip FastAPI application entry point."""
 
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 
 from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
+from app.domains.tracking.executor import get_tracking_executor
 
 
 class ServiceInfoResponse(BaseModel):
@@ -85,6 +89,15 @@ def create_app() -> FastAPI:
 
     settings = get_settings()
 
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        executor = get_tracking_executor()
+        executor.start()
+        try:
+            yield
+        finally:
+            executor.shutdown()
+
     application = FastAPI(
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
@@ -93,6 +106,7 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
+        lifespan=lifespan,
     )
 
     # 미들웨어, 의존성, lifespan 등에서 공통 설정을 참조할 수 있도록 저장한다.

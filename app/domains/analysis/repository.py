@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.domains.analysis.model import AnalysisJob, AnalysisJobStep
@@ -30,6 +30,26 @@ class AnalysisJobRepository:
             .order_by(AnalysisJob.created_at.desc())
         )
         return list(self.db.scalars(stmt).all())
+
+    def get_by_cache_key(self, cache_key: str) -> AnalysisJob | None:
+        stmt = (
+            select(AnalysisJob)
+            .options(selectinload(AnalysisJob.steps))
+            .where(AnalysisJob.cache_key == cache_key)
+        )
+        return self.db.scalar(stmt)
+
+    def claim_queued(self, analysis_job_id: str) -> bool:
+        stmt = (
+            update(AnalysisJob)
+            .where(
+                AnalysisJob.analysis_job_id == analysis_job_id,
+                AnalysisJob.status == "QUEUED",
+            )
+            .values(status="RUNNING")
+        )
+        result = self.db.execute(stmt)
+        return int(result.rowcount or 0) == 1
 
 
 class AnalysisJobStepRepository:

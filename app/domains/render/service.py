@@ -129,6 +129,13 @@ class RenderJobService:
                     "quality": render_job.quality,
                     "resolution": render_job.resolution,
                     "command_log": result.command_log,
+                    "highlight_revision_id": (clip_plan.options or {}).get(
+                        "highlight_revision_id"
+                    ),
+                    "render_provenance": (clip_plan.options or {}).get(
+                        "render_provenance",
+                        {},
+                    ),
                 },
             )
 

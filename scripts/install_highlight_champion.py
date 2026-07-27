@@ -2,81 +2,94 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import shutil
 from pathlib import Path
 
 
-TARGET_DIR = Path("storage/models/highlight_spotting/champion")
-DEFAULT_CONFIG_DIR = Path("configs/models/action_spotting/best_soccer_model")
-
-
-def _copy(src: str | None, dst: Path, overwrite: bool) -> str | None:
-    if src is None:
-        return None
-
-    source = Path(src)
-    if not source.exists():
-        raise FileNotFoundError(source)
-
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists() and not overwrite:
-        raise FileExistsError(f"{dst} already exists. Use --overwrite to replace it.")
-
-    shutil.copy2(source, dst)
-    return dst.as_posix()
+CHAMPION = "sampling_v1_loss_v2_ms_stem_v1"
+EXPECTED_SHA256 = (
+    "c3aa72c3d5be98fb8c6104818da69d2e8ac9a993696830fa1a0588cd58ffaee1"
+)
+DEFAULT_AI_ROOT = Path(r"D:\HAESUNG\prometheus\KickClip")
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Copy champion highlight model files into KickClip backend storage."
+        description="Copy the already-trained Champion bundle from KickClip."
     )
-    parser.add_argument("--checkpoint", required=True, help="Path to best.pt/checkpoint.pt")
-    parser.add_argument("--target-dir", default=TARGET_DIR.as_posix())
-    parser.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR.as_posix())
-    parser.add_argument("--expected-sha256", default=None)
+    parser.add_argument("--ai-root", type=Path, default=DEFAULT_AI_ROOT)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
-    target_dir = Path(args.target_dir)
-    checkpoint_path = target_dir / "best.pt"
-    copied_path = _copy(args.checkpoint, checkpoint_path, args.overwrite)
-    digest = _sha256(checkpoint_path)
-    if args.expected_sha256 and digest.lower() != args.expected_sha256.lower():
-        checkpoint_path.unlink(missing_ok=True)
-        raise ValueError(
-            f"checkpoint sha256 mismatch: expected={args.expected_sha256}, actual={digest}"
-        )
-
-    config_dir = Path(args.config_dir)
-    required_configs = [
-        config_dir / "model.yaml",
-        config_dir / "data.yaml",
-        config_dir / "inference.yaml",
-        config_dir / "label_map.json",
-        config_dir / "manifest.json",
-    ]
-    missing_configs = [path.as_posix() for path in required_configs if not path.is_file()]
-    if missing_configs:
-        raise FileNotFoundError("missing model config artifact(s): " + ", ".join(missing_configs))
-
-    print(
-        json.dumps(
-            {
-                "checkpoint_path": copied_path,
-                "checkpoint_sha256": digest,
-                "config_dir": config_dir.as_posix(),
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+    source_root = args.ai_root
+    runtime_target = (
+        BACKEND_ROOT / "storage" / "models" / "action_spotting" / CHAMPION
     )
+    config_target = (
+        BACKEND_ROOT / "configs" / "models" / "action_spotting" / CHAMPION
+    )
+    pairs = [
+        (
+            source_root
+            / "storage"
+            / f"checkpoints_{CHAMPION}"
+            / "transformer_best.pt",
+            runtime_target / "transformer_best.pt",
+        ),
+        (
+            source_root
+            / "storage"
+            / f"checkpoints_{CHAMPION}"
+            / "transformer_history.json",
+            runtime_target / "transformer_history.json",
+        ),
+        (
+            source_root
+            / "storage"
+            / "eval"
+            / "validation"
+            / f"transformer_{CHAMPION}_eval_t020.json",
+            runtime_target / "valid_eval.json",
+        ),
+        (
+            source_root / "configs" / "model_ms_stem_v1.yaml",
+            config_target / "model.yaml",
+        ),
+        (
+            source_root / "configs" / "train_model_ms_stem_v1.yaml",
+            config_target / "train.yaml",
+        ),
+        (
+            source_root
+            / "storage"
+            / f"checkpoints_{CHAMPION}"
+            / "config_snapshot.yaml",
+            config_target / "config_snapshot.yaml",
+        ),
+    ]
+    for source, target in pairs:
+        if not source.is_file():
+            raise FileNotFoundError(source)
+        if target.exists() and not args.overwrite:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+    checkpoint = runtime_target / "transformer_best.pt"
+    digest = _sha256(checkpoint)
+    if digest != EXPECTED_SHA256:
+        raise ValueError(
+            f"checkpoint SHA-256 mismatch: expected={EXPECTED_SHA256}, actual={digest}"
+        )
+    print(f"Champion bundle ready: {CHAMPION}")
+    print(f"checkpoint_sha256={digest}")
 
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
 

@@ -47,8 +47,13 @@ class ExistingFeatureAssets:
 
     @property
     def available(self) -> bool:
-        # HighlightFeatureLoader can proceed with the combined feature alone.
-        return SOCCERNET_FEATURE_ASSET_TYPE in self.assets_by_type
+        return all(
+            asset_type in self.assets_by_type
+            for asset_type in (
+                SOCCERNET_FEATURE_HALF1_ASSET_TYPE,
+                SOCCERNET_FEATURE_HALF2_ASSET_TYPE,
+            )
+        )
 
     @property
     def asset_types(self) -> list[str]:

@@ -8,6 +8,13 @@ from app.domains.player.model import Player, PlayerTrack
 from app.domains.project.model import Project
 from app.domains.render.model import RenderJob
 from app.domains.timeline.model import TimelineEvent
+from app.domains.tracking.model import TrackingJob
+from app.domains.highlight.model import (
+    HighlightRevision,
+    PlayerFocusSubject,
+    ScenePlayerCandidate,
+    SceneTrackingBinding,
+)
 
 
 __all__ = [
@@ -25,4 +32,9 @@ __all__ = [
     "ClipPlan",
     "ClipPlanItem",
     "RenderJob",
+    "TrackingJob",
+    "HighlightRevision",
+    "PlayerFocusSubject",
+    "ScenePlayerCandidate",
+    "SceneTrackingBinding",
 ]

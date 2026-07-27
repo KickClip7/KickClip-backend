@@ -92,19 +92,23 @@ class HighlightFeatureBundle:
     def feature_dtypes(self) -> list[str]:
         return [info.dtype for info in self.feature_infos]
 
-    def to_metadata(self) -> dict[str, Any]:
-        return {
+    def to_metadata(self, *, include_paths: bool = True) -> dict[str, Any]:
+        metadata = {
             "available": self.available,
             "layout": self.layout,
             "asset_ids": [asset.asset_id for asset in self.assets],
             "asset_types": self.asset_types,
-            "paths": [path.as_posix() for path in self.resolved_paths],
             "missing_asset_types": self.missing_asset_types,
             "validation_errors": self.validation_errors,
             "feature_shapes": self.feature_shapes,
             "feature_dtypes": self.feature_dtypes,
-            "feature_infos": [info.to_metadata() for info in self.feature_infos],
         }
+        if include_paths:
+            metadata["paths"] = [path.as_posix() for path in self.resolved_paths]
+            metadata["feature_infos"] = [
+                info.to_metadata() for info in self.feature_infos
+            ]
+        return metadata
 
 
 class HighlightFeatureLoader:
@@ -131,21 +135,9 @@ class HighlightFeatureLoader:
         assets = self.media_repository.list_by_match(match_id)
         assets_by_type = self._latest_assets_by_type(assets)
 
-        combined_errors: list[str] = []
-
-        # Prefer a single combined feature when it is present and valid.
+        # Champion inference requires explicit half boundaries. A combined
+        # feature cannot be split without an authoritative boundary contract.
         combined = assets_by_type.get(COMBINED_FEATURE_ASSET_TYPE)
-        if combined is not None:
-            combined_bundle = self._bundle(
-                [combined],
-                missing_asset_types=[],
-                layout="combined",
-                validate=validate,
-                expected_feature_dim=expected_feature_dim,
-            )
-            if combined_bundle.available:
-                return combined_bundle
-            combined_errors.extend(combined_bundle.validation_errors)
 
         # Fall back to half1/half2 assets. This is important when an old or
         # corrupted combined asset remains in DB but freshly generated half
@@ -171,7 +163,14 @@ class HighlightFeatureLoader:
             layout=layout,
             validate=validate,
             expected_feature_dim=expected_feature_dim,
-            extra_validation_errors=combined_errors,
+            extra_validation_errors=(
+                [
+                    "combined-only features are not valid for Champion inference; "
+                    "explicit half1 and half2 assets are required"
+                ]
+                if combined is not None and not selected_assets
+                else None
+            ),
         )
         return half_bundle
 
