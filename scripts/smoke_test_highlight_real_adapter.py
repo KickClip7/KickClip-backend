@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -13,96 +12,88 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.ai.tasks.highlight_spotting.adapters.soccer_highlight_former import (
-    SoccerHighlightFormerAdapter,
+from app.ai.tasks.highlight_spotting.adapters.soccer_spotter_v9 import (
+    DEFAULT_CHAMPION_MODEL_DIR,
+    SoccerSpotterV9Adapter,
 )
-@dataclass(frozen=True)
-class DummyFeatureBundle:
-    path: Path
-    shape: tuple[int, ...]
-    dtype: str
+
+
+class SmokeHalfFeatureBundle:
+    def __init__(self, half1: Path, half2: Path) -> None:
+        self.resolved_paths = [half1, half2]
+        self.layout = "halves"
+        self.assets = [object(), object()]
+        self.missing_asset_types: list[str] = []
+        self.validation_errors: list[str] = []
+        self.feature_infos = [
+            self._info("SOCCERNET_FEATURE_HALF1", half1),
+            self._info("SOCCERNET_FEATURE_HALF2", half2),
+        ]
 
     @property
     def available(self) -> bool:
-        return True
+        return all(
+            info["shape"][1:] == [512] and info["shape"][0] > 0
+            for info in self.feature_infos
+        )
 
-    @property
-    def layout(self) -> str:
-        return "combined"
-
-    @property
-    def resolved_paths(self) -> list[Path]:
-        return [self.path]
-
-    @property
-    def feature_infos(self) -> list[Any]:
-        return [
-            {
-                "asset_id": "debug_feature_asset",
-                "asset_type": "SOCCERNET_FEATURE",
-                "path": self.path.as_posix(),
-                "shape": self.shape,
-                "dtype": self.dtype,
-                "size_bytes": self.path.stat().st_size if self.path.exists() else None,
-            }
-        ]
-
-    def to_metadata(self) -> dict[str, Any]:
-        return {
+    def to_metadata(self, *, include_paths: bool = True) -> dict[str, Any]:
+        value: dict[str, Any] = {
             "available": self.available,
             "layout": self.layout,
-            "asset_ids": ["debug_feature_asset"],
-            "asset_types": ["SOCCERNET_FEATURE"],
-            "paths": [self.path.as_posix()],
-            "missing_asset_types": [],
-            "validation_errors": [],
-            "feature_shapes": [list(self.shape)],
-            "feature_dtypes": [self.dtype],
-            "feature_infos": [self.feature_infos[0]],
+            "asset_types": [info["asset_type"] for info in self.feature_infos],
+            "feature_shapes": [info["shape"] for info in self.feature_infos],
+        }
+        if include_paths:
+            value["paths"] = [path.as_posix() for path in self.resolved_paths]
+        return value
+
+    @staticmethod
+    def _info(asset_type: str, path: Path) -> dict[str, Any]:
+        array = np.load(path, mmap_mode="r", allow_pickle=False)
+        return {
+            "asset_type": asset_type,
+            "shape": [int(value) for value in array.shape],
+            "dtype": str(array.dtype),
         }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--feature", required=True, help="Path to merged_feature.npy or other [T, 512] feature file")
-    parser.add_argument("--model-dir", default="storage/models/highlight_spotting/champion")
+    parser.add_argument("--half1-feature", required=True)
+    parser.add_argument("--half2-feature", required=True)
+    parser.add_argument("--model-dir", default=DEFAULT_CHAMPION_MODEL_DIR)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--duration-sec", type=float, default=None)
-    parser.add_argument("--out", default=None)
     args = parser.parse_args()
 
-    feature_path = Path(args.feature)
-    array = np.load(feature_path, mmap_mode="r", allow_pickle=False)
-    bundle = DummyFeatureBundle(
-        path=feature_path,
-        shape=tuple(int(v) for v in array.shape),
-        dtype=str(array.dtype),
+    bundle = SmokeHalfFeatureBundle(
+        Path(args.half1_feature),
+        Path(args.half2_feature),
     )
-
-    adapter = SoccerHighlightFormerAdapter.from_model_dir(args.model_dir)
+    adapter = SoccerSpotterV9Adapter.from_model_dir(args.model_dir)
     preflight = adapter.preflight()
     if not preflight.ready_for_real_adapter:
-        raise SystemExit(json.dumps(preflight.to_metadata(), ensure_ascii=False, indent=2))
-
+        raise SystemExit(
+            json.dumps(preflight.to_metadata(), ensure_ascii=False, indent=2)
+        )
     predictions = adapter.predict(
         feature_bundle=bundle,  # type: ignore[arg-type]
-        match_duration_sec=args.duration_sec,
         device=args.device,
     )
-
-    payload = {
-        "preflight": preflight.to_metadata(),
-        "feature": bundle.to_metadata(),
-        "num_predictions": len(predictions),
-        "predictions": [prediction.to_postprocessor_input() for prediction in predictions[:20]],
-    }
-
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if args.out:
-        out_path = Path(args.out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[OK] wrote smoke report: {out_path.as_posix()}")
+    print(
+        json.dumps(
+            {
+                "preflight": preflight.to_metadata(),
+                "feature": bundle.to_metadata(),
+                "num_predictions": len(predictions),
+                "predictions": [
+                    item.to_postprocessor_input() for item in predictions[:20]
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

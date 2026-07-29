@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import shutil
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -16,6 +16,7 @@ class StoredFile:
     relative_path: str
     filename: str
     size_bytes: int
+    sha256: str | None = None
 
 
 class LocalStorage:
@@ -44,14 +45,21 @@ class LocalStorage:
         output_path = directory / filename
 
         upload_file.file.seek(0)
+        digest = hashlib.sha256()
         with output_path.open("wb") as output:
-            shutil.copyfileobj(upload_file.file, output, length=1024 * 1024)
+            while True:
+                chunk = upload_file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                output.write(chunk)
 
         return StoredFile(
             absolute_path=output_path,
             relative_path=output_path.relative_to(self.project_root).as_posix(),
             filename=filename,
             size_bytes=output_path.stat().st_size,
+            sha256=digest.hexdigest(),
         )
 
     def delete_file_if_exists(self, value: str | Path) -> bool:

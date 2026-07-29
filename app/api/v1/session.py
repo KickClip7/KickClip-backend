@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.domains.auth.access import require_match_access
+from app.domains.auth.access import require_match_access, require_project_access
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
 from app.domains.session.schema import (
@@ -32,8 +32,19 @@ def start_session(
 ) -> SessionStartResponse:
     match_id = resolve_agent_match_id(data.match_id, get_settings())
     require_match_access(db, match_id, current_user)
+    if data.project_id is not None:
+        project = require_project_access(db, data.project_id, current_user)
+        if project.match_id != match_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="project_id does not belong to match_id",
+            )
     try:
-        result = SessionService(db).start(data.match_id, current_user.user_id)
+        result = SessionService(db).start(
+            data.match_id,
+            current_user.user_id,
+            project_id=data.project_id,
+        )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return SessionStartResponse(**result)
@@ -50,7 +61,11 @@ def chat_session(
     current_user: User = Depends(get_current_user),
 ) -> SessionChatResponse:
     try:
-        result = SessionService(db).chat(data.session_id, data.message)
+        result = SessionService(db).chat(
+            data.session_id,
+            data.message,
+            user_id=current_user.user_id,
+        )
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return SessionChatResponse(**result)
@@ -67,7 +82,10 @@ def get_session_state(
     current_user: User = Depends(get_current_user),
 ) -> SessionStateResponse:
     try:
-        result = SessionService(db).get_state(session_id)
+        result = SessionService(db).get_state(
+            session_id,
+            user_id=current_user.user_id,
+        )
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return SessionStateResponse(**result)

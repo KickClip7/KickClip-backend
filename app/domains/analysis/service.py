@@ -19,6 +19,10 @@ from app.domains.analysis.schema import (
     AnalysisJobStepCompactRead,
 )
 from app.domains.match.repository import MatchRepository
+from app.domains.action_spotting.status import (
+    action_spotting_public_error,
+    action_spotting_workflow_status,
+)
 
 
 class AnalysisJobService:
@@ -45,6 +49,11 @@ class AnalysisJobService:
             progress=0,
             current_step=current_step,
             options=data.options,
+            media_asset_id=data.media_asset_id,
+            cache_key=data.cache_key,
+            video_sha256=data.video_sha256,
+            model_version=data.model_version,
+            policy_version=data.policy_version,
         )
 
         for step_data in default_steps:
@@ -66,10 +75,24 @@ class AnalysisJobService:
         match_id: str,
         data: AnalysisJobCreateRequest,
     ) -> AnalysisJobCreateResponse:
+        job_type = normalize_job_type(data.job_type)
+        # Serialize creation per Match on databases that support row locks.
+        # This closes the common double-click/concurrent-request race without a
+        # schema change and keeps the existing POST contract intact.
+        match = self.match_repository.get_for_update(match_id)
+        if match is None:
+            raise ValueError("Match not found")
+        for existing in self.job_repository.list_active_by_match_and_type(
+            match_id=match_id,
+            job_type=job_type,
+        ):
+            if (existing.options or {}) == (data.options or {}):
+                response = self.to_create_response(existing)
+                return response.model_copy(update={"reused": True})
         job = self.create_analysis_job(
             AnalysisJobCreate(
                 match_id=match_id,
-                job_type=data.job_type,
+                job_type=job_type,
                 options=data.options,
             )
         )
@@ -108,6 +131,7 @@ class AnalysisJobService:
         )
 
     def to_status_response(self, job: AnalysisJob) -> AnalysisJobStatusResponse:
+        is_action_spotting = job.job_type == "HIGHLIGHT_SPOTTING"
         return AnalysisJobStatusResponse(
             analysis_job_id=job.analysis_job_id,
             match_id=job.match_id,
@@ -116,6 +140,10 @@ class AnalysisJobService:
             progress=job.progress,
             current_step=job.current_step,
             options=job.options,
+            media_asset_id=job.media_asset_id,
+            video_sha256=job.video_sha256,
+            model_version=job.model_version,
+            policy_version=job.policy_version,
             steps=[
                 AnalysisJobStepCompactRead(
                     key=step.step_key,
@@ -129,4 +157,28 @@ class AnalysisJobService:
             started_at=job.started_at,
             completed_at=job.completed_at,
             error_message=job.error_message,
+            retryable=job.status == "FAILED",
+            workflow_status=(
+                action_spotting_workflow_status(
+                    status=job.status,
+                    options=job.options,
+                )
+                if is_action_spotting
+                else None
+            ),
+            workflow_state_history=(
+                list(
+                    (job.options or {}).get(
+                        "action_spotting_state_history"
+                    )
+                    or []
+                )
+                if is_action_spotting
+                else []
+            ),
+            error=(
+                action_spotting_public_error(job.options)
+                if is_action_spotting
+                else None
+            ),
         )

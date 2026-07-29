@@ -1,0 +1,11 @@
+{
+  "model_id": "soccer_spotter_v9",
+  "model_name": "SoccerSpotterV9",
+  "checkpoint_file": "v9_best_model.pth",
+  "checkpoint_sha256": "b58db272f1feb43f548e0e8ee82df9b8bdbfe1e441fb14da0376f09ec056150c",
+  "config_file": "v9_config.json",
+  "source_config_sha256": "f05226ac1d2698b3ed6159d3c02e4da02b482b3ecdc9272fc2d25c47245e49cf",
+  "source_inference_sha256": "49693e5d9c8dbc301cd9f6ffc1edfe266a4a44c6c084c91cc696d93446716897",
+  "parameter_count": 4052880,
+  "best_frame_map": 0.7318232294086566
+}

@@ -18,6 +18,13 @@ class MediaAssetRepository:
         stmt = select(MediaAsset).where(MediaAsset.asset_id == asset_id)
         return self.db.scalar(stmt)
 
+    def get_for_update(self, asset_id: str) -> MediaAsset | None:
+        return self.db.scalar(
+            select(MediaAsset)
+            .where(MediaAsset.asset_id == asset_id)
+            .with_for_update()
+        )
+
     def list_by_match(self, match_id: str) -> list[MediaAsset]:
         stmt = (
             select(MediaAsset)

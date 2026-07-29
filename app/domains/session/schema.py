@@ -5,12 +5,15 @@ from app.domains.timeline.schema import TimelineEventRead
 
 class SessionStartRequest(BaseModel):
     match_id: str
+    project_id: str | None = None
 
 
 class SessionStartResponse(BaseModel):
     session_id: str
     total_events: int
     video_url: str | None = None
+    project_id: str | None = None
+    clip_plan_id: str | None = None
 
 
 class SessionChatRequest(BaseModel):
@@ -24,8 +27,11 @@ class SessionChatResponse(BaseModel):
     reply_text: str | None = None
     clarification_question: str | None = None
     clarification_options: list[str] | None = None
+    clip_plan_id: str | None = None
 
 
 class SessionStateResponse(BaseModel):
     current_clips: list[TimelineEventRead] = Field(default_factory=list)
     all_events: list[TimelineEventRead] = Field(default_factory=list)
+    project_id: str | None = None
+    clip_plan_id: str | None = None

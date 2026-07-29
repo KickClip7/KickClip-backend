@@ -1,6 +1,5 @@
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.domains.agent.player_profile_resolver import PlayerProfileResolver
 from app.domains.agent.rule_based_planner import RuleBasedClipPlanner
 from app.domains.agent.schema import (
@@ -14,11 +13,11 @@ from app.domains.clip_plan.repository import ClipPlanRepository
 from app.domains.match.repository import MatchRepository
 from app.domains.player.repository import PlayerRepository
 from app.domains.project.repository import ProjectRepository
-from app.domains.timeline.dev_context import (
-    resolve_agent_match_id,
-    select_dev_timeline_events,
-)
+from app.domains.timeline.dev_context import resolve_agent_match_id
 from app.domains.timeline.repository import TimelineEventRepository
+from app.domains.highlight.action_cache import ActionSpottingCacheService
+from app.domains.analysis.repository import AnalysisJobRepository
+from app.ai.runtime.job_runner import JobRunner
 
 
 class AgentService:
@@ -33,6 +32,8 @@ class AgentService:
         self.profile_resolver = PlayerProfileResolver()
 
     def create_clip_plan(self, data: AgentClipPlanRequest) -> AgentClipPlanResponse:
+        from app.core.config import get_settings
+
         settings = get_settings()
         project = self.project_repository.get_by_id(data.project_id)
         if project is None:
@@ -46,10 +47,31 @@ class AgentService:
         if match is None:
             raise ValueError("Match not found")
 
-        events = select_dev_timeline_events(
-            self.timeline_event_repository.list_by_match(match_id),
+        action_job, _ = ActionSpottingCacheService(self.db).get_or_create(
             match_id=match_id,
-            settings=settings,
+            request_options={
+                "run_feature_extraction": True,
+                "highlight_predictor_mode": "real",
+                "agent_requested": True,
+            },
+        )
+        if action_job.status == "QUEUED":
+            JobRunner().run(action_job.analysis_job_id)
+            self.db.expire_all()
+            action_job = AnalysisJobRepository(self.db).get_by_id(
+                action_job.analysis_job_id
+            )
+        if action_job is None:
+            raise ValueError("Champion Action Spotting job is unavailable")
+        if action_job.status == "FAILED":
+            error = (action_job.options or {}).get("action_spotting_error") or {}
+            code = error.get("code") or "ACTION_SPOTTING_FAILED"
+            raise ValueError(f"{code}: {action_job.error_message}")
+        if action_job.status != "COMPLETED":
+            raise ValueError("Champion Action Spotting is still running")
+
+        events = self.timeline_event_repository.list_by_source_job(
+            action_job.analysis_job_id
         )
         players = self.player_repository.list_by_match(match_id)
 

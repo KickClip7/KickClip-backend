@@ -11,7 +11,6 @@ from typing import Literal
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
@@ -78,6 +77,12 @@ class Settings(BaseSettings):
     DB_ECHO: bool = False
 
     # -------------------------------------------------------------------------
+    # Champion Action Spotting provenance/runtime diagnostics
+    # -------------------------------------------------------------------------
+    ACTION_SPOTTING_AI_PROJECT_ROOT: str = ""
+    ACTION_SPOTTING_PYTHON_EXECUTABLE: str = ""
+
+    # -------------------------------------------------------------------------
     # Qwen
     # -------------------------------------------------------------------------
     QWEN_MODEL_ID: str = "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -98,6 +103,45 @@ class Settings(BaseSettings):
     AUTH_ACCESS_TOKEN_MINUTES: int = Field(default=15, ge=1)
     AUTH_REFRESH_TOKEN_DAYS: int = Field(default=30, ge=1)
     MEDIA_SIGNED_URL_MINUTES: int = Field(default=10, ge=1)
+
+    # -------------------------------------------------------------------------
+    # Target-centric tracking runtime
+    # -------------------------------------------------------------------------
+    # Tracking은 별도 AI 프로젝트/conda 환경에서 subprocess로 실행한다.
+    # 빈 경로는 "설정되지 않음"을 뜻하며 verifier가 기능을 unavailable로 표시한다.
+    TRACKING_ENABLED: bool = False
+    TRACKING_PROJECT_ROOT: str = ""
+    TRACKING_E2E_SCRIPT_PATH: str = ""
+    TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH: str = ""
+    TRACKING_VERIFY_SCRIPT_PATH: str = ""
+    TRACKING_PYTHON_EXECUTABLE: str = ""
+    TRACKING_OUTPUT_ROOT: str = ""
+    TRACKING_DEVICE: Literal["auto", "cuda", "mps", "cpu"] = "auto"
+    TRACKING_REACQUISITION_MODE: Literal["assisted"] = "assisted"
+    TRACKING_MAX_CONCURRENT_JOBS: int = Field(default=1, ge=1, le=8)
+    TRACKING_PROCESS_TIMEOUT_SECONDS: int = Field(default=21600, ge=60)
+    TRACKING_VERIFY_TIMEOUT_SECONDS: int = Field(default=300, ge=10)
+    TRACKING_PREVIEW_ENABLED: bool = True
+
+    # -------------------------------------------------------------------------
+    # Scene-local player candidate detector
+    # -------------------------------------------------------------------------
+    PLAYER_DETECTOR_BACKEND: Literal["rfdetr", "hog"] = "rfdetr"
+    PLAYER_DETECTOR_CHECKPOINT: Path = (
+        PROJECT_ROOT
+        / ".tracking-runtime"
+        / "weights"
+        / "rfdetr"
+        / "checkpoint_best_regular.pth"
+    )
+    PLAYER_DETECTOR_DEVICE: Literal["auto", "cuda", "mps", "cpu"] = "auto"
+    PLAYER_DETECTOR_ALLOW_HOG_FALLBACK: bool = False
+    PLAYER_DETECTOR_CONFIDENCE_THRESHOLD: float = Field(
+        default=0.25,
+        gt=0,
+        le=1,
+    )
+    PLAYER_DETECTOR_BATCH_SIZE: int = Field(default=6, ge=1, le=32)
 
     # -------------------------------------------------------------------------
     # Developer mode

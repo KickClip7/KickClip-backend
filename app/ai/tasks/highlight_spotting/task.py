@@ -191,9 +191,8 @@ class HighlightSpottingTask(BaseAITask):
             "strict_real_model": self.runtime_config.strict_real_model,
             "model_adapter": self.runtime_config.model_adapter,
             "device": self.runtime_config.device,
-            "checkpoint_path": self.runtime_config.checkpoint_path.as_posix() if self.runtime_config.checkpoint_path else None,
-            "model_config_path": self.runtime_config.model_config_path.as_posix() if self.runtime_config.model_config_path else None,
-            "label_map_path": self.runtime_config.label_map_path.as_posix() if self.runtime_config.label_map_path else None,
+            "checkpoint_configured": self.runtime_config.checkpoint_path is not None,
+            "model_configured": self.runtime_config.model_config_path is not None,
             "expected_feature_asset_types": self.runtime_config.expected_feature_asset_types,
         }
 

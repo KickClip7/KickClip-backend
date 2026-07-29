@@ -9,20 +9,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.ai.tasks.highlight_spotting.adapters.soccer_highlight_former import (
+from app.ai.tasks.highlight_spotting.adapters.soccer_spotter_v9 import (
     DEFAULT_CHAMPION_MODEL_DIR,
-    SoccerHighlightFormerAdapter,
+    SoccerSpotterV9Adapter,
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Inspect KickClip highlight spotting champion artifacts before real adapter implementation."
+        description="Inspect the checkpoint-paired Action Spotting Champion runtime."
     )
     parser.add_argument(
         "--model-dir",
         default=DEFAULT_CHAMPION_MODEL_DIR,
-        help="Champion model artifact directory. Default: storage/models/highlight_spotting/champion",
+        help=f"Champion model artifact directory. Default: {DEFAULT_CHAMPION_MODEL_DIR}",
     )
     parser.add_argument(
         "--out",
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    adapter = SoccerHighlightFormerAdapter.from_model_dir(args.model_dir)
+    adapter = SoccerSpotterV9Adapter.from_model_dir(args.model_dir)
     report = adapter.preflight().to_metadata()
 
     text = json.dumps(report, ensure_ascii=False, indent=2)

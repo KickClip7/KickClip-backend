@@ -30,7 +30,9 @@ class RenderJobService:
         self.renderer = FFmpegRenderer()
 
     def create_render_job(self, data: RenderCreateRequest) -> RenderJob:
-        clip_plan = self.clip_plan_repository.get_by_id(data.clip_plan_id)
+        clip_plan = self.clip_plan_repository.get_by_id_for_update(
+            data.clip_plan_id
+        )
         if clip_plan is None:
             raise ValueError("ClipPlan not found")
 
@@ -44,6 +46,23 @@ class RenderJobService:
         template = self.template_builder.build(ratio=ratio, quality=quality)
         captions_enabled = bool(merged_options.get("captions_enabled") or False)
         music_asset_id = merged_options.get("music_asset_id")
+        persisted_options = {
+            **merged_options,
+            "template": {
+                "ratio": template.ratio,
+                "quality": template.quality,
+                "width": template.width,
+                "height": template.height,
+                "resolution": template.resolution_label,
+            },
+        }
+        reusable = self.render_job_repository.find_reusable(
+            clip_plan_id=clip_plan.clip_plan_id,
+            options=persisted_options,
+        )
+        if reusable is not None:
+            reusable.reused = True
+            return reusable
 
         try:
             render_job = self.render_job_repository.create(
@@ -53,19 +72,11 @@ class RenderJobService:
                 quality=template.quality,
                 captions_enabled=captions_enabled,
                 music_asset_id=music_asset_id,
-                options={
-                    **merged_options,
-                    "template": {
-                        "ratio": template.ratio,
-                        "quality": template.quality,
-                        "width": template.width,
-                        "height": template.height,
-                        "resolution": template.resolution_label,
-                    },
-                },
+                options=persisted_options,
             )
             self.db.commit()
             self.db.refresh(render_job)
+            render_job.reused = False
             return render_job
         except Exception:
             self.db.rollback()
@@ -81,8 +92,11 @@ class RenderJobService:
             return
 
         try:
-            self.render_job_repository.mark_running(render_job)
+            if not self.render_job_repository.claim_queued(render_job_id):
+                self.db.rollback()
+                return
             self.db.commit()
+            self.db.refresh(render_job)
 
             clip_plan = self._get_clip_plan_or_raise(render_job.clip_plan_id)
             match_id = clip_plan.project.match_id
@@ -129,6 +143,13 @@ class RenderJobService:
                     "quality": render_job.quality,
                     "resolution": render_job.resolution,
                     "command_log": result.command_log,
+                    "highlight_revision_id": (clip_plan.options or {}).get(
+                        "highlight_revision_id"
+                    ),
+                    "render_provenance": (clip_plan.options or {}).get(
+                        "render_provenance",
+                        {},
+                    ),
                 },
             )
 

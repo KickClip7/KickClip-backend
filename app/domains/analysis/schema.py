@@ -19,6 +19,11 @@ class AnalysisJobCreate(BaseModel):
     match_id: str
     job_type: str = "FULL_MATCH_ANALYSIS"
     options: dict[str, Any] = Field(default_factory=dict)
+    media_asset_id: str | None = None
+    cache_key: str | None = None
+    video_sha256: str | None = None
+    model_version: str | None = None
+    policy_version: str | None = None
 
 
 class AnalysisJobStepCreate(BaseModel):
@@ -86,6 +91,7 @@ class AnalysisJobCreateResponse(BaseModel):
     progress: int
     current_step: str | None
     steps: list[AnalysisJobStepCompactRead]
+    reused: bool = False
 
 
 class AnalysisJobStatusResponse(BaseModel):
@@ -96,8 +102,16 @@ class AnalysisJobStatusResponse(BaseModel):
     progress: int
     current_step: str | None
     options: dict[str, Any]
+    media_asset_id: str | None = None
+    video_sha256: str | None = None
+    model_version: str | None = None
+    policy_version: str | None = None
     steps: list[AnalysisJobStepCompactRead]
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
     error_message: str | None
+    retryable: bool = False
+    workflow_status: str | None = None
+    workflow_state_history: list[str] = Field(default_factory=list)
+    error: dict[str, Any] | None = None

@@ -6,13 +6,12 @@ from app.ai.tasks.highlight_spotting.adapters.base import (
     HighlightModelAdapter,
     HighlightRawPrediction,
 )
-from app.ai.tasks.highlight_spotting.adapters.soccer_highlight_former import (
+from app.ai.tasks.highlight_spotting.adapters.soccer_spotter_v9 import (
     DEFAULT_CHAMPION_MODEL_DIR,
-    SoccerHighlightFormerAdapter,
-    build_sliding_windows,
-    inspect_champion_checkpoint,
-    load_champion_model_spec,
-    resolve_champion_artifact_paths,
+    SoccerSpotterV9Adapter,
+    inspect_v9_checkpoint,
+    load_v9_model_spec,
+    resolve_v9_artifact_paths,
 )
 
 __all__ = [
@@ -23,9 +22,8 @@ __all__ = [
     "DEFAULT_CHAMPION_MODEL_DIR",
     "HighlightModelAdapter",
     "HighlightRawPrediction",
-    "SoccerHighlightFormerAdapter",
-    "build_sliding_windows",
-    "inspect_champion_checkpoint",
-    "load_champion_model_spec",
-    "resolve_champion_artifact_paths",
+    "SoccerSpotterV9Adapter",
+    "inspect_v9_checkpoint",
+    "load_v9_model_spec",
+    "resolve_v9_artifact_paths",
 ]

@@ -22,6 +22,24 @@ class AnalysisJob(Base, TimestampMixin):
         index=True,
     )
 
+    # HIGHLIGHT_SPOTTING jobs may be shared by multiple Projects that use the
+    # same source video, model version, and normalization policy.
+    media_asset_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("media_assets.asset_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    cache_key: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    video_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    policy_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     job_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), default="QUEUED", nullable=False)
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -34,6 +52,7 @@ class AnalysisJob(Base, TimestampMixin):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     match = relationship("Match", back_populates="analysis_jobs")
+    media_asset = relationship("MediaAsset")
     steps = relationship(
         "AnalysisJobStep",
         back_populates="analysis_job",

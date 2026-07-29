@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
@@ -8,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.ai.registry.model_registry import ModelRegistry
 from app.ai.runtime.job_runner import run_analysis_job_background
-from app.ai.tasks.highlight_spotting.adapters.soccer_highlight_former import (
-    SoccerHighlightFormerAdapter,
+from app.ai.tasks.highlight_spotting.adapters.soccer_spotter_v9 import (
+    SoccerSpotterV9Adapter,
 )
 from app.core.paths import get_project_root
 from app.db.session import get_db
@@ -17,13 +16,21 @@ from app.domains.auth.access import require_analysis_job_access, require_match_a
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
 from app.domains.action_spotting.schema import (
+    ActionSpottingDiagnosticsResponse,
     ActionSpottingEventsResponse,
     ActionSpottingJobRequest,
     ActionSpottingJobResponse,
     ActionSpottingModelResponse,
 )
-from app.domains.analysis.schema import AnalysisJobCreateRequest
+from app.domains.action_spotting.diagnostics import (
+    collect_action_spotting_diagnostics,
+)
+from app.domains.action_spotting.status import (
+    action_spotting_public_error,
+    action_spotting_workflow_status,
+)
 from app.domains.analysis.service import AnalysisJobService
+from app.domains.highlight.action_cache import ActionSpottingCacheService
 from app.domains.timeline.repository import TimelineEventRepository
 from app.domains.timeline.schema import TimelineEventRead
 
@@ -40,8 +47,8 @@ def get_action_spotting_model() -> ActionSpottingModelResponse:
     registry = ModelRegistry()
     model_card = registry.get_model_card("highlight_spotting", "champion")
     checkpoint_path = _resolve_path(model_card.checkpoint_path)
-    adapter = SoccerHighlightFormerAdapter.from_model_dir(
-        checkpoint_path.parent if checkpoint_path else "storage/models/highlight_spotting/champion"
+    adapter = SoccerSpotterV9Adapter.from_model_dir(
+        checkpoint_path.parent if checkpoint_path else None
     )
     preflight = adapter.preflight()
 
@@ -51,10 +58,22 @@ def get_action_spotting_model() -> ActionSpottingModelResponse:
         model_name=model_card.model_name,
         model_version=model_card.model_version,
         classes=adapter.spec.labels,
-        checkpoint_path=checkpoint_path.as_posix() if checkpoint_path else None,
         checkpoint_sha256=_sha256(checkpoint_path),
         device_requested="auto",
         preflight=preflight.to_metadata(),
+    )
+
+
+@router.get(
+    "/diagnostics",
+    response_model=ActionSpottingDiagnosticsResponse,
+    summary="Champion Action Spotting runtime diagnostics",
+)
+def get_action_spotting_diagnostics(
+    db: Session = Depends(get_db),
+) -> ActionSpottingDiagnosticsResponse:
+    return ActionSpottingDiagnosticsResponse(
+        diagnostics=collect_action_spotting_diagnostics(db)
     )
 
 
@@ -73,20 +92,17 @@ def create_action_spotting_job(
     current_user: User = Depends(get_current_user),
 ) -> ActionSpottingJobResponse:
     require_match_access(db, match_id, current_user)
-    service = AnalysisJobService(db)
     try:
-        created = service.create_analysis_job_for_match(
+        job, reused = ActionSpottingCacheService(db).get_or_create(
             match_id=match_id,
-            data=AnalysisJobCreateRequest(
-                job_type="HIGHLIGHT_SPOTTING",
-                options=payload.to_job_options(),
-            ),
+            request_options=payload.to_job_options(),
         )
+        created = AnalysisJobService(db).to_create_response(job)
     except ValueError as exc:
         code = status.HTTP_404_NOT_FOUND if str(exc) == "Match not found" else status.HTTP_400_BAD_REQUEST
         raise HTTPException(status_code=code, detail=str(exc)) from exc
 
-    if auto_start:
+    if auto_start and job.status == "QUEUED":
         background_tasks.add_task(
             run_analysis_job_background,
             created.analysis_job_id,
@@ -96,6 +112,15 @@ def create_action_spotting_job(
         **created.model_dump(),
         status_url=f"/api/v1/analysis-jobs/{created.analysis_job_id}",
         events_url=f"/api/v1/action-spotting/jobs/{created.analysis_job_id}/events",
+        workflow_status=action_spotting_workflow_status(
+            status=job.status,
+            options=job.options,
+        ),
+        workflow_state_history=list(
+            (job.options or {}).get("action_spotting_state_history") or []
+        ),
+        error=action_spotting_public_error(job.options),
+        cache_reused=reused,
     )
 
 
@@ -129,6 +154,14 @@ def get_action_spotting_events(
         status=analysis.status,
         count=len(events),
         events=events,
+        workflow_status=action_spotting_workflow_status(
+            status=analysis.status,
+            options=analysis.options,
+        ),
+        workflow_state_history=list(
+            analysis.options.get("action_spotting_state_history") or []
+        ),
+        error=action_spotting_public_error(analysis.options),
     )
 
 
@@ -142,8 +175,8 @@ def _resolve_path(value: str | None) -> Path | None:
 def _sha256(path: Path | None) -> str | None:
     if path is None or not path.is_file():
         return None
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    from app.ai.tasks.highlight_spotting.adapters.soccer_spotter_v9 import (
+        sha256_file,
+    )
+
+    return sha256_file(path)

@@ -20,6 +20,8 @@ from app.domains.render.model import RenderJob
 from app.domains.render.repository import RenderJobRepository
 from app.domains.artifact.model import Artifact
 from app.domains.artifact.repository import ArtifactRepository
+from app.domains.tracking.model import TrackingJob
+from app.domains.tracking.repository import TrackingJobRepository
 
 
 def can_access_project(user: User, project: Project) -> bool:
@@ -100,6 +102,18 @@ def require_artifact_access(db: Session, artifact_id: str, user: User) -> Artifa
     else:
         require_match_access(db, artifact.match_id, user)
     return artifact
+
+
+def require_tracking_job_access(
+    db: Session,
+    tracking_job_id: str,
+    user: User,
+) -> TrackingJob:
+    job = TrackingJobRepository(db).get_by_id(tracking_job_id)
+    if job is None:
+        _not_found("Tracking job")
+    require_match_access(db, job.match_id, user)
+    return job
 
 
 def _not_found(resource: str) -> None:

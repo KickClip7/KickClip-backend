@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.domains.render.model import RenderJob
@@ -47,6 +47,41 @@ class RenderJobRepository:
             .order_by(RenderJob.created_at.desc())
         )
         return list(self.db.scalars(stmt).all())
+
+    def find_reusable(
+        self,
+        *,
+        clip_plan_id: str,
+        options: dict,
+    ) -> RenderJob | None:
+        jobs = self.db.scalars(
+            select(RenderJob)
+            .where(
+                RenderJob.clip_plan_id == clip_plan_id,
+                RenderJob.status.in_(["queued", "running", "completed"]),
+            )
+            .order_by(RenderJob.created_at.desc())
+        )
+        return next(
+            (job for job in jobs if (job.options or {}) == options),
+            None,
+        )
+
+    def claim_queued(self, render_job_id: str) -> bool:
+        result = self.db.execute(
+            update(RenderJob)
+            .where(
+                RenderJob.render_job_id == render_job_id,
+                RenderJob.status == "queued",
+            )
+            .values(
+                status="running",
+                progress=5,
+                started_at=datetime.now(timezone.utc),
+                error_message=None,
+            )
+        )
+        return bool(result.rowcount)
 
     def mark_running(self, render_job: RenderJob) -> RenderJob:
         render_job.status = "running"

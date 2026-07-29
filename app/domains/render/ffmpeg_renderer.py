@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.domains.clip_plan.model import ClipPlan
 from app.domains.render.template_builder import RenderTemplate
+from app.domains.render.tracking_transform import TrackingTransformBuilder
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class FFmpegRenderer:
                 start_sec=float(item.start_sec),
                 duration_sec=duration_sec,
                 template=template,
+                item_metadata=item.metadata_ or {},
             )
             self._run(command)
             command_log.append(self._command_to_text(command))
@@ -117,7 +119,37 @@ class FFmpegRenderer:
         start_sec: float,
         duration_sec: float,
         template: RenderTemplate,
+        item_metadata: dict | None = None,
     ) -> list[str]:
+        item_metadata = item_metadata or {}
+        render_strategy = str(
+            item_metadata.get("render_strategy") or "FULL_FRAME"
+        ).upper()
+        if render_strategy == "TARGET_CENTERED":
+            transform = item_metadata.get("tracking_transform")
+            if not isinstance(transform, dict):
+                raise ValueError(
+                    "TARGET_CENTERED ClipPlanItem has no tracking transform."
+                )
+            video_filter = TrackingTransformBuilder.ffmpeg_filter(
+                transform=transform,
+                output_width=template.width,
+                output_height=template.height,
+            )
+        elif render_strategy == "FULL_FRAME":
+            # Preserve the whole source image for an explicitly full-frame
+            # scene. Padding is intentional; silently cropping to another
+            # player would violate the target-absence policy.
+            video_filter = (
+                f"scale={template.width}:{template.height}:"
+                "force_original_aspect_ratio=decrease,"
+                f"pad={template.width}:{template.height}:"
+                "(ow-iw)/2:(oh-ih)/2:color=black,setsar=1"
+            )
+        else:
+            raise ValueError(
+                f"Unsupported render strategy in ClipPlan: {render_strategy}"
+            )
         return [
             "ffmpeg",
             "-y",
@@ -128,7 +160,7 @@ class FFmpegRenderer:
             "-t",
             f"{duration_sec:.3f}",
             "-vf",
-            template.video_filter,
+            video_filter,
             "-r",
             "30",
             "-c:v",

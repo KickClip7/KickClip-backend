@@ -25,6 +25,12 @@ class ProjectRead(BaseModel):
     description: str | None
     status: str
     thumbnail_artifact_id: str | None
+    thumbnail_url: str | None = None
+    duration_sec: float | None = None
+    clip_count: int = 0
+    edit_mode: str | None = None
+    progress: int = Field(default=0, ge=0, le=100)
+    ratio: str | None = None
     last_opened_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -37,6 +43,11 @@ class ProjectRecentItem(BaseModel):
     status: str
     thumbnail_url: str | None = None
     duration_sec: float | None = None
+    clip_count: int = 0
+    edit_mode: str | None = None
+    progress: int = Field(default=0, ge=0, le=100)
+    ratio: str | None = None
+    last_opened_at: datetime | None = None
     created_at: datetime
 
 

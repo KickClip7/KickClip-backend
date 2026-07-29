@@ -52,6 +52,7 @@ class RenderCreateResponse(BaseModel):
     render_job_id: str
     status: str
     progress: int
+    reused: bool = False
 
 
 class RenderJobRead(BaseModel):
@@ -71,6 +72,7 @@ class RenderJobRead(BaseModel):
     options: dict[str, Any]
     runtime_sec: float | None
     error_message: str | None
+    retryable: bool = False
     download_url: str | None = None
     created_at: datetime
     updated_at: datetime

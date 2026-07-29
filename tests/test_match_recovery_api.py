@@ -12,6 +12,10 @@ from app.api.v1.router import api_router
 from app.db import models  # noqa: F401
 from app.db.base import Base
 from app.domains.analysis.model import AnalysisJob
+from app.domains.analysis.schema import AnalysisJobCreateRequest
+from app.domains.analysis.service import AnalysisJobService
+from app.domains.artifact.model import Artifact
+from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
 from app.domains.match.model import Match
 from app.domains.media.model import MediaAsset
@@ -71,6 +75,17 @@ class MatchRecoveryApiTest(unittest.TestCase):
             routes,
         )
 
+    def test_artifact_download_allows_handler_to_validate_signed_token(self) -> None:
+        route = next(
+            route
+            for route in api_router.routes
+            if route.path == "/artifacts/{artifact_id}/download"
+        )
+        dependency_calls = {
+            dependency.call for dependency in route.dependant.dependencies
+        }
+        self.assertNotIn(get_current_user, dependency_calls)
+
     def test_match_list_is_owner_scoped_and_restores_preview_urls(self) -> None:
         with patch(
             "app.api.v1.matches.build_signed_media_url",
@@ -103,6 +118,32 @@ class MatchRecoveryApiTest(unittest.TestCase):
         self.assertEqual(response.match_id, self.match.match_id)
         self.assertEqual(response.video_asset_id, self.preview_asset.asset_id)
         self.assertIsNotNone(response.video_url)
+
+    def test_match_list_includes_real_thumbnail_artifact_url(self) -> None:
+        thumbnail = Artifact(
+            artifact_id="art_match_thumbnail",
+            match_id=self.match.match_id,
+            artifact_type="MATCH_THUMBNAIL",
+            file_path="storage/matches/match_owner/thumbnails/frame.jpg",
+            mime_type="image/jpeg",
+        )
+        self.db.add(thumbnail)
+        self.db.commit()
+
+        with (
+            patch(
+                "app.api.v1.matches.build_signed_media_url",
+                side_effect=self._signed_url,
+            ),
+            patch(
+                "app.api.v1.matches.build_signed_artifact_url",
+                return_value=("/signed/thumbnail.jpg", 900),
+            ),
+        ):
+            item = list_matches(db=self.db, current_user=self.owner)[0]
+
+        self.assertEqual(item.thumbnail_artifact_id, thumbnail.artifact_id)
+        self.assertEqual(item.thumbnail_url, "/signed/thumbnail.jpg")
 
     def test_match_analysis_jobs_are_discoverable_newest_first(self) -> None:
         created_at = datetime.now(timezone.utc)
@@ -140,6 +181,74 @@ class MatchRecoveryApiTest(unittest.TestCase):
             [running.analysis_job_id, completed.analysis_job_id],
         )
         self.assertEqual([job.status for job in response], ["running", "completed"])
+
+    def test_match_list_and_detail_include_latest_durable_analysis_snapshot(self) -> None:
+        created_at = datetime.now(timezone.utc)
+        self.db.add_all(
+            [
+                AnalysisJob(
+                    analysis_job_id="job_old",
+                    match_id=self.match.match_id,
+                    job_type="FULL_MATCH_ANALYSIS",
+                    status="COMPLETED",
+                    progress=100,
+                    current_step="timeline",
+                    options={},
+                    created_at=created_at,
+                ),
+                AnalysisJob(
+                    analysis_job_id="job_latest",
+                    match_id=self.match.match_id,
+                    job_type="FULL_MATCH_ANALYSIS",
+                    status="RUNNING",
+                    progress=47,
+                    current_step="highlight_spotting",
+                    error_message=None,
+                    options={},
+                    created_at=created_at + timedelta(seconds=1),
+                ),
+            ]
+        )
+        self.db.commit()
+
+        with patch(
+            "app.api.v1.matches.build_signed_media_url",
+            side_effect=self._signed_url,
+        ):
+            item = list_matches(db=self.db, current_user=self.owner)[0]
+            detail = get_match(
+                match_id=self.match.match_id,
+                db=self.db,
+                current_user=self.owner,
+            )
+
+        for response in (item, detail):
+            self.assertEqual(response.analysis_job_id, "job_latest")
+            self.assertEqual(response.analysis_status, "RUNNING")
+            self.assertEqual(response.analysis_progress, 47)
+            self.assertEqual(
+                response.analysis_current_step,
+                "highlight_spotting",
+            )
+
+    def test_analysis_create_reuses_identical_active_job(self) -> None:
+        service = AnalysisJobService(self.db)
+        payload = AnalysisJobCreateRequest(
+            job_type="FULL_MATCH_ANALYSIS",
+            options={"run_player_tracking": True},
+        )
+        first = service.create_analysis_job_for_match(
+            self.match.match_id,
+            payload,
+        )
+        second = service.create_analysis_job_for_match(
+            self.match.match_id,
+            payload,
+        )
+
+        self.assertEqual(first.analysis_job_id, second.analysis_job_id)
+        self.assertFalse(first.reused)
+        self.assertTrue(second.reused)
 
     def test_match_analysis_jobs_hide_other_users_matches(self) -> None:
         with self.assertRaises(HTTPException) as exc:

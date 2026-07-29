@@ -1,0 +1,52 @@
+{
+  "model_id": "soccer_spotter_v9",
+  "checkpoint_sha256": "b58db272f1feb43f548e0e8ee82df9b8bdbfe1e441fb14da0376f09ec056150c",
+  "class_order": [
+    "goal",
+    "shot",
+    "penalty",
+    "card",
+    "corner"
+  ],
+  "checkpoint_class_order": [
+    "Goal",
+    "Shot",
+    "Penalty",
+    "Card",
+    "Corner"
+  ],
+  "predictor": {
+    "feature_dim": 512,
+    "feature_fps": 2.0,
+    "window_size": 128,
+    "stride_size": 8,
+    "batch_size": 64,
+    "offset_merge": "mean"
+  },
+  "postprocess": {
+    "use_adaptive_calibration": false,
+    "base_thresholds": {
+      "goal": 0.25,
+      "shot": 0.55,
+      "penalty": 0.2,
+      "card": 0.75,
+      "corner": 0.3
+    },
+    "peak_distances_sec": {
+      "goal": 25,
+      "shot": 8,
+      "penalty": 35,
+      "card": 18,
+      "corner": 10
+    },
+    "max_events_per_class": {
+      "goal": 15,
+      "shot": 40,
+      "penalty": 8,
+      "card": 25,
+      "corner": 25
+    },
+    "max_candidates_per_match": 113,
+    "apply_offset": true
+  }
+}

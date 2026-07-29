@@ -1,0 +1,13 @@
+champion_identifier: sampling_v1_loss_v2_ms_stem_v1
+model_name: SoccerHighlightFormer
+temporal_frontend: MultiScaleTemporalStem
+input_contract: SoccerNet PCA512 at 2 FPS
+checkpoint:
+  filename: transformer_best.pt
+  sha256: c3aa72c3d5be98fb8c6104818da69d2e8ac9a993696830fa1a0588cd58ffaee1
+  epoch: 4
+parameter_count: 4098828
+validation:
+  best_loss: 0.239583
+  map_5s: 0.470480
+  map_10s: 0.487906

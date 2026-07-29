@@ -139,6 +139,17 @@ models/
 !configs/models/action_spotting/best_soccer_model/
 !configs/models/action_spotting/best_soccer_model/**
 
+# Exact runtime bundle for the current Action Spotting Champion.
+!storage/models/
+storage/models/*
+!storage/models/action_spotting/
+storage/models/action_spotting/*
+!storage/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/
+!storage/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/**
+!storage/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/transformer_best.pt
+!storage/models/action_spotting/soccer_spotter_v9/
+!storage/models/action_spotting/soccer_spotter_v9/v9_best_model.pth
+
 
 # =============================================================================
 # Video, audio, and media files
@@ -226,3 +237,20 @@ Desktop.ini
 .cache/
 .agents/
 .codex/
+
+# Local extraction of the separately distributed tracking runtime bundle.
+/.tracking-runtime/
+
+# Local-only tracking development and handoff materials.
+# Backend integration code under app/ and database migrations remain tracked.
+/tracking_runtime_adapter/
+/handoffs/
+/scripts/inspect_tracking_anchor.py
+/scripts/install_tracking_runtime_adapter.py
+/docs/tracking_*.md
+/docs/tracking_*.json
+/docs/tracking_incidents/
+/docs/scene_target_selection_implementation_audit_*.md
+/tests/test_tracking_*.py
+/tests/test_scene_target_selection_backend.py
+/tests/test_scene_target_reviewability_backend.py

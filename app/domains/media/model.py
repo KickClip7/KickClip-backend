@@ -46,5 +46,10 @@ class MediaAsset(Base, TimestampMixin):
 
     # 2GB 이상 영상 파일도 저장 가능하도록 BigInteger 사용
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
 
     match = relationship("Match", back_populates="media_assets")
