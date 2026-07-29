@@ -18,6 +18,7 @@ def extract_video_metadata(file_path: str | Path) -> dict[str, Any]:
         "fps": None,
         "width": None,
         "height": None,
+        "frame_count": None,
         "size_bytes": path.stat().st_size if path.exists() else None,
         "codec_name": None,
         "codec_tag_string": None,
@@ -35,7 +36,10 @@ def extract_video_metadata(file_path: str | Path) -> dict[str, Any]:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=codec_name,codec_tag_string,pix_fmt,width,height,r_frame_rate,duration",
+        (
+            "stream=codec_name,codec_tag_string,pix_fmt,width,height,"
+            "r_frame_rate,duration,nb_frames"
+        ),
         "-show_entries",
         "format=format_name,duration,size",
         "-of",
@@ -51,7 +55,7 @@ def extract_video_metadata(file_path: str | Path) -> dict[str, Any]:
             check=True,
         )
         data = json.loads(completed.stdout)
-    except Exception:
+    except Exception:  # noqa: BLE001 - metadata probing must retain its fallback
         return fallback
 
     streams = data.get("streams") or []
@@ -71,6 +75,7 @@ def extract_video_metadata(file_path: str | Path) -> dict[str, Any]:
         "fps": _parse_fps(stream.get("r_frame_rate")),
         "width": _safe_int(stream.get("width")),
         "height": _safe_int(stream.get("height")),
+        "frame_count": _safe_int(stream.get("nb_frames")),
         "size_bytes": size_bytes,
         "codec_name": stream.get("codec_name"),
         "codec_tag_string": stream.get("codec_tag_string"),

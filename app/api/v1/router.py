@@ -14,6 +14,7 @@ from app.api.v1 import (
     players,
     projects,
     renders,
+    scene_target_reviewability,
     session,
     studio,
     timelines,
@@ -31,11 +32,15 @@ api_router.include_router(
     artifacts.router,
     prefix="/artifacts",
     tags=["artifacts"],
-    dependencies=authenticated,
 )
 api_router.include_router(
     highlights.router,
     tags=["highlight"],
+    dependencies=authenticated,
+)
+api_router.include_router(
+    scene_target_reviewability.router,
+    tags=["scene-target-reviewability"],
     dependencies=authenticated,
 )
 api_router.include_router(

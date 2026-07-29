@@ -14,6 +14,7 @@ from app.domains.highlight.schema import (
 EVENT_KEYWORDS = {
     "goal": ("골", "득점", "goal"),
     "shot": ("슛", "슈팅", "shot"),
+    "penalty": ("페널티", "패널티", "penalty", "pk"),
     "foul": ("파울", "반칙", "foul"),
     "free_kick": ("프리킥", "free kick", "free_kick"),
     "corner": ("코너", "코너킥", "corner"),

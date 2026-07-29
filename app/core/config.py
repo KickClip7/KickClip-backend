@@ -11,7 +11,6 @@ from typing import Literal
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
@@ -113,10 +112,11 @@ class Settings(BaseSettings):
     TRACKING_ENABLED: bool = False
     TRACKING_PROJECT_ROOT: str = ""
     TRACKING_E2E_SCRIPT_PATH: str = ""
+    TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH: str = ""
     TRACKING_VERIFY_SCRIPT_PATH: str = ""
     TRACKING_PYTHON_EXECUTABLE: str = ""
     TRACKING_OUTPUT_ROOT: str = ""
-    TRACKING_DEVICE: Literal["auto", "cuda", "cpu"] = "cuda"
+    TRACKING_DEVICE: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     TRACKING_REACQUISITION_MODE: Literal["assisted"] = "assisted"
     TRACKING_MAX_CONCURRENT_JOBS: int = Field(default=1, ge=1, le=8)
     TRACKING_PROCESS_TIMEOUT_SECONDS: int = Field(default=21600, ge=60)
@@ -127,9 +127,12 @@ class Settings(BaseSettings):
     # Scene-local player candidate detector
     # -------------------------------------------------------------------------
     PLAYER_DETECTOR_BACKEND: Literal["rfdetr", "hog"] = "rfdetr"
-    PLAYER_DETECTOR_CHECKPOINT: Path = Path(
-        r"D:\HAESUNG\prometheus\YOLO-train\weights\rfdetr"
-        r"\checkpoint_best_regular.pth"
+    PLAYER_DETECTOR_CHECKPOINT: Path = (
+        PROJECT_ROOT
+        / ".tracking-runtime"
+        / "weights"
+        / "rfdetr"
+        / "checkpoint_best_regular.pth"
     )
     PLAYER_DETECTOR_DEVICE: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     PLAYER_DETECTOR_ALLOW_HOG_FALLBACK: bool = False

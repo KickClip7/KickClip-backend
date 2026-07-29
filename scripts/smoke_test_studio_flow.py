@@ -161,7 +161,13 @@ def main() -> None:
             "target_duration_sec": args.target_duration_sec,
             "selected_player_id": selected_player_id if args.use_selected_player else None,
             "options": {
-                "allow_event_types": ["goal", "shot", "foul", "card", "free_kick", "corner"],
+                "allow_event_types": [
+                    "goal",
+                    "shot",
+                    "penalty",
+                    "card",
+                    "corner",
+                ],
                 "ratio": args.ratio,
             },
         },

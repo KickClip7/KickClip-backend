@@ -91,6 +91,7 @@ class AnalysisJobCreateResponse(BaseModel):
     progress: int
     current_step: str | None
     steps: list[AnalysisJobStepCompactRead]
+    reused: bool = False
 
 
 class AnalysisJobStatusResponse(BaseModel):
@@ -110,6 +111,7 @@ class AnalysisJobStatusResponse(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     error_message: str | None
+    retryable: bool = False
     workflow_status: str | None = None
     workflow_state_history: list[str] = Field(default_factory=list)
     error: dict[str, Any] | None = None

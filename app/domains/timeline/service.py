@@ -73,7 +73,7 @@ class TimelineEventService:
         label: str | None = None,
         half: int | None = None,
     ) -> list[TimelineEvent]:
-        return self.repository.list_by_match(
+        return self.repository.list_current_by_match(
             match_id=match_id,
             label=label,
             half=half,

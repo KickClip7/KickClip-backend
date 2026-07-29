@@ -5,17 +5,20 @@ import pytest
 from types import SimpleNamespace
 
 from app.ai.registry.model_card import ModelCard
-from app.ai.tasks.highlight_spotting.adapters.soccer_highlight_former import (
+from app.ai.tasks.highlight_spotting.adapters.soccer_spotter_v9 import (
     CHAMPION_CLASS_ORDER,
     CHAMPION_IDENTIFIER,
     EXPECTED_CHECKPOINT_SHA256,
-    SoccerHighlightFormerAdapter,
-    _Candidate,
+    EXPECTED_PARAMETER_COUNT,
+    SoccerSpotterV9Adapter,
     _HalfTimeline,
     get_window_start_indices,
     sha256_file,
 )
-from app.ai.tasks.highlight_spotting.config import build_highlight_runtime_config
+from app.ai.tasks.highlight_spotting.config import (
+    build_highlight_runtime_config,
+    load_highlight_postprocess_config,
+)
 from app.ai.tasks.highlight_spotting.feature_loader import (
     HighlightFeatureArrayInfo,
     HighlightFeatureBundle,
@@ -31,22 +34,22 @@ from app.domains.action_spotting.diagnostics import (
 from app.domains.action_spotting.status import action_spotting_workflow_status
 
 
-def _adapter() -> SoccerHighlightFormerAdapter:
-    return SoccerHighlightFormerAdapter.from_model_dir()
+def _adapter() -> SoccerSpotterV9Adapter:
+    return SoccerSpotterV9Adapter.from_model_dir()
 
 
 def _model_card() -> ModelCard:
     return ModelCard(
         id=CHAMPION_IDENTIFIER,
-        model_name="SoccerHighlightFormer",
-        model_version=CHAMPION_IDENTIFIER,
+        model_name="SoccerSpotterV9",
+        model_version="v9",
         checkpoint_path=(
             "storage/models/action_spotting/"
-            "sampling_v1_loss_v2_ms_stem_v1/transformer_best.pt"
+            "soccer_spotter_v9/v9_best_model.pth"
         ),
         config_path=(
             "configs/models/action_spotting/"
-            "sampling_v1_loss_v2_ms_stem_v1/model.yaml"
+            "soccer_spotter_v9/v9_config.json"
         ),
         extra={"postprocess_config_path": "configs/highlight_spotting.yaml"},
     )
@@ -61,15 +64,32 @@ def test_champion_artifacts_and_contract_load_strictly() -> None:
     assert adapter.spec.feature_dim == 512
     assert adapter.spec.feature_fps == 2.0
     assert adapter.spec.window_size == 128
-    assert adapter.spec.stride_size == 32
-    assert adapter.spec.threshold == 0.20
-    assert adapter.spec.local_peak_window_sec == 3.0
-    assert adapter.spec.nms_window_sec == 10.0
-    assert adapter.spec.offset_merge == "weighted"
+    assert adapter.spec.stride_size == 8
+    assert adapter.spec.base_thresholds == {
+        "goal": 0.25,
+        "shot": 0.55,
+        "penalty": 0.20,
+        "card": 0.75,
+        "corner": 0.30,
+    }
+    assert adapter.spec.max_candidates_per_match == 113
     assert (
         sha256_file(adapter.paths.checkpoint_path)
         == EXPECTED_CHECKPOINT_SHA256
     )
+
+
+def test_backend_uses_the_fixed_product_clip_windows() -> None:
+    config = load_highlight_postprocess_config(_model_card())
+
+    assert config["merge_overlapping_scenes"] is False
+    assert config["event_windows"] == {
+        "goal": {"before_sec": 15.0, "after_sec": 30.0},
+        "shot": {"before_sec": 8.0, "after_sec": 14.0},
+        "penalty": {"before_sec": 25.0, "after_sec": 40.0},
+        "card": {"before_sec": 15.0, "after_sec": 25.0},
+        "corner": {"before_sec": 10.0, "after_sec": 18.0},
+    }
 
 
 def test_champion_output_shape_is_heatmap_and_offset() -> None:
@@ -77,11 +97,18 @@ def test_champion_output_shape_is_heatmap_and_offset() -> None:
     model, torch, device = adapter._load_model(device="cpu")
 
     with torch.no_grad():
-        output = model(torch.zeros((1, 128, 512), dtype=torch.float32).to(device))
+        logits, offset_mean, offset_logvar, eventness = model(
+            torch.zeros((1, 128, 512), dtype=torch.float32).to(device)
+        )
 
-    assert tuple(output["heatmap_logits"].shape) == (1, 128, 6)
-    assert tuple(output["offset"].shape) == (1, 128, 6)
-    assert sum(parameter.numel() for parameter in model.parameters()) == 4_098_828
+    assert tuple(logits.shape) == (1, 128, 5)
+    assert tuple(offset_mean.shape) == (1, 128, 5)
+    assert tuple(offset_logvar.shape) == (1, 128, 5)
+    assert tuple(eventness.shape) == (1, 128)
+    assert (
+        sum(parameter.numel() for parameter in model.parameters())
+        == EXPECTED_PARAMETER_COUNT
+    )
 
 
 def test_champion_runs_end_to_end_on_half_feature_contract(tmp_path) -> None:
@@ -118,7 +145,7 @@ def test_champion_runs_end_to_end_on_half_feature_contract(tmp_path) -> None:
 
     predictions = _adapter().predict(feature_bundle=bundle, device="cpu")
 
-    assert len(predictions) <= 80
+    assert len(predictions) <= 113
     assert all(item.label in CHAMPION_CLASS_ORDER for item in predictions)
     assert all(
         item.metadata["player_involvement"]["status"] == "unknown"
@@ -127,58 +154,43 @@ def test_champion_runs_end_to_end_on_half_feature_contract(tmp_path) -> None:
 
 
 def test_window_sampling_keeps_the_exact_tail_window() -> None:
-    assert get_window_start_indices(80, 128, 32) == [0]
-    assert get_window_start_indices(128, 128, 32) == [0]
-    assert get_window_start_indices(200, 128, 32) == [0, 32, 64, 72]
+    assert get_window_start_indices(80, 128, 8) == [0]
+    assert get_window_start_indices(128, 128, 8) == [0]
+    assert get_window_start_indices(145, 128, 8) == [0, 8, 16, 17]
 
 
-def test_offset_is_decoded_in_seconds_and_nms_is_class_aware() -> None:
+def test_offset_and_class_specific_peak_policy_are_applied() -> None:
     adapter = _adapter()
-    scores = np.zeros((32, 6), dtype=np.float32)
+    scores = np.zeros((64, 5), dtype=np.float32)
     offsets = np.zeros_like(scores)
     scores[10, 0] = 0.9
     offsets[10, 0] = 1.25
+    scores[30, 0] = 0.8
+    scores[10, 1] = 0.7
 
-    candidates = adapter._extract_half_candidates(
-        _HalfTimeline(half=1, timesteps=32, scores=scores, offsets=offsets)
-    )
-
-    assert len(candidates) == 1
-    assert candidates[0].raw_timestamp_sec == 5.0
-    assert candidates[0].timestamp_sec == pytest.approx(6.25)
-
-    kept = adapter._apply_class_aware_nms(
+    candidates = adapter._extract_candidates(
         [
-            candidates[0],
-            _Candidate(
+            _HalfTimeline(
                 half=1,
-                label="goal",
-                label_id=0,
-                timestamp_sec=16.25,
-                raw_timestamp_sec=15.0,
-                offset_sec=1.25,
-                timestep_idx=30,
-                score=0.8,
-            ),
-            _Candidate(
-                half=1,
-                label="shot",
-                label_id=1,
-                timestamp_sec=6.25,
-                raw_timestamp_sec=5.0,
-                offset_sec=1.25,
-                timestep_idx=10,
-                score=0.7,
-            ),
+                timesteps=64,
+                scores=scores,
+                offsets=offsets,
+                eventness=np.full(64, 0.6, dtype=np.float32),
+            )
         ]
     )
-    assert [(item.label, item.score) for item in kept] == [
-        ("goal", pytest.approx(0.9)),
-        ("shot", pytest.approx(0.7)),
-    ]
+
+    assert {(item.label, item.timestep_idx) for item in candidates} == {
+        ("goal", 10),
+        ("shot", 10),
+    }
+    goal = next(item for item in candidates if item.label == "goal")
+    assert goal.raw_timestamp_sec == 5.0
+    assert goal.timestamp_sec == pytest.approx(6.25)
+    assert goal.eventness == pytest.approx(0.6)
 
 
-def test_unsupported_legacy_labels_are_not_remapped() -> None:
+def test_v9_penalty_label_is_supported_without_remapping() -> None:
     assert normalize_label("penalty") == "penalty"
     assert normalize_label("substitution") == "substitution"
 

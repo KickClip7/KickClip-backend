@@ -2,39 +2,66 @@ inference:
   mode: real
   allow_fallback_when_missing: false
   strict_real_model: true
-  model_adapter: soccer_highlight_former_champion
+  model_adapter: soccer_spotter_v9
   device: auto
+  batch_size: 64
+  max_candidates: 113
   model:
-    model_dir: storage/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1
-    checkpoint_file: transformer_best.pt
-    model_config_file: model.yaml
-    train_config_file: train.yaml
-    config_snapshot_file: config_snapshot.yaml
-    inference_policy_file: inference_policy.yaml
-    manifest_file: manifest.yaml
+    model_dir: storage/models/action_spotting/soccer_spotter_v9
+    checkpoint_file: v9_best_model.pth
+    model_config_file: v9_config.json
+    inference_policy_file: inference_policy.json
+    manifest_file: manifest.json
   expected_feature_asset_types:
     - SOCCERNET_FEATURE_HALF1
     - SOCCERNET_FEATURE_HALF2
   raw_video_fallback_enabled: false
 
 postprocess:
-  # These four values are copied from the Champion validation evaluation and
-  # are validated at startup. Per-class threshold overrides are not defined.
-  default_threshold: 0.20
-  max_candidates: 80
-  nms_window_sec: 10.0
-  class_thresholds: {}
-  class_aware_nms: true
+  # Candidate decoding is copied from the v9 validation/test contract.
+  default_threshold: 0.0
+  max_candidates: 113
+  nms_window_sec: 0.0
+  class_thresholds:
+    goal: 0.25
+    shot: 0.55
+    penalty: 0.20
+    card: 0.75
+    corner: 0.30
+  class_aware_nms: false
   apply_offset: true
 
-  # Backend scene-window policy. This is separate from model event decoding.
-  merge_overlapping_scenes: true
+  # Backend clip-window policy. These values are the product contract and are
+  # intentionally separate from model event decoding.
+  #
+  # Overlapping events remain separate clips so their event-specific windows
+  # are never shortened, expanded, or split by another event.
+  merge_overlapping_scenes: false
+  event_windows:
+    goal:
+      before_sec: 15.0
+      after_sec: 30.0
+    shot:
+      before_sec: 8.0
+      after_sec: 14.0
+    penalty:
+      before_sec: 25.0
+      after_sec: 40.0
+    card:
+      before_sec: 15.0
+      after_sec: 25.0
+    corner:
+      before_sec: 10.0
+      after_sec: 18.0
+
+  # Legacy fallback for event labels outside the v9 five-class contract.
   min_duration_sec: 4.0
   max_duration_sec: 12.0
   pre_event_sec: 4.0
   post_event_sec: 4.0
   class_priority:
     goal: 100
+    penalty: 90
     shot: 80
     free_kick: 70
     corner: 60
@@ -52,6 +79,9 @@ label_display:
   shot:
     tag: SHOT
     title_prefix: SHOT
+  penalty:
+    tag: PENALTY
+    title_prefix: PENALTY
   foul:
     tag: FOUL
     title_prefix: FOUL

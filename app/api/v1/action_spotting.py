@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.ai.registry.model_registry import ModelRegistry
 from app.ai.runtime.job_runner import run_analysis_job_background
-from app.ai.tasks.highlight_spotting.adapters.soccer_highlight_former import (
-    SoccerHighlightFormerAdapter,
+from app.ai.tasks.highlight_spotting.adapters.soccer_spotter_v9 import (
+    SoccerSpotterV9Adapter,
 )
 from app.core.paths import get_project_root
 from app.db.session import get_db
@@ -47,7 +47,7 @@ def get_action_spotting_model() -> ActionSpottingModelResponse:
     registry = ModelRegistry()
     model_card = registry.get_model_card("highlight_spotting", "champion")
     checkpoint_path = _resolve_path(model_card.checkpoint_path)
-    adapter = SoccerHighlightFormerAdapter.from_model_dir(
+    adapter = SoccerSpotterV9Adapter.from_model_dir(
         checkpoint_path.parent if checkpoint_path else None
     )
     preflight = adapter.preflight()
@@ -175,7 +175,7 @@ def _resolve_path(value: str | None) -> Path | None:
 def _sha256(path: Path | None) -> str | None:
     if path is None or not path.is_file():
         return None
-    from app.ai.tasks.highlight_spotting.adapters.soccer_highlight_former import (
+    from app.ai.tasks.highlight_spotting.adapters.soccer_spotter_v9 import (
         sha256_file,
     )
 

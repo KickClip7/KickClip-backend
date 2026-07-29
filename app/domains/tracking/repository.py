@@ -61,3 +61,48 @@ class TrackingJobRepository:
             ).all()
         )
 
+    def find_equivalent_reusable(
+        self,
+        *,
+        owner_id: str,
+        media_asset_id: str,
+        project_id: str | None,
+        initial_bbox: list[float],
+        bbox_format: str,
+        reacquisition_mode: str,
+        cache_discriminator: str | None = None,
+    ) -> TrackingJob | None:
+        stmt = (
+            select(TrackingJob)
+            .where(
+                TrackingJob.owner_id == owner_id,
+                TrackingJob.media_asset_id == media_asset_id,
+                TrackingJob.project_id == project_id,
+                TrackingJob.bbox_format == bbox_format,
+                TrackingJob.reacquisition_mode == reacquisition_mode,
+                TrackingJob.status.notin_(
+                    [
+                        TrackingBackendStatus.FAILED.value,
+                        TrackingBackendStatus.CANCELLED.value,
+                    ]
+                ),
+            )
+            .order_by(TrackingJob.created_at.desc())
+        )
+        for job in self.db.scalars(stmt):
+            scene_context = (job.runtime_metadata or {}).get(
+                "scene_target_selection"
+            )
+            if cache_discriminator is None:
+                if scene_context:
+                    continue
+            elif not isinstance(scene_context, dict) or (
+                scene_context.get("tracking_cache_key")
+                != cache_discriminator
+            ):
+                continue
+            if [float(value) for value in job.initial_bbox] == [
+                float(value) for value in initial_bbox
+            ]:
+                return job
+        return None

@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 
 from app.ai.registry.model_card import ModelCard
+from app.ai.tasks.highlight_spotting.postprocessor import DEFAULT_EVENT_WINDOWS
 from app.core.paths import get_project_root
 from app.domains.action_spotting.errors import inference_policy_incomplete
 
@@ -26,7 +27,7 @@ class HighlightSpottingRuntimeConfig:
     expected_feature_asset_types: list[str] = field(
         default_factory=lambda: DEFAULT_EXPECTED_FEATURE_ASSET_TYPES.copy()
     )
-    model_adapter: str = "soccer_highlight_former_champion"
+    model_adapter: str = "soccer_spotter_v9"
     device: str = "auto"
     real_adapter_batch_size: int | None = None
     real_adapter_max_candidates: int | None = None
@@ -73,7 +74,7 @@ def build_highlight_runtime_config(
         ),
         model_adapter=str(
             inference.get("model_adapter")
-            or "soccer_highlight_former_champion"
+            or "soccer_spotter_v9"
         ),
         device=str(job_options.get("device") or inference.get("device") or "auto"),
         real_adapter_batch_size=_optional_int(
@@ -98,14 +99,15 @@ def load_highlight_postprocess_config(model_card: ModelCard) -> dict[str, Any]:
     postprocess = (_load_highlight_yaml(model_card).get("postprocess") or {})
     config = {
         # Candidate threshold/NMS are the exact Champion evaluation policy.
-        "default_threshold": float(postprocess.get("default_threshold", 0.20)),
-        "max_candidates": int(postprocess.get("max_candidates", 80)),
-        "nms_window_sec": float(postprocess.get("nms_window_sec", 10.0)),
+        "default_threshold": float(postprocess.get("default_threshold", 0.0)),
+        "max_candidates": int(postprocess.get("max_candidates", 113)),
+        "nms_window_sec": float(postprocess.get("nms_window_sec", 0.0)),
         # Scene-window behavior is a backend presentation policy and remains
         # separate from model event decoding.
         "merge_overlapping_scenes": bool(
-            postprocess.get("merge_overlapping_scenes", True)
+            postprocess.get("merge_overlapping_scenes", False)
         ),
+        "event_windows": postprocess.get("event_windows"),
         "min_duration_sec": float(postprocess.get("min_duration_sec", 4.0)),
         "max_duration_sec": float(postprocess.get("max_duration_sec", 12.0)),
         "pre_event_sec": float(postprocess.get("pre_event_sec", 4.0)),
@@ -113,6 +115,7 @@ def load_highlight_postprocess_config(model_card: ModelCard) -> dict[str, Any]:
         "class_thresholds": postprocess.get("class_thresholds") or {},
         "class_priority": postprocess.get("class_priority") or {
             "goal": 100,
+            "penalty": 90,
             "shot": 80,
             "free_kick": 70,
             "corner": 60,
@@ -121,10 +124,16 @@ def load_highlight_postprocess_config(model_card: ModelCard) -> dict[str, Any]:
         },
     }
     expected_decode_policy = {
-        "default_threshold": 0.20,
-        "max_candidates": 80,
-        "nms_window_sec": 10.0,
-        "class_thresholds": {},
+        "default_threshold": 0.0,
+        "max_candidates": 113,
+        "nms_window_sec": 0.0,
+        "class_thresholds": {
+            "goal": 0.25,
+            "shot": 0.55,
+            "penalty": 0.20,
+            "card": 0.75,
+            "corner": 0.30,
+        },
     }
     actual_decode_policy = {
         key: config[key] for key in expected_decode_policy
@@ -135,6 +144,29 @@ def load_highlight_postprocess_config(model_card: ModelCard) -> dict[str, Any]:
             expected=expected_decode_policy,
             actual=actual_decode_policy,
         )
+    actual_event_windows = {
+        label: {
+            "before_sec": float(window["before_sec"]),
+            "after_sec": float(window["after_sec"]),
+        }
+        for label, window in (config["event_windows"] or {}).items()
+    }
+    if (
+        config["merge_overlapping_scenes"] is not False
+        or actual_event_windows != DEFAULT_EVENT_WINDOWS
+    ):
+        raise inference_policy_incomplete(
+            "Backend event clip-window policy is inconsistent.",
+            expected={
+                "merge_overlapping_scenes": False,
+                "event_windows": DEFAULT_EVENT_WINDOWS,
+            },
+            actual={
+                "merge_overlapping_scenes": config["merge_overlapping_scenes"],
+                "event_windows": actual_event_windows,
+            },
+        )
+    config["event_windows"] = actual_event_windows
     return config
 
 

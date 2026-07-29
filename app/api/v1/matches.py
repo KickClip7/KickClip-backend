@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.domains.artifact.model import Artifact
+from app.domains.artifact.signed_url import build_signed_artifact_url
 from app.domains.auth.access import require_match_access
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
@@ -33,8 +35,19 @@ def list_matches(
     current_user: User = Depends(get_current_user),
 ) -> list[MatchRead]:
     owner_id = None if current_user.developer_mode_enabled else current_user.user_id
-    matches = MatchService(db).list_matches(owner_id=owner_id)
-    return [_build_match_read(match, current_user.user_id) for match in matches]
+    service = MatchService(db)
+    matches = service.list_matches(owner_id=owner_id)
+    latest_jobs = service.latest_analysis_by_match_ids(
+        [match.match_id for match in matches]
+    )
+    return [
+        _build_match_read(
+            match,
+            current_user.user_id,
+            latest_analysis_job=latest_jobs.get(match.match_id),
+        )
+        for match in matches
+    ]
 
 
 @router.post(
@@ -131,7 +144,10 @@ def list_match_projects(
     current_user: User = Depends(get_current_user),
 ) -> list[ProjectRead]:
     require_match_access(db, match_id, current_user)
-    return ProjectService(db).list_match_projects(match_id)
+    return ProjectService(db).list_match_projects(
+        match_id,
+        user_id=current_user.user_id,
+    )
 
 
 @router.get(
@@ -145,14 +161,27 @@ def get_match(
     current_user: User = Depends(get_current_user),
 ) -> MatchRead:
     match = require_match_access(db, match_id, current_user)
-    return _build_match_read(match, current_user.user_id)
+    latest_job = MatchService(db).latest_analysis_by_match_ids([match.match_id]).get(
+        match.match_id
+    )
+    return _build_match_read(
+        match,
+        current_user.user_id,
+        latest_analysis_job=latest_job,
+    )
 
 
-def _build_match_read(match: Match, user_id: str) -> MatchRead:
+def _build_match_read(
+    match: Match,
+    user_id: str,
+    *,
+    latest_analysis_job=None,
+) -> MatchRead:
     assets_by_type = {asset.asset_type: asset for asset in match.media_assets}
     raw_asset = assets_by_type.get("RAW_VIDEO")
     preview_asset = assets_by_type.get("WEB_PREVIEW_VIDEO")
     video_asset = preview_asset or raw_asset
+    thumbnail = _select_match_thumbnail(match)
 
     signed_urls: dict[str, str] = {}
     for asset in (video_asset, preview_asset):
@@ -170,12 +199,61 @@ def _build_match_read(match: Match, user_id: str) -> MatchRead:
             "video_url": _asset_url(video_asset, signed_urls),
             "preview_video_asset_id": _asset_id(preview_asset),
             "preview_url": _asset_url(preview_asset, signed_urls),
+            "thumbnail_artifact_id": (
+                thumbnail.artifact_id if thumbnail is not None else None
+            ),
+            "thumbnail_url": (
+                build_signed_artifact_url(
+                    thumbnail.artifact_id,
+                    user_id,
+                )[0]
+                if thumbnail is not None
+                else None
+            ),
+            "analysis_status": (
+                latest_analysis_job.status
+                if latest_analysis_job is not None
+                else "NOT_STARTED"
+            ),
+            "analysis_progress": (
+                latest_analysis_job.progress
+                if latest_analysis_job is not None
+                else 0
+            ),
+            "analysis_job_id": (
+                latest_analysis_job.analysis_job_id
+                if latest_analysis_job is not None
+                else None
+            ),
+            "analysis_current_step": (
+                latest_analysis_job.current_step
+                if latest_analysis_job is not None
+                else None
+            ),
+            "analysis_error_message": (
+                latest_analysis_job.error_message
+                if latest_analysis_job is not None
+                else None
+            ),
+            "analysis_retryable": bool(
+                latest_analysis_job is not None
+                and latest_analysis_job.status == "FAILED"
+            ),
         }
     )
 
 
 def _asset_id(asset: MediaAsset | None) -> str | None:
     return asset.asset_id if asset is not None else None
+
+
+def _select_match_thumbnail(match: Match) -> Artifact | None:
+    thumbnails = [
+        artifact
+        for artifact in match.artifacts
+        if artifact.artifact_type == "MATCH_THUMBNAIL"
+    ]
+    return max(thumbnails, key=lambda artifact: artifact.created_at, default=None)
 
 
 def _asset_url(

@@ -62,7 +62,14 @@ def pending_review_candidate_ids(
 
     ambiguities = state.get("ambiguities")
     if not isinstance(ambiguities, list):
-        return set()
+        direct = pending.get("candidates")
+        if not isinstance(direct, list):
+            return set()
+        return {
+            str(item.get("candidate_id"))
+            for item in direct
+            if isinstance(item, Mapping) and item.get("candidate_id")
+        }
     ambiguity = next(
         (
             item
@@ -74,7 +81,14 @@ def pending_review_candidate_ids(
         None,
     )
     if ambiguity is None:
-        return set()
+        direct = pending.get("candidates")
+        if not isinstance(direct, list):
+            return set()
+        return {
+            str(item.get("candidate_id"))
+            for item in direct
+            if isinstance(item, Mapping) and item.get("candidate_id")
+        }
     candidates = ambiguity.get("review_candidates")
     if not isinstance(candidates, list):
         return set()
@@ -87,4 +101,3 @@ def pending_review_candidate_ids(
 
 def build_action_key(*parts: object) -> str:
     return ":".join(str(part).strip() for part in parts)
-

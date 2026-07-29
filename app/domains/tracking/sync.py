@@ -50,6 +50,10 @@ def apply_pipeline_result(
         video = state.get("video")
         if isinstance(video, Mapping):
             job.video_sha256 = _string_or_none(video.get("sha256"))
+        runtime = state.get("runtime")
+        if isinstance(runtime, Mapping):
+            runtime_metadata["tracking_runtime"] = dict(runtime)
+            job.runtime_metadata = runtime_metadata
 
     job.artifact_index = artifacts.collect(job, state)
     root = artifacts.job_root(job)
@@ -127,4 +131,3 @@ def _read_optional_json(path: Path) -> dict[str, Any] | None:
 def _string_or_none(value: object) -> str | None:
     text = str(value or "")
     return text or None
-

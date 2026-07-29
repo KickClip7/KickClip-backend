@@ -156,12 +156,12 @@ class ActionSpottingCacheService:
             / "configs"
             / "models"
             / "action_spotting"
-            / "sampling_v1_loss_v2_ms_stem_v1"
-            / "inference_policy.yaml",
+            / "soccer_spotter_v9"
+            / "inference_policy.json",
         ]
         if not all(path.is_file() for path in paths):
             return "highlight_scene_policy_missing"
         digest = hashlib.sha256()
         for path in paths:
             digest.update(path.read_bytes())
-        return f"champion_inference_policy_{digest.hexdigest()[:16]}"
+        return f"v9_inference_policy_{digest.hexdigest()[:16]}"

@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.domains.clip_plan.model import ClipPlan, ClipPlanItem
 from app.domains.project.model import Project
+from app.domains.render.model import RenderJob
 
 
 class ClipPlanRepository:
@@ -62,11 +63,28 @@ class ClipPlanRepository:
     def get_by_id(self, clip_plan_id: str) -> ClipPlan | None:
         stmt = (
             select(ClipPlan)
+            .execution_options(populate_existing=True)
+            .options(
+                selectinload(ClipPlan.items),
+                selectinload(ClipPlan.render_jobs).selectinload(
+                    RenderJob.output_artifact
+                ),
+                selectinload(ClipPlan.project).selectinload(Project.match),
+            )
+            .where(ClipPlan.clip_plan_id == clip_plan_id)
+        )
+        return self.db.scalar(stmt)
+
+    def get_by_id_for_update(self, clip_plan_id: str) -> ClipPlan | None:
+        stmt = (
+            select(ClipPlan)
+            .execution_options(populate_existing=True)
             .options(
                 selectinload(ClipPlan.items),
                 selectinload(ClipPlan.project).selectinload(Project.match),
             )
             .where(ClipPlan.clip_plan_id == clip_plan_id)
+            .with_for_update()
         )
         return self.db.scalar(stmt)
 
@@ -75,6 +93,9 @@ class ClipPlanRepository:
             select(ClipPlan)
             .options(
                 selectinload(ClipPlan.items),
+                selectinload(ClipPlan.render_jobs).selectinload(
+                    RenderJob.output_artifact
+                ),
                 selectinload(ClipPlan.project).selectinload(Project.match),
             )
             .where(ClipPlan.project_id == project_id)

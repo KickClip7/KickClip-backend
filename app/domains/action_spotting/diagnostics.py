@@ -8,11 +8,13 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.ai.tasks.highlight_spotting.adapters.soccer_highlight_former import (
+from app.ai.tasks.highlight_spotting.adapters.soccer_spotter_v9 import (
     CHAMPION_CLASS_ORDER,
+    CHAMPION_IDENTIFIER,
+    DEFAULT_CHAMPION_MODEL_DIR,
     EXPECTED_CHECKPOINT_SHA256,
-    SoccerHighlightFormerAdapter,
-    resolve_champion_artifact_paths,
+    SoccerSpotterV9Adapter,
+    resolve_v9_artifact_paths,
     sha256_file,
 )
 from app.ai.tasks.soccernet_feature_extraction.config import (
@@ -34,16 +36,14 @@ def collect_action_spotting_diagnostics(db: Session | None = None) -> dict[str, 
     python_executable = Path(
         settings.ACTION_SPOTTING_PYTHON_EXECUTABLE or sys.executable
     )
-    paths = resolve_champion_artifact_paths(
-        "storage/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1"
-    )
+    paths = resolve_v9_artifact_paths(DEFAULT_CHAMPION_MODEL_DIR)
     checkpoint_sha256 = (
         sha256_file(paths.checkpoint_path)
         if paths.checkpoint_path.is_file()
         else None
     )
     result: dict[str, Any] = {
-        "champion_identifier": "sampling_v1_loss_v2_ms_stem_v1",
+        "champion_identifier": CHAMPION_IDENTIFIER,
         "ai_project_root_exists": ai_project_root.is_dir(),
         "python_executable_exists": python_executable.is_file(),
         "checkpoint_exists": paths.checkpoint_path.is_file(),
@@ -51,7 +51,8 @@ def collect_action_spotting_diagnostics(db: Session | None = None) -> dict[str, 
         "checkpoint_sha256_matches": checkpoint_sha256
         == EXPECTED_CHECKPOINT_SHA256,
         "model_config_exists": paths.model_config_path.is_file(),
-        "train_config_exists": paths.train_config_path.is_file(),
+        # Kept for API compatibility; v9 has one checkpoint-paired JSON config.
+        "train_config_exists": paths.model_config_path.is_file(),
         "class_order": CHAMPION_CLASS_ORDER,
         "model_module_import_success": False,
         "temporal_stem_import_success": False,
@@ -67,20 +68,16 @@ def collect_action_spotting_diagnostics(db: Session | None = None) -> dict[str, 
     }
 
     try:
-        from app.ai.vendor.kickclip_champion.models.soccer_highlight_former import (
-            SoccerHighlightFormer,
-        )
+        from app.ai.vendor.kickclip_v9 import SoccerSpotterV9
 
-        result["model_module_import_success"] = SoccerHighlightFormer is not None
+        result["model_module_import_success"] = SoccerSpotterV9 is not None
     except Exception as exc:
         result["errors"].append(_safe_error("model_import", exc))
 
     try:
-        from app.ai.vendor.kickclip_champion.models.multiscale_temporal_stem import (
-            MultiScaleTemporalStem,
-        )
+        from app.ai.vendor.kickclip_v9 import ResidualTCNBlock
 
-        result["temporal_stem_import_success"] = MultiScaleTemporalStem is not None
+        result["temporal_stem_import_success"] = ResidualTCNBlock is not None
     except Exception as exc:
         result["errors"].append(_safe_error("temporal_stem_import", exc))
 
@@ -94,16 +91,22 @@ def collect_action_spotting_diagnostics(db: Session | None = None) -> dict[str, 
             and mps_backend.is_available()
             and mps_backend.is_built()
         )
-        adapter = SoccerHighlightFormerAdapter(paths)
+        adapter = SoccerSpotterV9Adapter(paths)
         adapter._validate_contract()
         model, _, device = adapter._load_model(device="auto")
         result["strict_checkpoint_load_success"] = True
         result["selected_device"] = str(device)
         with torch.no_grad():
-            output = model(torch.zeros((1, 128, 512), dtype=torch.float32).to(device))
-        result["sample_feature_contract_valid"] = (
-            tuple(output["heatmap_logits"].shape) == (1, 128, 6)
-            and tuple(output["offset"].shape) == (1, 128, 6)
+            logits, offset_mean, offset_logvar, eventness = model(
+                torch.zeros((1, 128, 512), dtype=torch.float32).to(device)
+            )
+        result["sample_feature_contract_valid"] = all(
+            (
+                tuple(logits.shape) == (1, 128, 5),
+                tuple(offset_mean.shape) == (1, 128, 5),
+                tuple(offset_logvar.shape) == (1, 128, 5),
+                tuple(eventness.shape) == (1, 128),
+            )
         )
     except Exception as exc:
         result["errors"].append(_safe_error("model_contract", exc))

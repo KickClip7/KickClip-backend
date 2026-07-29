@@ -3,6 +3,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 from fastapi import HTTPException, UploadFile
@@ -10,6 +11,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import models  # noqa: F401
+from app.api.v1.artifacts import _authorize_artifact
 from app.db.base import Base
 from app.domains.auth.access import (
     require_analysis_job_access,
@@ -20,6 +22,7 @@ from app.domains.auth.access import (
 from app.domains.auth.model import User
 from app.domains.analysis.model import AnalysisJob
 from app.domains.artifact.model import Artifact
+from app.domains.artifact.signed_url import build_signed_artifact_url
 from app.domains.clip_plan.repository import ClipPlanRepository
 from app.domains.clip_plan.schema import (
     ClipPlanItemCreate,
@@ -32,6 +35,7 @@ from app.domains.project.model import Project
 from app.domains.project.schema import ProjectCreate
 from app.domains.project.service import ProjectService
 from app.domains.render.model import RenderJob
+from app.domains.session.service import SessionService
 from app.domains.studio.service import StudioService
 from app.domains.timeline.model import TimelineEvent
 from app.storage.local_storage import StoredFile
@@ -279,6 +283,217 @@ class ProjectMatchRelationshipTest(unittest.TestCase):
             state.render_jobs[0].download_url,
             f"/api/v1/renders/{render_job.render_job_id}/download",
         )
+
+    def test_project_lists_derive_latest_plan_render_and_real_thumbnail(self) -> None:
+        match = self._create_match()
+        project = ProjectService(self.db).create_project(
+            ProjectCreate(title="Landing card"),
+            match_id=match.match_id,
+            owner_id=self.owner.user_id,
+        )
+        event = TimelineEvent(
+            match_id=match.match_id,
+            event_type="goal",
+            label="goal",
+            timestamp_sec=10,
+            start_sec=8,
+            end_sec=14,
+            duration_sec=6,
+        )
+        self.db.add(event)
+        self.db.commit()
+        plan = ClipPlanService(self.db).create_manual_clip_plan(
+            ManualClipPlanCreateRequest(
+                project_id=project.project_id,
+                options={"ratio": "1:1"},
+                items=[
+                    ClipPlanItemCreate(
+                        timeline_event_id=event.timeline_event_id,
+                        start_sec=8,
+                        end_sec=14,
+                        order_index=0,
+                    )
+                ],
+            ),
+            created_by=self.owner.user_id,
+        )
+        thumbnail = Artifact(
+            match_id=match.match_id,
+            project_id=project.project_id,
+            artifact_type="PROJECT_THUMBNAIL",
+            file_path="storage/thumbnail.jpg",
+            mime_type="image/jpeg",
+        )
+        self.db.add(thumbnail)
+        self.db.flush()
+        project.thumbnail_artifact_id = thumbnail.artifact_id
+        self.db.add(
+            RenderJob(
+                clip_plan_id=plan.clip_plan_id,
+                status="running",
+                progress=50,
+                ratio="1:1",
+                options={},
+            )
+        )
+        self.db.commit()
+
+        service = ProjectService(self.db)
+        recent = service.list_recent_project_cards(
+            owner_id=self.owner.user_id,
+            user_id=self.owner.user_id,
+        )[0]
+        match_item = service.list_match_projects(
+            match.match_id,
+            user_id=self.owner.user_id,
+        )[0]
+
+        for item in (recent, match_item):
+            self.assertEqual(item.clip_count, 1)
+            self.assertEqual(item.duration_sec, 6)
+            self.assertEqual(item.edit_mode, "MANUAL")
+            self.assertEqual(item.ratio, "1:1")
+            self.assertEqual(item.status, "RENDERING")
+            self.assertGreaterEqual(item.progress, 85)
+            self.assertIn(
+                f"/api/v1/artifacts/{thumbnail.artifact_id}/download?token=",
+                item.thumbnail_url,
+            )
+
+    def test_project_without_thumbnail_returns_null_instead_of_placeholder(self) -> None:
+        match = self._create_match()
+        ProjectService(self.db).create_project(
+            ProjectCreate(title="No thumbnail"),
+            match_id=match.match_id,
+            owner_id=self.owner.user_id,
+        )
+        item = ProjectService(self.db).list_match_projects(
+            match.match_id,
+            user_id=self.owner.user_id,
+        )[0]
+        self.assertIsNone(item.thumbnail_url)
+
+    def test_signed_thumbnail_token_retains_artifact_ownership_check(self) -> None:
+        match = self._create_match()
+        project = ProjectService(self.db).create_project(
+            ProjectCreate(title="Secure thumbnail"),
+            match_id=match.match_id,
+            owner_id=self.owner.user_id,
+        )
+        artifact = Artifact(
+            match_id=match.match_id,
+            project_id=project.project_id,
+            artifact_type="PROJECT_THUMBNAIL",
+            file_path="storage/secure.jpg",
+            mime_type="image/jpeg",
+        )
+        self.db.add(artifact)
+        self.db.commit()
+        url, _ = build_signed_artifact_url(
+            artifact.artifact_id,
+            self.owner.user_id,
+        )
+        token = parse_qs(urlsplit(url).query)["token"][0]
+
+        authorized = _authorize_artifact(
+            db=self.db,
+            artifact_id=artifact.artifact_id,
+            current_user=None,
+            token=token,
+        )
+        self.assertEqual(authorized.artifact_id, artifact.artifact_id)
+
+        other_url, _ = build_signed_artifact_url(
+            artifact.artifact_id,
+            self.other.user_id,
+        )
+        other_token = parse_qs(urlsplit(other_url).query)["token"][0]
+        with self.assertRaises(HTTPException) as exc:
+            _authorize_artifact(
+                db=self.db,
+                artifact_id=artifact.artifact_id,
+                current_user=None,
+                token=other_token,
+            )
+        self.assertEqual(exc.exception.status_code, 404)
+
+    def test_project_bound_chat_session_saves_latest_clip_plan(self) -> None:
+        match = self._create_match()
+        project = ProjectService(self.db).create_project(
+            ProjectCreate(title="Chat edit"),
+            match_id=match.match_id,
+            owner_id=self.owner.user_id,
+        )
+        event = TimelineEvent(
+            match_id=match.match_id,
+            event_type="goal",
+            label="Goal",
+            timestamp_sec=10,
+            start_sec=8,
+            end_sec=14,
+            duration_sec=6,
+            metadata_={"max_end_sec": 20},
+        )
+        self.db.add(event)
+        self.db.commit()
+        service = SessionService(self.db)
+        with patch(
+            "app.domains.session.service.resolve_agent_match_id",
+            return_value=match.match_id,
+        ):
+            started = service.start(
+                match.match_id,
+                self.owner.user_id,
+                project_id=project.project_id,
+            )
+        clip = {
+            "timeline_event_id": event.timeline_event_id,
+            "match_id": match.match_id,
+            "event_type": event.event_type,
+            "label": event.label,
+            "timestamp_sec": event.timestamp_sec,
+            "start_sec": 8,
+            "end_sec": 13,
+            "duration_sec": 5,
+            "metadata": event.metadata_,
+        }
+        with patch.object(
+            service.graph,
+            "invoke",
+            return_value={
+                "current_clips": [clip],
+                "final_response": "반영했어요.",
+            },
+        ):
+            response = service.chat(
+                started["session_id"],
+                "골 장면을 넣어줘",
+                user_id=self.owner.user_id,
+            )
+        self.assertIsNotNone(response["clip_plan_id"])
+        first_plan_id = response["clip_plan_id"]
+        plan = ClipPlanRepository(self.db).get_by_id(first_plan_id)
+        self.assertEqual(len(plan.items), 1)
+        self.assertEqual(plan.items[0].end_sec, 13)
+
+        adjusted = {**clip, "end_sec": 12, "duration_sec": 4}
+        with patch.object(
+            service.graph,
+            "invoke",
+            return_value={
+                "current_clips": [adjusted],
+                "final_response": "길이를 줄였어요.",
+            },
+        ):
+            response = service.chat(
+                started["session_id"],
+                "첫 장면을 1초 줄여줘",
+                user_id=self.owner.user_id,
+            )
+        self.assertEqual(response["clip_plan_id"], first_plan_id)
+        updated = ClipPlanRepository(self.db).get_by_id(first_plan_id)
+        self.assertEqual(len(updated.items), 1)
+        self.assertEqual(updated.items[0].end_sec, 12)
 
     def test_deleting_project_deletes_project_scoped_artifacts(self) -> None:
         match = self._create_match()

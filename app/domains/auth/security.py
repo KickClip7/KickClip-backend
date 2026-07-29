@@ -105,6 +105,41 @@ def decode_media_token(
     return payload
 
 
+def create_artifact_token(
+    *,
+    artifact_id: str,
+    user_id: str,
+    secret_key: str,
+    expires_minutes: int,
+) -> tuple[str, int]:
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=expires_minutes)
+    payload = {
+        "sub": user_id,
+        "artifact_id": artifact_id,
+        "type": "artifact",
+        "iat": int(now.timestamp()),
+        "exp": int(expires.timestamp()),
+        "jti": secrets.token_hex(16),
+    }
+    return encode_jwt(payload, secret_key), expires_minutes * 60
+
+
+def decode_artifact_token(
+    token: str,
+    *,
+    artifact_id: str,
+    secret_key: str,
+) -> dict[str, Any]:
+    payload = decode_jwt(token, secret_key)
+    if (
+        payload.get("type") != "artifact"
+        or payload.get("artifact_id") != artifact_id
+    ):
+        raise InvalidTokenError("invalid artifact token scope")
+    return payload
+
+
 def encode_jwt(payload: dict[str, Any], secret_key: str) -> str:
     header = {"alg": "HS256", "typ": "JWT"}
     signing_input = "{}.{}".format(

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.domains.auth.model import User
 from app.domains.media.model import MediaAsset
+from app.domains.media.repository import MediaAssetRepository
 from app.domains.project.model import Project
 from app.domains.tracking.artifacts import TrackingArtifactService
 from app.domains.tracking.errors import (
@@ -18,7 +18,7 @@ from app.domains.tracking.errors import (
     TrackingUnavailableError,
     TrackingValidationError,
 )
-from app.domains.tracking.media_probe import probe_tracking_video
+from app.domains.tracking.input_contract import validate_tracking_clip
 from app.domains.tracking.model import TrackingJob
 from app.domains.tracking.repository import TrackingJobRepository
 from app.domains.tracking.schema import (
@@ -33,7 +33,13 @@ from app.domains.tracking.schema import (
     TrackingReviewRequest,
 )
 from app.domains.tracking.state_mapper import read_pipeline_state
-from app.domains.tracking.status import WAITING_STATUSES, TrackingBackendStatus
+from app.domains.tracking.status import (
+    WAITING_STATUSES,
+    TrackingBackendStatus,
+    tracking_outcome,
+    tracking_progress,
+    tracking_retryable,
+)
 from app.domains.tracking.validation import (
     build_action_key,
     generate_tracking_test_name,
@@ -47,7 +53,6 @@ from app.domains.tracking.verifier import (
 )
 from app.storage.local_storage import LocalStorage
 from app.utils.id_generator import generate_prefixed_id
-
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".mts"}
 
@@ -64,6 +69,7 @@ class TrackingJobService:
         self.db = db
         self.settings = settings or get_settings()
         self.repository = TrackingJobRepository(db)
+        self.media_repository = MediaAssetRepository(db)
         self.verifier = verifier or get_tracking_verifier()
         self.artifacts = artifacts or TrackingArtifactService(self.settings)
         self.storage = LocalStorage()
@@ -75,10 +81,11 @@ class TrackingJobService:
         asset: MediaAsset,
         payload: TrackingJobCreateRequest,
         project: Project | None,
+        input_validation: Mapping[str, Any] | None = None,
+        input_artifacts: Mapping[str, str] | None = None,
+        cache_discriminator: str | None = None,
+        runtime_context: Mapping[str, Any] | None = None,
     ) -> TrackingJobCreateResponse:
-        installation = self.verifier.check()
-        if not installation.available:
-            raise TrackingUnavailableError(installation.message)
         self._validate_video_asset(asset)
         if payload.match_id is not None and payload.match_id != asset.match_id:
             raise TrackingValidationError(
@@ -88,11 +95,37 @@ class TrackingJobService:
             raise TrackingValidationError(
                 "project_id does not belong to the selected MediaAsset's Match."
             )
+        locked_asset = self.media_repository.get_for_update(asset.asset_id)
+        if locked_asset is None:
+            raise TrackingValidationError("MediaAsset no longer exists.")
+        asset = locked_asset
+        reusable = self.repository.find_equivalent_reusable(
+            owner_id=user.user_id,
+            media_asset_id=asset.asset_id,
+            project_id=project.project_id if project is not None else None,
+            initial_bbox=payload.initial_bbox_xyxy,
+            bbox_format=payload.bbox_format,
+            reacquisition_mode=self.settings.TRACKING_REACQUISITION_MODE,
+            cache_discriminator=cache_discriminator,
+        )
+        if reusable is not None:
+            return self._create_response(reusable, reused=True)
+
+        installation = self.verifier.check()
+        if not installation.available:
+            raise TrackingUnavailableError(installation.message)
 
         video_path = self.storage.resolve_path(asset.file_path)
         if not video_path.is_file():
             raise TrackingValidationError("MediaAsset video file is missing.")
-        metadata = probe_tracking_video(video_path)
+        metadata = validate_tracking_clip(
+            video_path,
+            requested_duration_sec=(
+                float(asset.duration_sec)
+                if asset.duration_sec is not None
+                else None
+            ),
+        )
         width = int(metadata["width"])
         height = int(metadata["height"])
         bbox = validate_bbox_xyxy(
@@ -133,20 +166,28 @@ class TrackingJobService:
                         "height": height,
                         "fps": float(metadata["fps"]),
                         "frame_count": metadata.get("frame_count"),
-                    }
+                        "duration_sec": metadata.get("duration_sec"),
+                        "sha256": asset.sha256,
+                    },
+                    "input_validation": dict(
+                        input_validation or metadata.get("validation") or {}
+                    ),
+                    **dict(runtime_context or {}),
                 },
             )
+            if input_artifacts:
+                self.artifacts.stage_input_validation_artifacts(
+                    job,
+                    input_artifacts,
+                )
+                job.artifact_index = self.artifacts.collect(job, None)
             self.db.commit()
             self.db.refresh(job)
         except Exception:
             self.db.rollback()
             raise
 
-        return TrackingJobCreateResponse(
-            job_id=job.tracking_job_id,
-            status=TrackingBackendStatus(job.status),
-            status_url=f"/api/v1/tracking/jobs/{job.tracking_job_id}",
-        )
+        return self._create_response(job, reused=False)
 
     def queue_review(
         self,
@@ -270,6 +311,10 @@ class TrackingJobService:
             project_id=job.project_id,
             media_asset_id=job.media_asset_id,
             status=TrackingBackendStatus(job.status),
+            outcome=tracking_outcome(job.status, job.error_type),
+            progress=tracking_progress(job.status, job.current_stage),
+            retryable=tracking_retryable(job.status, job.error_type),
+            status_url=f"/api/v1/tracking/jobs/{job.tracking_job_id}",
             pipeline_status=job.pipeline_status,
             pipeline_decision=job.pipeline_decision,
             current_stage=job.current_stage,
@@ -296,6 +341,22 @@ class TrackingJobService:
             started_at=job.started_at,
             updated_at=job.updated_at,
             finished_at=job.finished_at,
+        )
+
+    @staticmethod
+    def _create_response(
+        job: TrackingJob,
+        *,
+        reused: bool,
+    ) -> TrackingJobCreateResponse:
+        return TrackingJobCreateResponse(
+            job_id=job.tracking_job_id,
+            status=TrackingBackendStatus(job.status),
+            outcome=tracking_outcome(job.status, job.error_type),
+            progress=tracking_progress(job.status, job.current_stage),
+            retryable=tracking_retryable(job.status, job.error_type),
+            reused=reused,
+            status_url=f"/api/v1/tracking/jobs/{job.tracking_job_id}",
         )
 
     def artifacts_response(self, job: TrackingJob) -> TrackingArtifactsResponse:
@@ -422,4 +483,3 @@ class TrackingJobService:
             raise TrackingValidationError(
                 "Selected MediaAsset is not a supported video."
             )
-

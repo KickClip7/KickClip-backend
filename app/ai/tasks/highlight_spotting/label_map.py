@@ -1,6 +1,7 @@
 SUPPORTED_EVENT_LABELS = [
     "goal",
     "shot",
+    "penalty",
     "foul",
     "card",
     "free_kick",
@@ -18,6 +19,11 @@ LABEL_TO_DISPLAY = {
         "tag": "SHOT",
         "title": "SHOT",
         "description": "A shot event detected by Action Spotting.",
+    },
+    "penalty": {
+        "tag": "PENALTY",
+        "title": "PENALTY",
+        "description": "A penalty event detected by Action Spotting.",
     },
     "foul": {
         "tag": "FOUL",

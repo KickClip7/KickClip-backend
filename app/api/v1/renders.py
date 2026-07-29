@@ -45,6 +45,7 @@ def create_render_job(
         render_job_id=render_job.render_job_id,
         status=render_job.status,
         progress=render_job.progress,
+        reused=bool(getattr(render_job, "reused", False)),
     )
 
 
@@ -69,6 +70,7 @@ def get_render_job(
         )
 
     response = RenderJobRead.model_validate(render_job)
+    response.retryable = render_job.status == "failed"
     response.download_url = (
         f"/api/v1/renders/{render_job.render_job_id}/download"
         if render_job.output_artifact_id and render_job.status == "completed"

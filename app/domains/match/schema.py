@@ -57,5 +57,13 @@ class MatchRead(BaseModel):
     video_url: str | None = None
     preview_video_asset_id: str | None = None
     preview_url: str | None = None
+    thumbnail_artifact_id: str | None = None
+    thumbnail_url: str | None = None
+    analysis_status: str = "NOT_STARTED"
+    analysis_progress: int = Field(default=0, ge=0, le=100)
+    analysis_job_id: str | None = None
+    analysis_current_step: str | None = None
+    analysis_error_message: str | None = None
+    analysis_retryable: bool = False
     created_at: datetime
     updated_at: datetime

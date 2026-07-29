@@ -32,7 +32,11 @@ def get_recent_projects(
 ) -> ProjectRecentListResponse:
     service = ProjectService(db)
     owner_id = None if current_user.developer_mode_enabled else current_user.user_id
-    projects = service.list_recent_project_cards(limit=limit, owner_id=owner_id)
+    projects = service.list_recent_project_cards(
+        limit=limit,
+        owner_id=owner_id,
+        user_id=current_user.user_id,
+    )
     return ProjectRecentListResponse(projects=projects)
 
 
@@ -63,7 +67,18 @@ def get_project(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ProjectRead:
-    return require_project_access(db, project_id, current_user)
+    require_project_access(db, project_id, current_user)
+    project = ProjectService(db).get_project_read(
+        project_id,
+        user_id=current_user.user_id,
+        touch=True,
+    )
+    if project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        )
+    return project
 
 
 @router.post(

@@ -68,8 +68,8 @@ class HighlightModelLoader:
         if checkpoint_path is not None and checkpoint_path.exists():
             checkpoint_keys, checkpoint_summary = self._read_checkpoint_summary(checkpoint_path)
 
-        # 16회차에서는 실제 SoccerHighlightFormer adapter가 아직 백엔드에 이식되지 않았다.
-        # 따라서 파일이 모두 있어도 real inference는 아직 ready가 아니다.
+        # Placeholder adapters are never considered production-ready even when
+        # files happen to exist.
         if adapter_name.startswith("placeholder"):
             reasons.append(
                 "real model adapter is not implemented yet; "

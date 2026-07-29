@@ -15,7 +15,10 @@ from app.domains.tracking.errors import (
     TrackingValidationError,
 )
 from app.domains.tracking.model import TrackingJob
-from app.domains.tracking.verifier import configured_absolute_path
+from app.domains.tracking.verifier import (
+    configured_absolute_executable_path,
+    configured_absolute_path,
+)
 
 
 @dataclass(frozen=True)
@@ -56,7 +59,7 @@ def terminate_process_tree(process: subprocess.Popen[str]) -> None:
         if os.name == "nt":
             process.send_signal(signal.CTRL_BREAK_EVENT)
         else:
-            getattr(os, "killpg")(process.pid, signal.SIGTERM)
+            os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         try:
@@ -69,7 +72,7 @@ def terminate_process_tree(process: subprocess.Popen[str]) -> None:
                     timeout=15,
                 )
             else:
-                getattr(os, "killpg")(process.pid, getattr(signal, "SIGKILL"))
+                os.killpg(process.pid, signal.SIGKILL)
         except OSError:
             process.kill()
 
@@ -92,7 +95,7 @@ class TrackingProcessRunner:
     ) -> list[str]:
         command = [
             str(self._python()),
-            str(self._runner_script()),
+            str(self._runner_script(job)),
             "--project-root",
             str(self._project_root()),
             "--video",
@@ -108,6 +111,22 @@ class TrackingProcessRunner:
             "--output-root",
             str(self._output_root()),
         ]
+        scene_context = self._scene_target_context(job)
+        if scene_context is not None:
+            required_paths = {
+                "--tracking-launch-manifest": "tracking_launch_manifest_path",
+                "--shot-boundaries": "shot_boundaries_path",
+                "--target-selection": "target_selection_path",
+                "--target-reference-set": "target_reference_set_path",
+                "--earlier-anchor-decision": "earlier_anchor_decision_path",
+            }
+            for flag, key in required_paths.items():
+                value = scene_context.get(key)
+                if not value:
+                    raise TrackingValidationError(
+                        f"Scene target selection is missing {key}."
+                    )
+                command.extend([flag, str(value)])
         if overwrite:
             command.append("--overwrite")
         if not self.settings.TRACKING_PREVIEW_ENABLED:
@@ -121,7 +140,7 @@ class TrackingProcessRunner:
     ) -> list[str]:
         command = [
             str(self._python()),
-            str(self._runner_script()),
+            str(self._runner_script(job)),
             "--project-root",
             str(self._project_root()),
             "--test-name",
@@ -255,12 +274,39 @@ class TrackingProcessRunner:
         )
 
     def _python(self) -> Path:
-        return configured_absolute_path(
-            self.settings.TRACKING_PYTHON_EXECUTABLE,
-            "TRACKING_PYTHON_EXECUTABLE",
-        )
+        # Preserve the explicitly configured executable path (including a
+        # virtualenv symlink). Resolving it to the base interpreter can change
+        # the runtime contract and bypass the virtualenv name used by operators.
+        try:
+            return configured_absolute_executable_path(
+                self.settings.TRACKING_PYTHON_EXECUTABLE,
+                "TRACKING_PYTHON_EXECUTABLE",
+            )
+        except ValueError as exc:
+            raise TrackingValidationError(str(exc)) from exc
 
-    def _runner_script(self) -> Path:
+    @staticmethod
+    def _scene_target_context(
+        job: TrackingJob,
+    ) -> Mapping[str, Any] | None:
+        value = (job.runtime_metadata or {}).get("scene_target_selection")
+        return value if isinstance(value, Mapping) else None
+
+    def _runner_script(self, job: TrackingJob) -> Path:
+        if self._scene_target_context(job) is not None:
+            configured = (
+                self.settings.TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH
+            )
+            if not configured:
+                configured = str(
+                    self._project_root()
+                    / "target_centric_tracking_v2_production_r3"
+                    / "run_v2_production_r3.py"
+                )
+            return configured_absolute_path(
+                configured,
+                "TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH",
+            )
         return configured_absolute_path(
             self.settings.TRACKING_E2E_SCRIPT_PATH,
             "TRACKING_E2E_SCRIPT_PATH",

@@ -75,10 +75,24 @@ class AnalysisJobService:
         match_id: str,
         data: AnalysisJobCreateRequest,
     ) -> AnalysisJobCreateResponse:
+        job_type = normalize_job_type(data.job_type)
+        # Serialize creation per Match on databases that support row locks.
+        # This closes the common double-click/concurrent-request race without a
+        # schema change and keeps the existing POST contract intact.
+        match = self.match_repository.get_for_update(match_id)
+        if match is None:
+            raise ValueError("Match not found")
+        for existing in self.job_repository.list_active_by_match_and_type(
+            match_id=match_id,
+            job_type=job_type,
+        ):
+            if (existing.options or {}) == (data.options or {}):
+                response = self.to_create_response(existing)
+                return response.model_copy(update={"reused": True})
         job = self.create_analysis_job(
             AnalysisJobCreate(
                 match_id=match_id,
-                job_type=data.job_type,
+                job_type=job_type,
                 options=data.options,
             )
         )
@@ -143,6 +157,7 @@ class AnalysisJobService:
             started_at=job.started_at,
             completed_at=job.completed_at,
             error_message=job.error_message,
+            retryable=job.status == "FAILED",
             workflow_status=(
                 action_spotting_workflow_status(
                     status=job.status,

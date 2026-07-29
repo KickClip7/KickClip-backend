@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from sqlalchemy import (
+    JSON,
     Float,
     ForeignKey,
     Integer,
-    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -156,6 +156,55 @@ class HighlightRevision(Base, TimestampMixin):
     render_job = relationship("RenderJob", foreign_keys=[render_job_id])
 
 
+class HighlightDraft(Base, TimestampMixin):
+    """Mutable, recoverable editor snapshot for one Project."""
+
+    __tablename__ = "highlight_drafts"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            name="uq_highlight_drafts_project_id",
+        ),
+    )
+
+    draft_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=lambda: generate_prefixed_id("hdraft"),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    revision_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("highlight_revisions.revision_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    clip_plan_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("clip_plans.clip_plan_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    saved_by_user_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    state: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+
+    project = relationship("Project")
+    revision = relationship("HighlightRevision")
+    clip_plan = relationship("ClipPlan")
+    saved_by = relationship("User")
+
+
 class ScenePlayerCandidate(Base, TimestampMixin):
     """Scene-local selectable track seed with no inferred real-world identity."""
 
@@ -173,7 +222,7 @@ class ScenePlayerCandidate(Base, TimestampMixin):
         primary_key=True,
         default=lambda: generate_prefixed_id("pcand"),
     )
-    candidate_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_id: Mapped[str] = mapped_column(String(255), nullable=False)
     revision_id: Mapped[str] = mapped_column(
         String(64),
         ForeignKey("highlight_revisions.revision_id", ondelete="CASCADE"),
@@ -312,3 +361,176 @@ class SceneTrackingBinding(Base, TimestampMixin):
     focus_subject = relationship("PlayerFocusSubject")
     tracking_job = relationship("TrackingJob")
     scene_clip_asset = relationship("MediaAsset")
+
+
+class SceneTargetSelection(Base, TimestampMixin):
+    """Immutable user choice of a scene-wide local candidate revision."""
+
+    __tablename__ = "scene_target_selections"
+    __table_args__ = (
+        UniqueConstraint(
+            "revision_id",
+            "scene_id",
+            "selection_revision",
+            name="uq_scene_target_selection_revision",
+        ),
+    )
+
+    selection_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=lambda: generate_prefixed_id("tsel"),
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    match_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("matches.match_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    revision_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("highlight_revisions.revision_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scene_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("timeline_events.timeline_event_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    selection_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    selected_candidate_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(64),
+        default="WAITING_EARLIER_ANCHOR_CONFIRMATION",
+        nullable=False,
+        index=True,
+    )
+    artifact_root: Mapped[str] = mapped_column(String(2048), nullable=False)
+    selection_artifact: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    reference_set_artifact: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    earlier_proposals_artifact: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    earlier_decision_artifact: Mapped[dict] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    candidate_cache_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, index=True
+    )
+    tracking_cache_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    tracking_job_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("tracking_jobs.tracking_job_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+
+    owner = relationship("User")
+    revision = relationship("HighlightRevision")
+    scene = relationship("TimelineEvent")
+    tracking_job = relationship("TrackingJob")
+
+
+class SceneTargetSelectionReference(Base, TimestampMixin):
+    """Portable reference crop belonging to one immutable target selection."""
+
+    __tablename__ = "scene_target_selection_references"
+    __table_args__ = (
+        UniqueConstraint(
+            "selection_id",
+            "reference_id",
+            name="uq_scene_target_selection_reference",
+        ),
+    )
+
+    reference_row_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=lambda: generate_prefixed_id("tref"),
+    )
+    selection_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("scene_target_selections.selection_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    reference_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_candidate_id: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
+    frame_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    bbox_xyxy: Mapped[list[float]] = mapped_column(JSON, nullable=False)
+    crop_artifact: Mapped[str] = mapped_column(String(2048), nullable=False)
+    quality: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+
+    selection = relationship("SceneTargetSelection")
+
+
+class EarlierAnchorProposal(Base, TimestampMixin):
+    """Blind appearance proposal; never an automatic identity decision."""
+
+    __tablename__ = "earlier_anchor_proposals"
+    __table_args__ = (
+        UniqueConstraint(
+            "selection_id",
+            "candidate_id",
+            name="uq_earlier_anchor_proposal_candidate",
+        ),
+    )
+
+    proposal_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=lambda: generate_prefixed_id("eap"),
+    )
+    selection_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("scene_target_selections.selection_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    candidate_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    retrieval_rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    retrieval_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    prototype_similarity: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+    decision_state: Mapped[str] = mapped_column(
+        String(64), default="PENDING_USER_CONFIRMATION", nullable=False
+    )
+    artifacts: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+
+    selection = relationship("SceneTargetSelection")

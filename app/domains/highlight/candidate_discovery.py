@@ -18,6 +18,11 @@ from app.domains.highlight.player_detector import (
 from app.domains.highlight.repository import HighlightRepository
 from app.domains.media.model import MediaAsset
 from app.domains.timeline.model import TimelineEvent
+from app.domains.tracking.errors import (
+    TrackingInputError,
+    TrackingNoValidInitializationAnchorError,
+)
+from app.domains.tracking.input_contract import MIN_TRACKING_DURATION_SECONDS
 from app.storage.local_storage import LocalStorage
 from app.utils.id_generator import generate_prefixed_id
 
@@ -34,8 +39,14 @@ class CandidateTracklet:
 class PlayerCandidateDiscoveryService:
     """RF-DETR-backed discovery of scene-local, unnamed player candidates."""
 
-    SAMPLE_COUNT = 5
+    SAMPLE_WINDOW_COUNT = 5
+    SAMPLES_PER_WINDOW = 3
+    STABLE_MAX_GAP_SECONDS = 0.2
+    MIN_STABLE_OBSERVATIONS = 3
     MIN_BOX_HEIGHT_RATIO = 0.035
+    MIN_ANCHOR_CONFIDENCE = 0.25
+    MAX_ANCHOR_OVERLAP_IOU = 0.6
+    BBOX_EDGE_MARGIN_PX = 1.0
     MAX_CANDIDATES_PER_SCENE = 8
 
     def __init__(
@@ -107,6 +118,8 @@ class PlayerCandidateDiscoveryService:
                 )
         except PlayerDetectorError:
             raise
+        except TrackingInputError:
+            raise
         except Exception as exc:
             raise PlayerDetectorInferenceError(
                 "Player candidate discovery failed after detector "
@@ -115,6 +128,23 @@ class PlayerCandidateDiscoveryService:
             ) from exc
         finally:
             capture.release()
+
+        if not created:
+            raise TrackingNoValidInitializationAnchorError(
+                (
+                    "No earliest stable player anchor leaves at least "
+                    f"{MIN_TRACKING_DURATION_SECONDS:.0f}s in the selected scenes."
+                ),
+                diagnostics={
+                    "selected_scene_ids": [
+                        scene.timeline_event_id for scene in scenes
+                    ],
+                    "minimum_tracking_duration_sec": (
+                        MIN_TRACKING_DURATION_SECONDS
+                    ),
+                    "selection_policy": "earliest_stable_anchor",
+                },
+            )
 
         revision.options = {
             **(revision.options or {}),
@@ -139,7 +169,7 @@ class PlayerCandidateDiscoveryService:
         source_asset: MediaAsset,
         scene: TimelineEvent,
     ) -> list[ScenePlayerCandidate]:
-        sample_times = self._sample_times(scene)
+        sample_times = self._sample_times(scene, fps=fps)
         tracklets: list[CandidateTracklet] = []
         sampled_frames: dict[float, Any] = {}
 
@@ -151,6 +181,8 @@ class PlayerCandidateDiscoveryService:
             sampled_frames[source_time] = frame
 
         ordered_times = list(sampled_frames)
+        if not ordered_times:
+            return []
         detections_by_frame = detector.detect_batch(
             [sampled_frames[source_time] for source_time in ordered_times]
         )
@@ -164,36 +196,65 @@ class PlayerCandidateDiscoveryService:
             detections_by_frame,
         ):
             frame = sampled_frames[source_time]
-            for detection in detections:
+            eligible = [
+                detection
+                for detection in detections
+                if (
+                    detection.bbox_xyxy[3] - detection.bbox_xyxy[1]
+                )
+                >= frame.shape[0] * self.MIN_BOX_HEIGHT_RATIO
+            ]
+            for detection in eligible:
                 bbox = detection.bbox_xyxy
                 score = detection.confidence
-                if (bbox[3] - bbox[1]) < frame.shape[0] * self.MIN_BOX_HEIGHT_RATIO:
-                    continue
+                max_overlap = max(
+                    (
+                        self._iou(bbox, other.bbox_xyxy)
+                        for other in eligible
+                        if other is not detection
+                    ),
+                    default=0.0,
+                )
                 observation = {
                     "source_time": source_time,
                     "bbox": bbox,
                     "score": score,
                     "class_id": detection.class_id,
                     "class_name": detection.class_name,
+                    "frame_width": int(frame.shape[1]),
+                    "frame_height": int(frame.shape[0]),
+                    "max_other_player_iou": max_overlap,
                 }
-                tracklet = self._best_tracklet(tracklets, bbox)
+                tracklet = self._best_tracklet(
+                    tracklets,
+                    bbox,
+                    source_time=source_time,
+                )
                 if tracklet is None:
                     tracklet = CandidateTracklet()
                     tracklets.append(tracklet)
                 tracklet.observations.append(observation)
 
+        anchored_tracklets: list[tuple[CandidateTracklet, dict[str, Any]]] = []
+        for tracklet in tracklets:
+            anchor = self._earliest_stable_anchor(
+                tracklet,
+                scene_end_sec=float(scene.end_sec),
+            )
+            if anchor is not None:
+                anchored_tracklets.append((tracklet, anchor))
         ranked = sorted(
-            tracklets,
+            anchored_tracklets,
             key=lambda item: (
-                len(item.observations),
-                max(row["score"] for row in item.observations),
+                -float(item[1]["source_time"]),
+                len(item[0].observations),
+                max(row["score"] for row in item[0].observations),
             ),
             reverse=True,
         )[: self.MAX_CANDIDATES_PER_SCENE]
         candidates: list[ScenePlayerCandidate] = []
 
-        for index, tracklet in enumerate(ranked, start=1):
-            anchor = max(tracklet.observations, key=lambda row: row["score"])
+        for index, (tracklet, anchor) in enumerate(ranked, start=1):
             source_time = float(anchor["source_time"])
             frame = sampled_frames[source_time]
             candidate_id = generate_prefixed_id("pcand")
@@ -228,7 +289,7 @@ class PlayerCandidateDiscoveryService:
                 scene_id=scene.timeline_event_id,
                 anchor_time_sec=round(source_time - float(scene.start_sec), 6),
                 anchor_source_time_sec=round(source_time, 6),
-                anchor_frame_index=int(round(source_time * fps)),
+                anchor_frame_index=round(source_time * fps),
                 bbox_xyxy=[round(float(value), 3) for value in anchor["bbox"]],
                 thumbnail_artifact_id=artifact.artifact_id,
                 track_length_frames=max(1, len(tracklet.observations)),
@@ -246,6 +307,42 @@ class PlayerCandidateDiscoveryService:
                     "confidence": round(float(anchor["score"]), 6),
                     "source_media_asset_id": source_asset.asset_id,
                     "sample_support": len(tracklet.observations),
+                    "initialization_anchor": {
+                        "policy": "earliest_stable_anchor",
+                        "valid": True,
+                        "minimum_remaining_duration_sec": (
+                            MIN_TRACKING_DURATION_SECONDS
+                        ),
+                        "remaining_duration_sec": round(
+                            float(scene.end_sec) - source_time,
+                            6,
+                        ),
+                        "stable_observation_count": len(
+                            tracklet.observations
+                        ),
+                        "max_other_player_iou": round(
+                            float(anchor["max_other_player_iou"]),
+                            6,
+                        ),
+                        "bbox_edge_clipped": False,
+                        "observations": [
+                            {
+                                "source_time": round(
+                                    float(observation["source_time"]),
+                                    6,
+                                ),
+                                "bbox_xyxy": [
+                                    round(float(value), 3)
+                                    for value in observation["bbox"]
+                                ],
+                                "confidence": round(
+                                    float(observation["score"]),
+                                    6,
+                                ),
+                            }
+                            for observation in tracklet.observations
+                        ],
+                    },
                 },
             )
             candidates.append(candidate)
@@ -256,15 +353,59 @@ class PlayerCandidateDiscoveryService:
         cls,
         tracklets: list[CandidateTracklet],
         bbox: list[float],
+        *,
+        source_time: float,
     ) -> CandidateTracklet | None:
         scored = [
             (cls._iou(tracklet.last_bbox, bbox), tracklet)
             for tracklet in tracklets
+            if (
+                0
+                < (
+                    source_time
+                    - float(tracklet.observations[-1]["source_time"])
+                )
+                <= cls.STABLE_MAX_GAP_SECONDS
+            )
         ]
         if not scored:
             return None
         score, tracklet = max(scored, key=lambda item: item[0])
         return tracklet if score >= 0.2 else None
+
+    @classmethod
+    def _earliest_stable_anchor(
+        cls,
+        tracklet: CandidateTracklet,
+        *,
+        scene_end_sec: float,
+    ) -> dict[str, Any] | None:
+        if len(tracklet.observations) < cls.MIN_STABLE_OBSERVATIONS:
+            return None
+        for observation in sorted(
+            tracklet.observations,
+            key=lambda row: float(row["source_time"]),
+        ):
+            bbox = observation["bbox"]
+            width = float(observation["frame_width"])
+            height = float(observation["frame_height"])
+            remaining = scene_end_sec - float(observation["source_time"])
+            edge_clipped = (
+                float(bbox[0]) <= cls.BBOX_EDGE_MARGIN_PX
+                or float(bbox[1]) <= cls.BBOX_EDGE_MARGIN_PX
+                or float(bbox[2]) >= width - cls.BBOX_EDGE_MARGIN_PX
+                or float(bbox[3]) >= height - cls.BBOX_EDGE_MARGIN_PX
+            )
+            if (
+                remaining >= MIN_TRACKING_DURATION_SECONDS
+                and float(observation["score"])
+                >= cls.MIN_ANCHOR_CONFIDENCE
+                and float(observation["max_other_player_iou"])
+                <= cls.MAX_ANCHOR_OVERLAP_IOU
+                and not edge_clipped
+            ):
+                return observation
+        return None
 
     @staticmethod
     def _iou(first: list[float], second: list[float]) -> float:
@@ -325,24 +466,35 @@ class PlayerCandidateDiscoveryService:
             raise RuntimeError("Failed to write candidate thumbnail.")
         return output_path
 
-    def _sample_times(self, scene: TimelineEvent) -> list[float]:
+    def _sample_times(
+        self,
+        scene: TimelineEvent,
+        *,
+        fps: float,
+    ) -> list[float]:
         start = float(scene.start_sec)
         end = float(scene.end_sec)
-        if end <= start:
-            return [start]
+        latest_anchor = end - MIN_TRACKING_DURATION_SECONDS
+        if latest_anchor < start or fps <= 0:
+            return []
         margin = min(0.1, (end - start) / 10)
         usable_start = start + margin
-        usable_end = end - margin
-        if self.SAMPLE_COUNT == 1:
-            return [(usable_start + usable_end) / 2]
-        step = (usable_end - usable_start) / (self.SAMPLE_COUNT - 1)
+        usable_end = max(usable_start, latest_anchor)
+        if self.SAMPLE_WINDOW_COUNT == 1 or usable_end == usable_start:
+            bases = [usable_start]
+        else:
+            step = (
+                usable_end - usable_start
+            ) / (self.SAMPLE_WINDOW_COUNT - 1)
+            bases = [
+                usable_start + step * index
+                for index in range(self.SAMPLE_WINDOW_COUNT)
+            ]
+        frame_step = 1.0 / fps
         values = [
-            round(usable_start + step * index, 6)
-            for index in range(self.SAMPLE_COUNT)
+            round(base + frame_step * offset, 6)
+            for base in bases
+            for offset in range(self.SAMPLES_PER_WINDOW)
+            if base + frame_step * offset < end
         ]
-        representative = min(
-            max(float(scene.timestamp_sec), usable_start),
-            usable_end,
-        )
-        values.append(round(representative, 6))
         return sorted(set(values))

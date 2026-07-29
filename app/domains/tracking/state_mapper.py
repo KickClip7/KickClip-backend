@@ -66,10 +66,25 @@ def map_pipeline_state(
     pending = state.get("pending_action")
     pending_mapping = pending if isinstance(pending, Mapping) else {}
     pending_type = str(pending_mapping.get("type") or "") or None
-    ambiguity_id = str(pending_mapping.get("ambiguity_id") or "") or None
+    if (
+        pending_type is None
+        and pending_mapping.get("backend_state")
+        == "WAITING_CROSS_SHOT_CONFIRMATION"
+    ):
+        pending_type = "CROSS_SHOT_CONFIRMATION"
+    ambiguity_id = str(
+        pending_mapping.get("ambiguity_id")
+        or pending_mapping.get("confirmation_id")
+        or ""
+    ) or None
     review_stage = str(pending_mapping.get("review_stage") or "") or None
 
-    if pipeline_status == "NEEDS_CONFIRMATION":
+    if pipeline_status in {
+        "NEEDS_CONFIRMATION",
+        "WAITING_CROSS_SHOT_CONFIRMATION",
+    }:
+        if pipeline_status == "WAITING_CROSS_SHOT_CONFIRMATION":
+            pending_type = pending_type or "CROSS_SHOT_CONFIRMATION"
         waiting_status = {
             "MEMORY_REVIEW": TrackingBackendStatus.WAITING_MEMORY_REVIEW,
             "CROSS_SHOT_CONFIRMATION": (

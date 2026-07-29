@@ -6,10 +6,12 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any
+from uuid import uuid4
 
 from app.core.config import Settings, get_settings
 from app.domains.tracking.errors import (
@@ -18,7 +20,7 @@ from app.domains.tracking.errors import (
 )
 from app.domains.tracking.model import TrackingJob
 from app.domains.tracking.verifier import configured_absolute_path
-
+from app.storage.local_storage import LocalStorage
 
 ARTIFACT_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 STATIC_ARTIFACTS: dict[str, tuple[str, str, str]] = {
@@ -64,6 +66,21 @@ STATIC_ARTIFACTS: dict[str, tuple[str, str, str]] = {
         "shots",
         "text/csv",
     ),
+    "scene_clip_validation": (
+        "scene_clip_validation.json",
+        "input_validation",
+        "application/json",
+    ),
+    "initial_bbox_frame0_preview": (
+        "initial_bbox_frame0_preview.jpg",
+        "input_validation_preview",
+        "image/jpeg",
+    ),
+    "initial_bbox_detection_match": (
+        "initial_bbox_detection_match.json",
+        "input_validation",
+        "application/json",
+    ),
     "tracking_preview": (
         "full_frame_tracking_preview.mp4",
         "preview",
@@ -107,6 +124,19 @@ class TrackingArtifactService:
                 served = root / "backend_artifacts" / "public" / f"{key}.json"
                 self._write_public_json(source=source, target=served, root=root)
                 source_sha256 = sha256_file(source)
+            elif source.is_file() and kind == "preview":
+                browser_preview = self._write_browser_preview(
+                    source=source,
+                    target=(
+                        root
+                        / "backend_artifacts"
+                        / "public"
+                        / f"{key}.mp4"
+                    ),
+                    root=root,
+                )
+                if browser_preview is not None:
+                    served = browser_preview
             index[key] = self._entry(
                 root=root,
                 path=served,
@@ -122,6 +152,37 @@ class TrackingArtifactService:
             self._collect_ambiguities(index=index, root=root, state=state)
         return index
 
+    def stage_input_validation_artifacts(
+        self,
+        job: TrackingJob,
+        artifact_paths: Mapping[str, str],
+    ) -> None:
+        """Copy allowlisted bridge artifacts into the durable job output root."""
+
+        root = self.job_root(job)
+        storage_root = LocalStorage().storage_root
+        root.mkdir(parents=True, exist_ok=True)
+        for key in (
+            "scene_clip_validation",
+            "initial_bbox_frame0_preview",
+            "initial_bbox_detection_match",
+        ):
+            raw_path = artifact_paths.get(key)
+            if not raw_path:
+                continue
+            source = Path(raw_path).resolve()
+            filename = STATIC_ARTIFACTS[key][0]
+            target = (root / filename).resolve()
+            if (
+                not source.is_file()
+                or not source.is_relative_to(storage_root)
+                or not target.is_relative_to(root)
+            ):
+                raise TrackingContractError(
+                    f"Input validation artifact is invalid: {key}."
+                )
+            shutil.copy2(source, target)
+
     def resolve(
         self,
         job: TrackingJob,
@@ -136,6 +197,22 @@ class TrackingArtifactService:
         path = (root / str(record["relative_path"])).resolve()
         if not path.is_relative_to(root) or not path.is_file():
             raise TrackingArtifactNotFoundError()
+        if (
+            record.get("kind") in {"preview", "review_preview"}
+            and path.suffix.lower() == ".mp4"
+        ):
+            browser_preview = self._write_browser_preview(
+                source=path,
+                target=(
+                    root
+                    / "backend_artifacts"
+                    / "public"
+                    / f"{artifact_key}.mp4"
+                ),
+                root=root,
+            )
+            if browser_preview is not None:
+                path = browser_preview
         mime_type = str(
             record.get("mime_type")
             or mimetypes.guess_type(path.name)[0]
@@ -251,7 +328,12 @@ class TrackingArtifactService:
     ) -> None:
         if not raw_path or not ARTIFACT_KEY_PATTERN.fullmatch(key):
             return
-        source = Path(str(raw_path)).resolve()
+        raw = Path(str(raw_path))
+        source = (
+            raw.resolve()
+            if raw.is_absolute()
+            else (root / raw).resolve()
+        )
         project_root = configured_absolute_path(
             self.settings.TRACKING_PROJECT_ROOT,
             "TRACKING_PROJECT_ROOT",
@@ -265,20 +347,35 @@ class TrackingArtifactService:
         ):
             return
 
-        if source.is_relative_to(root):
+        if kind == "review_preview" and source.suffix.lower() == ".mp4":
+            browser_preview = self._write_browser_preview(
+                source=source,
+                target=(
+                    root
+                    / "backend_artifacts"
+                    / "public"
+                    / f"{key}.mp4"
+                ),
+                root=root,
+            )
+            if browser_preview is not None:
+                target = browser_preview
+            elif source.is_relative_to(root):
+                target = source
+            else:
+                target = self._copy_external_artifact(
+                    source=source,
+                    root=root,
+                    key=key,
+                )
+        elif source.is_relative_to(root):
             target = source
         else:
-            suffix = source.suffix if source.suffix else ".bin"
-            target = (root / "backend_artifacts" / f"{key}{suffix}").resolve()
-            if not target.is_relative_to(root):
-                return
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if (
-                not target.is_file()
-                or target.stat().st_size != source.stat().st_size
-                or target.stat().st_mtime_ns < source.stat().st_mtime_ns
-            ):
-                shutil.copy2(source, target)
+            target = self._copy_external_artifact(
+                source=source,
+                root=root,
+                key=key,
+            )
 
         mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         index[key] = self._entry(
@@ -288,6 +385,96 @@ class TrackingArtifactService:
             kind=kind,
             mime_type=mime_type,
         )
+
+    @staticmethod
+    def _copy_external_artifact(*, source: Path, root: Path, key: str) -> Path:
+        suffix = source.suffix if source.suffix else ".bin"
+        target = (root / "backend_artifacts" / f"{key}{suffix}").resolve()
+        if not target.is_relative_to(root):
+            raise TrackingContractError("Artifact path escapes the tracking job root.")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if (
+            not target.is_file()
+            or target.stat().st_size != source.stat().st_size
+            or target.stat().st_mtime_ns < source.stat().st_mtime_ns
+        ):
+            shutil.copy2(source, target)
+        return target
+
+    @staticmethod
+    def _write_browser_preview(
+        *,
+        source: Path,
+        target: Path,
+        root: Path,
+    ) -> Path | None:
+        """Transcode a runtime preview into a broadly playable H.264 MP4."""
+
+        target = target.resolve()
+        if not target.is_relative_to(root):
+            raise TrackingContractError("Public artifact path escapes job root.")
+        if (
+            target.is_file()
+            and target.stat().st_size > 0
+            and target.stat().st_mtime_ns >= source.stat().st_mtime_ns
+        ):
+            return target
+
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            return None
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(
+            f".{target.stem}.{uuid4().hex}.tmp{target.suffix}"
+        )
+        command = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source),
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(temporary),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if (
+                completed.returncode != 0
+                or not temporary.is_file()
+                or temporary.stat().st_size <= 0
+            ):
+                temporary.unlink(missing_ok=True)
+                return None
+            os.replace(temporary, target)
+            return target
+        except OSError:
+            temporary.unlink(missing_ok=True)
+            return None
 
     def _entry(
         self,

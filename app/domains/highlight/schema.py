@@ -132,18 +132,27 @@ class PlayerFocusStartRequest(BaseModel):
 
 class PlayerCandidateRead(BaseModel):
     candidate_id: str
+    player_id: str | None = None
+    track_id: str | None = None
     scene_id: str
     display_label: str
+    number: str | None = None
+    jersey_number: str | None = None
+    team: str | None = None
+    confidence: float | None = None
     anchor_time_sec: float
     anchor_source_time_sec: float
     anchor_frame_index: int
     bbox_xyxy: list[float]
+    bounding_box: list[float] | None = None
     thumbnail_artifact_id: str | None
     thumbnail_url: str | None
+    representative_image_url: str | None = None
     track_length_frames: int
     trackability_score: float
     status: str
     detector_provenance: dict[str, Any] = Field(default_factory=dict)
+    tracking_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class PlayerCandidatesResponse(BaseModel):
@@ -153,8 +162,8 @@ class PlayerCandidatesResponse(BaseModel):
 
 class PlayerFocusSelectRequest(BaseModel):
     revision_id: str | None = None
-    display_name: str = Field(min_length=1, max_length=100)
-    anchor_scene_id: str
+    display_name: str | None = Field(default=None, min_length=1, max_length=100)
+    anchor_scene_id: str | None = None
     candidate_id: str
 
 
@@ -193,6 +202,10 @@ class SceneTrackingRead(BaseModel):
     tracking_job_id: str | None
     status: str
     tracking_status: str | None
+    progress: int = Field(default=0, ge=0, le=100)
+    current_stage: str | None = None
+    retryable: bool = False
+    status_url: str | None = None
     target_presence_status: str
     render_strategy: str
     timeline_summary: dict[str, Any] = Field(default_factory=dict)
@@ -228,3 +241,145 @@ class HighlightRenderResponse(BaseModel):
     revision: HighlightRevisionRead
     render_job_id: str
     status: str
+    reused: bool = False
+
+
+class HighlightDraftTimelineItem(BaseModel):
+    scene_id: str = Field(min_length=1, max_length=64)
+    start_sec: float = Field(ge=0)
+    end_sec: float = Field(gt=0)
+    order_index: int = Field(ge=0)
+    render_strategy: Literal["TARGET_CENTERED", "FULL_FRAME", "EXCLUDE"] = (
+        "FULL_FRAME"
+    )
+    enabled: bool = True
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.end_sec <= self.start_sec:
+            raise ValueError("end_sec must be greater than start_sec")
+        return self
+
+
+class HighlightDraftState(BaseModel):
+    selected_scene_ids: list[str] = Field(default_factory=list, max_length=100)
+    timeline_items: list[HighlightDraftTimelineItem] = Field(
+        default_factory=list,
+        max_length=200,
+    )
+    export_options: dict[str, Any] = Field(default_factory=dict)
+    editor_state: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("selected_scene_ids")
+    @classmethod
+    def unique_draft_scene_ids(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
+
+    @model_validator(mode="after")
+    def validate_timeline_items(self):
+        order_indices = [item.order_index for item in self.timeline_items]
+        if len(order_indices) != len(set(order_indices)):
+            raise ValueError("timeline item order_index values must be unique")
+        selected = set(self.selected_scene_ids)
+        unknown = {
+            item.scene_id
+            for item in self.timeline_items
+            if item.scene_id not in selected
+        }
+        if unknown:
+            raise ValueError(
+                "timeline items must reference selected_scene_ids"
+            )
+        return self
+
+
+class HighlightDraftSaveRequest(HighlightDraftState):
+    revision_id: str | None = None
+    clip_plan_id: str | None = None
+    expected_version: int | None = Field(default=None, ge=0)
+
+
+class HighlightDraftRead(HighlightDraftState):
+    draft_id: str
+    project_id: str
+    revision_id: str | None
+    clip_plan_id: str | None
+    saved_by_user_id: str | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class SceneWideCandidateDiscoveryRequest(BaseModel):
+    scene_id: str = Field(min_length=1, max_length=64)
+    scene_video_asset_id: str = Field(min_length=1, max_length=64)
+    shot_boundaries_artifact_id: str = Field(min_length=1, max_length=64)
+    detections_artifact_id: str = Field(min_length=1, max_length=64)
+
+
+class SceneWideCandidateRead(BaseModel):
+    candidate_id: str
+    scene_id: str
+    shot_id: str
+    shot_index: int
+    first_frame: int
+    last_frame: int
+    observation_count: int
+    representative_observation: dict[str, Any]
+    tracking_initialization_observation: dict[str, Any]
+    quality: dict[str, Any]
+    artifacts: dict[str, Any]
+    artifact_ids: dict[str, str] = Field(default_factory=dict)
+    gallery_visibility: str
+
+
+class SceneWideCandidateGalleryResponse(BaseModel):
+    revision_id: str
+    scene_id: str
+    status: str
+    shot_count: int
+    candidate_count: int
+    candidates: list[SceneWideCandidateRead] = Field(default_factory=list)
+    pagination: dict[str, Any] = Field(default_factory=dict)
+
+
+class SceneTargetSelectionCreateRequest(BaseModel):
+    scene_id: str = Field(min_length=1, max_length=64)
+    candidate_id: str = Field(min_length=1, max_length=255)
+    scene_video_asset_id: str = Field(min_length=1, max_length=64)
+
+
+class EarlierAnchorConfirmationRequest(BaseModel):
+    candidate_id: str | None = Field(default=None, max_length=255)
+    decision: Literal["candidate", "reject_all", "start_selected_shot"]
+
+    @model_validator(mode="after")
+    def validate_candidate_decision(self):
+        if self.decision == "candidate" and not self.candidate_id:
+            raise ValueError("candidate_id is required for candidate decision")
+        if self.decision != "candidate" and self.candidate_id is not None:
+            raise ValueError("candidate_id is allowed only for candidate decision")
+        return self
+
+
+class SceneTargetSelectionRead(BaseModel):
+    selection_id: str
+    selection_revision: int
+    project_id: str
+    revision_id: str
+    scene_id: str
+    selected_candidate_id: str
+    status: str
+    target_selection: dict[str, Any]
+    target_reference_set: dict[str, Any]
+    earlier_candidate_proposals: dict[str, Any]
+    earlier_anchor_decision: dict[str, Any]
+    tracking_job_id: str | None
+    tracking_cache_key: str | None
+
+
+class SceneTargetTrackingCreateRequest(BaseModel):
+    scene_video_asset_id: str = Field(min_length=1, max_length=64)
+    shot_boundaries_artifact_id: str = Field(min_length=1, max_length=64)

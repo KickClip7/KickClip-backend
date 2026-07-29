@@ -13,7 +13,7 @@ class ActionSpottingJobRequest(BaseModel):
     feature_extraction_mode: Literal["auto", "force", "skip"] = "auto"
     device: str = "auto"
     real_adapter_batch_size: int | None = Field(default=None, ge=1, le=1024)
-    real_adapter_max_candidates: Literal[80] | None = None
+    real_adapter_max_candidates: Literal[113] | None = None
     halftime_split_sec: float | None = Field(default=None, gt=0)
     options: dict[str, Any] = Field(default_factory=dict)
 

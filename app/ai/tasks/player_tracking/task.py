@@ -125,7 +125,7 @@ class PlayerTrackingTask(BaseAITask):
 
     def _build_task_input(self, context: TaskContext) -> PlayerTrackingInput:
         timeline_repo = TimelineEventRepository(context.db)
-        events = timeline_repo.list_by_match(match_id=context.job.match_id)
+        events = timeline_repo.list_current_by_match(match_id=context.job.match_id)
 
         source_video_asset_id: str | None = None
         source_video_path: Path | None = None

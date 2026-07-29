@@ -6,9 +6,9 @@ from typing import Any
 from app.ai.registry.model_card import ModelCard
 from app.ai.runtime.task_context import TaskContext
 from app.ai.tasks.highlight_spotting.adapters.base import HighlightRawPrediction
-from app.ai.tasks.highlight_spotting.adapters.soccer_highlight_former import (
+from app.ai.tasks.highlight_spotting.adapters.soccer_spotter_v9 import (
     CHAMPION_IDENTIFIER,
-    SoccerHighlightFormerAdapter,
+    SoccerSpotterV9Adapter,
 )
 from app.ai.tasks.highlight_spotting.config import HighlightSpottingRuntimeConfig
 from app.ai.tasks.highlight_spotting.feature_loader import (
@@ -82,7 +82,7 @@ class HighlightSpottingPredictor:
             if self.runtime_config.checkpoint_path is not None
             else None
         )
-        adapter = SoccerHighlightFormerAdapter.from_model_dir(model_dir)
+        adapter = SoccerSpotterV9Adapter.from_model_dir(model_dir)
         if self.model_card.id != CHAMPION_IDENTIFIER:
             raise checkpoint_mismatch(
                 "Configured Action Spotting model is not the Champion.",

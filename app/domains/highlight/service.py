@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -8,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.domains.agent.rule_based_planner import LABEL_PRIORITY, RuleBasedClipPlanner
 from app.domains.analysis.model import AnalysisJob
+from app.domains.artifact.signed_url import build_signed_artifact_url
 from app.domains.auth.model import User
 from app.domains.clip_plan.repository import ClipPlanRepository
 from app.domains.highlight.action_cache import ActionSpottingCacheService
@@ -25,7 +25,6 @@ from app.domains.highlight.repository import HighlightRepository
 from app.domains.highlight.request_parser import HighlightRequestParser
 from app.domains.highlight.scene_clips import SceneClipService
 from app.domains.highlight.schema import (
-    HighlightAnalyzeResponse,
     HighlightClipPlanResponse,
     HighlightFocusMode,
     HighlightRequest,
@@ -47,11 +46,16 @@ from app.domains.render.service import RenderJobService
 from app.domains.render.tracking_transform import TrackingTransformBuilder
 from app.domains.timeline.model import TimelineEvent
 from app.domains.timeline.repository import TimelineEventRepository
-from app.domains.tracking.errors import TrackingError
+from app.domains.tracking.errors import TrackingError, TrackingInputError
 from app.domains.tracking.executor import get_tracking_executor
 from app.domains.tracking.schema import TrackingJobCreateRequest
 from app.domains.tracking.service import TrackingJobService
-from app.domains.tracking.status import WAITING_STATUSES, TrackingBackendStatus
+from app.domains.tracking.status import (
+    WAITING_STATUSES,
+    TrackingBackendStatus,
+    tracking_progress,
+    tracking_retryable,
+)
 from app.domains.tracking.timeline import TrackingTimelineService
 
 
@@ -277,7 +281,7 @@ class HighlightWorkflowService:
             revision.status = "PLAYER_SELECTION_REQUIRED"
             revision.pending_action = "SELECT_PLAYER"
             self.db.commit()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - persist background-task failures
             self.db.rollback()
             failed = self.repository.get_revision(revision_id)
             if failed is not None:
@@ -298,8 +302,8 @@ class HighlightWorkflowService:
         *,
         project: Project,
         revision_id: str | None,
-        display_name: str,
-        anchor_scene_id: str,
+        display_name: str | None,
+        anchor_scene_id: str | None,
         candidate_id: str,
     ) -> tuple[HighlightRevision, PlayerFocusSubject, SceneTrackingBinding]:
         revision = (
@@ -307,20 +311,49 @@ class HighlightWorkflowService:
             if revision_id
             else self.require_current_revision(project.project_id)
         )
+        revision = self.repository.get_revision_for_update(
+            revision.revision_id
+        )
+        if revision is None:
+            raise ValueError("Highlight revision not found.")
         if revision.focus_mode != HighlightFocusMode.PLAYER.value:
             raise ValueError("Revision is not in PLAYER focus mode.")
+        candidate = self.repository.get_candidate(
+            revision_id=revision.revision_id,
+            candidate_id=candidate_id,
+        )
+        if candidate is None:
+            raise ValueError("Player candidate does not belong to this revision.")
+        resolved_scene_id = anchor_scene_id or candidate.scene_id
         candidate = self._validated_candidate(
             revision=revision,
-            scene_id=anchor_scene_id,
+            scene_id=resolved_scene_id,
             candidate_id=candidate_id,
         )
         if revision.focus_subject_id:
-            raise ValueError("Revision already has a focus subject.")
+            subject = self.repository.get_focus_subject(revision.focus_subject_id)
+            existing = self.repository.get_binding(
+                revision_id=revision.revision_id,
+                scene_id=resolved_scene_id,
+            )
+            if (
+                subject is not None
+                and subject.anchor_candidate_id == candidate_id
+                and existing is not None
+                and existing.selected_candidate_id == candidate_id
+            ):
+                return revision, subject, existing
+            raise ValueError("Revision already has a different focus subject.")
+        resolved_name = (
+            display_name
+            or (candidate.metadata_ or {}).get("display_label")
+            or "선수 후보"
+        )
         subject = self.repository.create_focus_subject(
             project_id=project.project_id,
-            display_name=display_name,
+            display_name=resolved_name,
             identity_source="USER_DEFINED",
-            anchor_scene_id=anchor_scene_id,
+            anchor_scene_id=resolved_scene_id,
             anchor_candidate_id=candidate_id,
             metadata_={
                 "scope": "PROJECT_EDIT_SUBJECT",
@@ -356,6 +389,11 @@ class HighlightWorkflowService:
             if revision_id
             else self.require_current_revision(project.project_id)
         )
+        revision = self.repository.get_revision_for_update(
+            revision.revision_id
+        )
+        if revision is None:
+            raise ValueError("Highlight revision not found.")
         if scene_id not in revision.selected_scene_ids:
             raise ValueError("Scene is not selected in this revision.")
         if revision.focus_subject_id is None:
@@ -365,7 +403,16 @@ class HighlightWorkflowService:
             scene_id=scene_id,
         )
         if existing is not None:
-            return revision, existing
+            same_decision = (
+                decision == "absent"
+                and existing.selected_candidate_id is None
+            ) or (
+                decision == "candidate"
+                and existing.selected_candidate_id == candidate_id
+            )
+            if same_decision:
+                return revision, existing
+            raise ValueError("Scene already has a different player confirmation.")
         subject = self.repository.get_focus_subject(revision.focus_subject_id)
         if subject is None:
             raise ValueError("Focus subject no longer exists.")
@@ -417,7 +464,7 @@ class HighlightWorkflowService:
         binding_id: str,
         user: User,
     ) -> SceneTrackingBinding:
-        binding = self.db.get(SceneTrackingBinding, binding_id)
+        binding = self.repository.get_binding_for_update(binding_id)
         if binding is None:
             raise ValueError("Scene tracking binding not found.")
         if binding.tracking_job_id:
@@ -453,6 +500,8 @@ class HighlightWorkflowService:
                     match_id=scene.match_id,
                     reacquisition_mode="assisted",
                 ),
+                input_validation=extracted.validation,
+                input_artifacts=extracted.artifact_paths,
             )
             binding.scene_clip_asset_id = extracted.asset.asset_id
             binding.tracking_job_id = response.job_id
@@ -470,11 +519,30 @@ class HighlightWorkflowService:
                 "clip_extraction": {
                     "command": extracted.command,
                     "mapping": "anchor_rebased_local_zero",
+                    "validation": extracted.validation,
+                    "artifacts": extracted.artifact_paths,
                 },
             }
             self.db.commit()
             get_tracking_executor().submit(response.job_id)
             return binding
+        except TrackingInputError as exc:
+            self.db.rollback()
+            failed = self.db.get(SceneTrackingBinding, binding_id)
+            if failed is not None:
+                failed.status = "TRACKING_INPUT_INVALID"
+                failed.error_message = f"{exc.code}: {exc}"
+                failed.metadata_ = {
+                    **(failed.metadata_ or {}),
+                    "tracking_input_error": {
+                        "status": "TRACKING_INPUT_INVALID",
+                        "code": exc.code,
+                        "message": str(exc),
+                        "diagnostics": exc.diagnostics,
+                    },
+                }
+                self.db.commit()
+            raise
         except Exception as exc:
             self.db.rollback()
             failed = self.db.get(SceneTrackingBinding, binding_id)
@@ -661,8 +729,16 @@ class HighlightWorkflowService:
         if revision is None:
             raise ValueError("Highlight revision not found.")
         revision.render_job_id = render.render_job_id
-        revision.status = "RENDERING"
-        revision.pending_action = None
+        if render.status == "completed":
+            revision.status = "COMPLETED"
+            revision.pending_action = "COMPLETED"
+        elif render.status == "failed":
+            revision.status = "FAILED"
+            revision.pending_action = None
+            revision.error_message = render.error_message
+        else:
+            revision.status = "RENDERING"
+            revision.pending_action = None
         self.db.commit()
         self.db.refresh(revision)
         return revision, render
@@ -719,40 +795,78 @@ class HighlightWorkflowService:
     def candidates(
         self,
         project_id: str,
+        *,
+        user_id: str | None = None,
     ) -> tuple[HighlightRevision, list[PlayerCandidateRead]]:
         revision = self.reconcile_revision(
             self.require_current_revision(project_id)
         )
+        discovery = (revision.options or {}).get("candidate_discovery")
+        if (
+            revision.status == "FAILED"
+            and isinstance(discovery, dict)
+            and discovery.get("status") == "FAILED"
+        ):
+            raise ValueError(
+                str(
+                    discovery.get("reason")
+                    or revision.error_message
+                    or "Player candidate discovery failed."
+                )
+            )
         rows = []
         for index, candidate in enumerate(
             self.repository.list_candidates(revision.revision_id),
             start=1,
         ):
+            metadata = candidate.metadata_ or {}
+            thumbnail_url = None
+            if candidate.thumbnail_artifact_id:
+                thumbnail_url = (
+                    build_signed_artifact_url(
+                        candidate.thumbnail_artifact_id,
+                        user_id,
+                    )[0]
+                    if user_id is not None
+                    else (
+                        f"/api/v1/artifacts/"
+                        f"{candidate.thumbnail_artifact_id}/download"
+                    )
+                )
             rows.append(
                 PlayerCandidateRead(
                     candidate_id=candidate.candidate_id,
+                    player_id=candidate.candidate_id,
+                    track_id=candidate.candidate_id,
                     scene_id=candidate.scene_id,
-                    display_label=(candidate.metadata_ or {}).get(
+                    display_label=metadata.get(
                         "display_label",
                         f"선수 후보 {index}",
                     ),
+                    number=metadata.get("jersey_number"),
+                    jersey_number=metadata.get("jersey_number"),
+                    team=metadata.get("team"),
+                    confidence=metadata.get("confidence"),
                     anchor_time_sec=candidate.anchor_time_sec,
                     anchor_source_time_sec=candidate.anchor_source_time_sec,
                     anchor_frame_index=candidate.anchor_frame_index,
                     bbox_xyxy=candidate.bbox_xyxy,
+                    bounding_box=candidate.bbox_xyxy,
                     thumbnail_artifact_id=candidate.thumbnail_artifact_id,
-                    thumbnail_url=(
-                        f"/api/v1/artifacts/{candidate.thumbnail_artifact_id}/download"
-                        if candidate.thumbnail_artifact_id
-                        else None
-                    ),
+                    thumbnail_url=thumbnail_url,
+                    representative_image_url=thumbnail_url,
                     track_length_frames=candidate.track_length_frames,
                     trackability_score=candidate.trackability_score,
                     status=candidate.status,
-                    detector_provenance=(candidate.metadata_ or {}).get(
+                    detector_provenance=metadata.get(
                         "detector_provenance",
                         {},
                     ),
+                    tracking_metadata={
+                        "class_id": metadata.get("class_id"),
+                        "class_name": metadata.get("class_name"),
+                        "sample_support": metadata.get("sample_support"),
+                    },
                 )
             )
         return revision, rows
@@ -792,6 +906,39 @@ class HighlightWorkflowService:
                     tracking_status=(
                         binding.tracking_job.status
                         if binding.tracking_job
+                        else None
+                    ),
+                    progress=(
+                        tracking_progress(
+                            binding.tracking_job.status,
+                            binding.tracking_job.current_stage,
+                        )
+                        if binding.tracking_job
+                        else (
+                            100
+                            if binding.status in {
+                                "COMPLETED",
+                                "COMPLETED_SAFE_BLOCK",
+                            }
+                            else 0
+                        )
+                    ),
+                    current_stage=(
+                        binding.tracking_job.current_stage
+                        if binding.tracking_job
+                        else None
+                    ),
+                    retryable=(
+                        tracking_retryable(
+                            binding.tracking_job.status,
+                            binding.tracking_job.error_type,
+                        )
+                        if binding.tracking_job
+                        else binding.status == "FAILED"
+                    ),
+                    status_url=(
+                        f"/api/v1/tracking/jobs/{binding.tracking_job_id}"
+                        if binding.tracking_job_id
                         else None
                     ),
                     target_presence_status=binding.target_presence_status,
@@ -1028,13 +1175,26 @@ class HighlightWorkflowService:
     def _reconcile_tracking(self, revision: HighlightRevision) -> None:
         if revision.status == "PLAYER_DISCOVERY_RUNNING":
             return
+        discovery = (revision.options or {}).get("candidate_discovery")
+        if (
+            revision.status == "FAILED"
+            and isinstance(discovery, dict)
+            and discovery.get("status") == "FAILED"
+        ):
+            return
         bindings = self.repository.list_bindings(revision.revision_id)
         waiting = False
         running = False
         failed = False
+        input_invalid = False
+        safe_block = False
         for binding in bindings:
             job = binding.tracking_job
             if job is None:
+                if binding.status == "TRACKING_INPUT_INVALID":
+                    input_invalid = True
+                    failed = True
+                    continue
                 if binding.status in {"QUEUED_FOR_EXTRACTION", "TRACKING_QUEUED"}:
                     running = True
                 continue
@@ -1066,6 +1226,7 @@ class HighlightWorkflowService:
             elif job.status == TrackingBackendStatus.COMPLETED_SAFE_BLOCK.value:
                 binding.status = "COMPLETED_SAFE_BLOCK"
                 binding.target_presence_status = "SEARCHING"
+                safe_block = True
             elif job.status in {
                 TrackingBackendStatus.FAILED.value,
                 TrackingBackendStatus.CANCELLED.value,
@@ -1081,7 +1242,19 @@ class HighlightWorkflowService:
             bool((row.timeline_summary or {}).get("crop_segments"))
             for row in bindings
         )
-        if waiting:
+        if input_invalid:
+            revision.status = "TRACKING_INPUT_INVALID"
+            revision.pending_action = "SELECT_PLAYER"
+            revision.error_message = next(
+                (
+                    row.error_message
+                    for row in bindings
+                    if row.status == "TRACKING_INPUT_INVALID"
+                    and row.error_message
+                ),
+                "Tracking input clip is invalid.",
+            )
+        elif waiting:
             revision.status = "TRACKING_CONFIRMATION_REQUIRED"
             revision.pending_action = (
                 "REVIEW_TRACKING_MEMORY"
@@ -1108,8 +1281,37 @@ class HighlightWorkflowService:
             revision.status = "NO_TARGET_SCENES"
             revision.pending_action = "SELECT_PLAYER"
         elif failed:
-            revision.status = "TRACKING_CONFIRMATION_REQUIRED"
-            revision.pending_action = "REVIEW_TRACKING_SEGMENT"
+            revision.status = "TRACKING_RUNTIME_FAILED"
+            revision.pending_action = None
+            revision.error_message = next(
+                (
+                    row.error_message
+                    for row in bindings
+                    if row.status == "FAILED" and row.error_message
+                ),
+                "Tracking runtime failed.",
+            )
+
+        outcome = (
+            "TRACKING_INPUT_INVALID"
+            if input_invalid
+            else "TRACKING_NEEDS_CONFIRMATION"
+            if waiting
+            else "TRACKING_RUNTIME_FAILED"
+            if failed
+            else "TRACKING_COMPLETED"
+            if crop_ready
+            else "TRACKING_COMPLETED_SAFE_BLOCK"
+            if safe_block
+            else "TRACKING_RUNNING"
+            if running
+            else None
+        )
+        if outcome:
+            revision.options = {
+                **(revision.options or {}),
+                "tracking_outcome": outcome,
+            }
 
     def _create_tracking_plan_items(
         self,

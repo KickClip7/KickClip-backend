@@ -6,6 +6,14 @@ from app.ai.tasks.highlight_spotting.label_map import (
     normalize_label,
 )
 
+DEFAULT_EVENT_WINDOWS: dict[str, dict[str, float]] = {
+    "goal": {"before_sec": 15.0, "after_sec": 30.0},
+    "shot": {"before_sec": 8.0, "after_sec": 14.0},
+    "penalty": {"before_sec": 25.0, "after_sec": 40.0},
+    "card": {"before_sec": 15.0, "after_sec": 25.0},
+    "corner": {"before_sec": 10.0, "after_sec": 18.0},
+}
+
 
 class HighlightPostprocessor:
     """Postprocess raw highlight predictions.
@@ -20,7 +28,8 @@ class HighlightPostprocessor:
         default_threshold: float = 0.35,
         max_candidates: int = 20,
         nms_window_sec: float = 8.0,
-        merge_overlapping_scenes: bool = True,
+        merge_overlapping_scenes: bool = False,
+        event_windows: dict[str, dict[str, float]] | None = None,
         min_duration_sec: float = 4.0,
         max_duration_sec: float = 12.0,
         pre_event_sec: float = 4.0,
@@ -32,6 +41,16 @@ class HighlightPostprocessor:
         self.max_candidates = max_candidates
         self.nms_window_sec = nms_window_sec
         self.merge_overlapping_scenes = merge_overlapping_scenes
+        configured_event_windows = (
+            DEFAULT_EVENT_WINDOWS if event_windows is None else event_windows
+        )
+        self.event_windows = {
+            label: {
+                "before_sec": float(window["before_sec"]),
+                "after_sec": float(window["after_sec"]),
+            }
+            for label, window in configured_event_windows.items()
+        }
         self.min_duration_sec = min_duration_sec
         self.max_duration_sec = max_duration_sec
         self.pre_event_sec = pre_event_sec
@@ -93,25 +112,37 @@ class HighlightPostprocessor:
         timestamp_sec = float(raw_timestamp or 0.0)
         half = candidate.get("half")
 
-        start_sec = candidate.get("start_sec")
-        end_sec = candidate.get("end_sec")
-
-        if start_sec is None:
-            start_sec = timestamp_sec - self.pre_event_sec
-
-        if end_sec is None:
-            end_sec = timestamp_sec + self.post_event_sec
+        event_window = self.event_windows.get(label)
+        if event_window is not None:
+            before_sec = event_window["before_sec"]
+            after_sec = event_window["after_sec"]
+            start_sec = timestamp_sec - before_sec
+            end_sec = timestamp_sec + after_sec
+        else:
+            before_sec = self.pre_event_sec
+            after_sec = self.post_event_sec
+            start_sec = candidate.get("start_sec")
+            end_sec = candidate.get("end_sec")
+            if start_sec is None:
+                start_sec = timestamp_sec - before_sec
+            if end_sec is None:
+                end_sec = timestamp_sec + after_sec
 
         start_sec = max(float(start_sec), 0.0)
-        end_sec = max(float(end_sec), start_sec + self.min_duration_sec)
-
         max_end_sec = match_duration_sec if match_duration_sec else None
         if max_end_sec is not None:
-            end_sec = min(end_sec, max_end_sec)
+            end_sec = min(float(end_sec), max_end_sec)
+        else:
+            end_sec = float(end_sec)
+
+        if event_window is None:
+            end_sec = max(end_sec, start_sec + self.min_duration_sec)
+            if max_end_sec is not None:
+                end_sec = min(end_sec, max_end_sec)
 
         duration_sec = max(end_sec - start_sec, 0.1)
 
-        if duration_sec > self.max_duration_sec:
+        if event_window is None and duration_sec > self.max_duration_sec:
             end_sec = start_sec + self.max_duration_sec
             if max_end_sec is not None:
                 end_sec = min(end_sec, max_end_sec)
@@ -153,13 +184,21 @@ class HighlightPostprocessor:
                 "source": candidate.get("source", "highlight_spotting"),
                 "source_predictions": [source_prediction],
                 "scene_provenance": {
-                    "policy": "highlight_scene_normalization_v1",
+                    "policy": "event_clip_windows_v1",
                     "default_threshold": self.default_threshold,
                     "class_threshold": self._threshold_for(label),
-                    "pre_event_sec": self.pre_event_sec,
-                    "post_event_sec": self.post_event_sec,
+                    "before_sec": before_sec,
+                    "after_sec": after_sec,
+                    "expected_duration_sec": before_sec + after_sec,
+                    "boundary_clamped": (
+                        start_sec == 0.0
+                        or (
+                            max_end_sec is not None
+                            and end_sec == max_end_sec
+                        )
+                    ),
                     "nms_window_sec": self.nms_window_sec,
-                    "max_duration_sec": self.max_duration_sec,
+                    "merge_overlapping_scenes": self.merge_overlapping_scenes,
                 },
             },
         }

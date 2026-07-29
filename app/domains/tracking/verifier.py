@@ -10,7 +10,6 @@ from pathlib import Path
 
 from app.core.config import Settings, get_settings
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -32,6 +31,18 @@ def configured_absolute_path(value: str, setting_name: str) -> Path:
     if not path.is_absolute():
         raise ValueError(f"{setting_name} must be an absolute path")
     return path.resolve()
+
+
+def configured_absolute_executable_path(value: str, setting_name: str) -> Path:
+    """Validate an executable path without resolving a virtualenv symlink."""
+
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{setting_name} is not configured")
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{setting_name} must be an absolute path")
+    return path
 
 
 class TrackingInstallationVerifier:
@@ -73,7 +84,7 @@ class TrackingInstallationVerifier:
                 self.settings.TRACKING_PROJECT_ROOT,
                 "TRACKING_PROJECT_ROOT",
             )
-            python = configured_absolute_path(
+            python = configured_absolute_executable_path(
                 self.settings.TRACKING_PYTHON_EXECUTABLE,
                 "TRACKING_PYTHON_EXECUTABLE",
             )
@@ -205,4 +216,3 @@ def get_tracking_verifier() -> TrackingInstallationVerifier:
         if _verifier is None:
             _verifier = TrackingInstallationVerifier()
         return _verifier
-

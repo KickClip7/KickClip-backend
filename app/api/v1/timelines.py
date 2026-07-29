@@ -45,7 +45,7 @@ def list_match_timeline_events(
 
     repository = TimelineEventRepository(db)
     events = select_dev_timeline_events(
-        repository.list_by_match(
+        repository.list_current_by_match(
             match_id=match_id,
             label=backend_label,
             half=half,

@@ -10,6 +10,7 @@ from app.domains.timeline.model import TimelineEvent
 FRONTEND_TO_BACKEND_LABEL = {
     "goal": "goal",
     "shot": "shot",
+    "penalty": "penalty",
     "foul": "foul",
     "card": "card",
     "freekick": "free_kick",
@@ -19,6 +20,7 @@ FRONTEND_TO_BACKEND_LABEL = {
 
 LABEL_PRIORITY = {
     "goal": 100,
+    "penalty": 90,
     "shot": 80,
     "free_kick": 70,
     "corner": 60,
@@ -250,6 +252,7 @@ class RuleBasedClipPlanner:
         keyword_rules = [
             ("goal", ["골", "득점", "goal"]),
             ("shot", ["슈팅", "슛", "유효슈팅", "shot"]),
+            ("penalty", ["페널티", "패널티", "penalty", "pk"]),
             ("foul", ["파울", "반칙", "foul"]),
             ("card", ["카드", "옐로", "레드", "card"]),
             ("free_kick", ["프리킥", "free kick", "free_kick", "freekick"]),

@@ -246,7 +246,7 @@ class StudioService:
 
         video_asset = self._select_representative_video_asset(match_id)
         events = select_dev_timeline_events(
-            self.timeline_event_repository.list_by_match(match_id),
+            self.timeline_event_repository.list_current_by_match(match_id),
             match_id=match_id,
             settings=get_settings(),
         )
@@ -279,6 +279,8 @@ class StudioService:
         project = self.project_repository.get_by_id(project_id)
         if project is None:
             return None
+        project.last_opened_at = datetime.now(project.created_at.tzinfo)
+        self.db.commit()
         common = self.get_edit_state(
             project.match_id,
             event_weights=event_weights,
@@ -288,10 +290,13 @@ class StudioService:
         clip_plans = self.clip_plan_repository.list_by_project(project_id)
         render_jobs: list[RenderJobRead] = []
         for clip_plan in clip_plans:
-            for render_job in self.render_job_repository.list_by_clip_plan(
-                clip_plan.clip_plan_id
+            for render_job in sorted(
+                clip_plan.render_jobs,
+                key=lambda row: row.created_at,
+                reverse=True,
             ):
                 render_job_read = RenderJobRead.model_validate(render_job)
+                render_job_read.retryable = render_job.status == "failed"
                 if (
                     render_job.status == "completed"
                     and render_job.output_artifact_id is not None

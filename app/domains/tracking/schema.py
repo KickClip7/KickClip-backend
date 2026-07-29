@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.domains.tracking.status import TrackingBackendStatus
 from app.domains.tracking.validation import validate_bbox_xyxy
-
 
 BBox = Annotated[list[float], Field(min_length=4, max_length=4)]
 
@@ -89,6 +88,10 @@ class TrackingAmbiguityConfirmationRequest(BaseModel):
 class TrackingJobCreateResponse(BaseModel):
     job_id: str
     status: TrackingBackendStatus
+    outcome: str
+    progress: int = Field(default=0, ge=0, le=100)
+    retryable: bool = False
+    reused: bool = False
     status_url: str
 
 
@@ -133,6 +136,10 @@ class TrackingJobResponse(BaseModel):
     project_id: str | None
     media_asset_id: str
     status: TrackingBackendStatus
+    outcome: str
+    progress: int = Field(ge=0, le=100)
+    retryable: bool
+    status_url: str
     pipeline_status: str | None
     pipeline_decision: str | None
     current_stage: str | None
