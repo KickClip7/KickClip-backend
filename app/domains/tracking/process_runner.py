@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import signal
 import subprocess
 import threading
@@ -113,6 +114,14 @@ class TrackingProcessRunner:
         ]
         scene_context = self._scene_target_context(job)
         if scene_context is not None:
+            selection_root_value = scene_context.get(
+                "selection_artifact_root"
+            )
+            if not selection_root_value:
+                raise TrackingValidationError(
+                    "Scene target selection artifact root is missing."
+                )
+            selection_root = Path(str(selection_root_value)).resolve()
             required_paths = {
                 "--tracking-launch-manifest": "tracking_launch_manifest_path",
                 "--shot-boundaries": "shot_boundaries_path",
@@ -126,7 +135,36 @@ class TrackingProcessRunner:
                     raise TrackingValidationError(
                         f"Scene target selection is missing {key}."
                     )
-                command.extend([flag, str(value)])
+                resolved = Path(str(value)).resolve()
+                if not resolved.is_file():
+                    raise TrackingValidationError(
+                        f"Scene target selection file is missing: {key}."
+                    )
+                if key in {
+                    "target_selection_path",
+                    "target_reference_set_path",
+                    "earlier_anchor_decision_path",
+                }:
+                    if not resolved.is_relative_to(selection_root):
+                        raise TrackingValidationError(
+                            "Scene target artifact escapes immutable root."
+                        )
+                    sha_key = {
+                        "target_selection_path": "target_selection_sha256",
+                        "target_reference_set_path": (
+                            "target_reference_set_sha256"
+                        ),
+                        "earlier_anchor_decision_path": (
+                            "earlier_anchor_decision_sha256"
+                        ),
+                    }[key]
+                    expected = str(scene_context.get(sha_key) or "")
+                    actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
+                    if len(expected) != 64 or actual != expected:
+                        raise TrackingValidationError(
+                            "Scene target artifact hash mismatch."
+                        )
+                command.extend([flag, str(resolved)])
         if overwrite:
             command.append("--overwrite")
         if not self.settings.TRACKING_PREVIEW_ENABLED:

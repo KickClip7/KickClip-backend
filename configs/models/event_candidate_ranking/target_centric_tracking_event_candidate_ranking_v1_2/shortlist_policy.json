@@ -1,0 +1,23 @@
+{
+  "policy_id": "target_centric_tracking_event_candidate_ranking_v1_2_shortlist_patch",
+  "status": "PROVISIONAL_SHADOW_ONLY",
+  "shortlist_size": 5,
+  "max_candidates_per_shot": 2,
+  "action_adjacent_start_delta_sec": 2.0,
+  "phase_diversity": {
+    "min_pre_event_action": 1,
+    "preferred_pre_event_action": 2,
+    "max_event_containing_post": 2,
+    "remaining_slots": "GLOBAL_SCORE_FALLBACK"
+  },
+  "eligible_reliability_states": [
+    "READY",
+    "PARTIAL_FEATURES"
+  ],
+  "score_source": "FROZEN_V1_1_2A_RECOMMENDATION_SCORE",
+  "scores_recomputed": false,
+  "ranking_weights_changed": false,
+  "human_labels_used_for_shortlist": false,
+  "automatic_target_confirmation": false,
+  "production_recommendation_ui": "BLOCKED"
+}

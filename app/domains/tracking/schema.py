@@ -192,3 +192,4 @@ class TrackingDiagnosticsResponse(BaseModel):
     code: str
     message: str
     verifier_return_code: int | None = None
+    components: dict[str, bool] = Field(default_factory=dict)

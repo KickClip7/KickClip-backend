@@ -1,0 +1,66 @@
+{
+  "policy_id": "target_centric_tracking_event_candidate_ranking_v1_1_1_safety",
+  "status": "PROVISIONAL_SHADOW_ONLY",
+  "ranking_weight_policy": "../target_centric_tracking_event_candidate_ranking_v1_1/event_candidate_ranking_policy.json",
+  "ranking_weights_changed": false,
+  "automatic_target_confirmation": false,
+  "frame_decoding": {
+    "strategy": "BOUNDED_LRU",
+    "max_cached_frames": 4
+  },
+  "ball_selection": {
+    "minimum_confidence": 0.2,
+    "min_area_ratio": 0.000005,
+    "max_area_ratio": 0.02,
+    "continuity_reset_gap_frames": 12,
+    "continuity_distance_penalty": 0.5,
+    "max_normalized_displacement_per_frame": 0.08,
+    "minimum_candidate_coverage": 0.2,
+    "minimum_trajectory_continuity": 0.15,
+    "event_near_window_sec": 3.0
+  },
+  "feature_completeness": {
+    "features": {
+      "temporal.representative_time_distance_sec": 0.12,
+      "temporal.event_window_overlap": 0.1,
+      "visual.bbox_area_ratio": 0.1,
+      "visual.center_proximity": 0.08,
+      "visual.crop_sharpness": 0.08,
+      "motion.center_velocity": 0.12,
+      "motion.pre_event_motion_magnitude": 0.08,
+      "broadcast.local_post_event_focus": 0.07,
+      "ball.coverage": 0.08,
+      "ball.trajectory_continuity": 0.07,
+      "ball.event_near_median_foot_distance": 0.1
+    },
+    "critical_by_event": {
+      "goal": [
+        "temporal.representative_time_distance_sec",
+        "visual.bbox_area_ratio",
+        "motion.center_velocity",
+        "ball.event_near_median_foot_distance"
+      ],
+      "shot": [
+        "temporal.representative_time_distance_sec",
+        "visual.bbox_area_ratio",
+        "motion.center_velocity",
+        "ball.event_near_median_foot_distance"
+      ],
+      "free_kick": [
+        "temporal.visible_duration_before_event_sec",
+        "visual.bbox_area_ratio",
+        "ball.event_near_median_foot_distance",
+        "ball.pre_event_distance_trend"
+      ],
+      "corner": [
+        "temporal.visible_duration_before_event_sec",
+        "visual.bbox_area_ratio",
+        "ball.event_near_median_foot_distance",
+        "ball.pre_event_distance_trend"
+      ]
+    },
+    "ready_threshold": 0.8,
+    "partial_threshold": 0.45,
+    "minimum_reliable_shortlist_size": 3
+  }
+}

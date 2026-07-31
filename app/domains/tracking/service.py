@@ -47,8 +47,10 @@ from app.domains.tracking.validation import (
     validate_bbox_xyxy,
 )
 from app.domains.tracking.verifier import (
+    SceneTargetTrackingInstallationVerifier,
     TrackingInstallationVerifier,
     configured_absolute_path,
+    get_scene_target_tracking_verifier,
     get_tracking_verifier,
 )
 from app.storage.local_storage import LocalStorage
@@ -64,6 +66,9 @@ class TrackingJobService:
         *,
         settings: Settings | None = None,
         verifier: TrackingInstallationVerifier | None = None,
+        scene_target_verifier: (
+            SceneTargetTrackingInstallationVerifier | None
+        ) = None,
         artifacts: TrackingArtifactService | None = None,
     ) -> None:
         self.db = db
@@ -71,6 +76,9 @@ class TrackingJobService:
         self.repository = TrackingJobRepository(db)
         self.media_repository = MediaAssetRepository(db)
         self.verifier = verifier or get_tracking_verifier()
+        self.scene_target_verifier = (
+            scene_target_verifier or get_scene_target_tracking_verifier()
+        )
         self.artifacts = artifacts or TrackingArtifactService(self.settings)
         self.storage = LocalStorage()
 
@@ -99,6 +107,14 @@ class TrackingJobService:
         if locked_asset is None:
             raise TrackingValidationError("MediaAsset no longer exists.")
         asset = locked_asset
+        has_scene_target_context = isinstance(
+            (runtime_context or {}).get("scene_target_selection"),
+            Mapping,
+        )
+        if has_scene_target_context:
+            installation = self.scene_target_verifier.check()
+            if not installation.available:
+                raise TrackingUnavailableError(installation.message)
         reusable = self.repository.find_equivalent_reusable(
             owner_id=user.user_id,
             media_asset_id=asset.asset_id,
@@ -111,9 +127,10 @@ class TrackingJobService:
         if reusable is not None:
             return self._create_response(reusable, reused=True)
 
-        installation = self.verifier.check()
-        if not installation.available:
-            raise TrackingUnavailableError(installation.message)
+        if not has_scene_target_context:
+            installation = self.verifier.check()
+            if not installation.available:
+                raise TrackingUnavailableError(installation.message)
 
         video_path = self.storage.resolve_path(asset.file_path)
         if not video_path.is_file():

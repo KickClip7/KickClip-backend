@@ -1,0 +1,27 @@
+{
+  "schema_version": "kickclip.reviewed_shot_boundaries.compat_fixture.v1",
+  "video": {
+    "sha256": "__VIDEO_SHA256__",
+    "frame_count": 12
+  },
+  "diagnostics": {
+    "review_required": false,
+    "retrieval_authorized": true,
+    "pending_cut_frames": []
+  },
+  "review_contract": {
+    "pending_cut_frames": []
+  },
+  "shots": [
+    {
+      "shot_id": "shot_0000",
+      "shot_index": 0,
+      "start_frame": 0,
+      "end_frame_inclusive": 11,
+      "start_time_sec": 0.0,
+      "end_time_sec": 1.2,
+      "review_state": "REVIEWED_PASS"
+    }
+  ]
+}
+

@@ -270,6 +270,22 @@ curl -X POST "http://127.0.0.1:8000/api/v1/action-spotting/matches/<match_id>/jo
 
 작업 상태는 `GET /api/v1/analysis-jobs/{job_id}`, 결과 이벤트는 `GET /api/v1/action-spotting/jobs/{job_id}/events`에서 확인합니다.
 
+### 로컬 사전 추출 경기 등록
+
+루트에 있는 MP4/NPY 쌍을 업로드 및 SoccerNet 피처 추출 완료 상태로
+등록하려면 다음 명령을 실행합니다.
+
+```bash
+python scripts/import_preloaded_matches.py
+```
+
+스크립트는 대용량 MP4/NPY를 `storage/matches/<match_id>` 아래에 가능한
+경우 hard link로 배치하고, `[T, 512]` NPY를 Champion 모델이 요구하는
+전·후반 피처 자산으로 나눕니다. 반복 실행해도 같은 Match와 MediaAsset을
+갱신합니다. 이후 기존 Action Spotting API를
+`run_feature_extraction=true`, `feature_extraction_mode=auto`로 호출하면
+등록된 피처를 재사용합니다.
+
 ### 5. Target Tracking 작업 시작
 
 Tracking runtime이 설치된 환경에서만 사용할 수 있습니다.
@@ -348,6 +364,7 @@ curl -X POST "http://127.0.0.1:8000/api/v1/renders" \
 TRACKING_ENABLED=true
 TRACKING_PROJECT_ROOT="<AI_PROJECT_ROOT>"
 TRACKING_E2E_SCRIPT_PATH="<AI_PROJECT_ROOT>/target_centric_tracking_e2e_v1/run_target_centric_pipeline.py"
+TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH="<AI_PROJECT_ROOT>/target_centric_tracking_v2_production_r3/run_v2_production_r3.py"
 TRACKING_VERIFY_SCRIPT_PATH="<AI_PROJECT_ROOT>/target_centric_tracking_e2e_v1/verify_e2e_installation.py"
 TRACKING_PYTHON_EXECUTABLE="<YOLO_SOCCER_ENV>/python"
 TRACKING_OUTPUT_ROOT="<AI_PROJECT_ROOT>/runs/target_centric_tracking_e2e_v1"

@@ -1,0 +1,17 @@
+{
+  "status": "FROZEN_UNCHANGED_BASELINE",
+  "manifest_sha256": "198c866a46c59c4d176ef8067018d8f1140adf959d4b54e43185d7be14f02e7f",
+  "sha256": {
+    "app/domains/highlight/event_candidate_ranking_v1_1/contract.py": "17767533cc851fcd92a1aa0ac51e8a72594d96f53ee69922225f3302d13d098d",
+    "app/domains/highlight/event_candidate_ranking_v1_1/service.py": "41377ba2a0fce37950752b69e6c025b213554eb0e8f2f3ba162222c0bed8104e",
+    "app/domains/highlight/event_candidate_ranking_v1_1/feature_extractor.py": "a6b8b79f0b4e7f3cd2d56cdcd99961d386c4e04f958af3e39a46b81e28ad4dd3",
+    "app/domains/highlight/event_candidate_ranking_v1_1/policy.py": "b704fdcb6dc30f46e82604d698018ec9b3b2c114296fe9a0ac6531e2bd72975f",
+    "app/domains/highlight/event_candidate_ranking_v1_1/diversity.py": "a70635956f3811f8dd79d42ceb464b2f4e808d2880ceea1e4d3c58abe88f5fd2",
+    "app/domains/highlight/event_candidate_ranking_v1_1/backend_adapter.py": "86c5ade76e1fd83c7c248b625fc0302e42069d9ba380fc2942fc33be177b005b",
+    "app/domains/highlight/event_candidate_ranking_v1_1/evaluation.py": "3ef1f96aeac42e4c59dd922818463bcf0de13d1e18a0cb0aa3654fc78c73a57a",
+    "app/domains/highlight/event_candidate_ranking_v1_1/verifier.py": "2b3b9d64fa4a5e0e70166300529243d52a09c436750109acf45eab8fc9f247cb",
+    "app/domains/highlight/event_candidate_ranking_v1_1/schema.py": "dd7786d64db582b7fe6786df37c25b40126129eedfb4825667c46c87effef609",
+    "app/domains/highlight/event_candidate_ranking_v1_1/annotation_service.py": "fe4bd027c2b8c6915d04740497f234f7bdfc36ae775df08879ec87dd4413e925",
+    "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1_1/manifest.json": "198c866a46c59c4d176ef8067018d8f1140adf959d4b54e43185d7be14f02e7f"
+  }
+}

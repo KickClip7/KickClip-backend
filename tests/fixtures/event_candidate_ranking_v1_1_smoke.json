@@ -1,0 +1,16 @@
+{
+  "fixture_id": "event_candidate_ranking_v1_1_shadow_smoke",
+  "contains_human_ground_truth": false,
+  "event": {
+    "event_id": "event_fixture",
+    "event_label": "goal",
+    "event_time_sec": 0.4,
+    "scene_start_sec": 0.0,
+    "scene_end_sec": 1.0
+  },
+  "expected": {
+    "automatic_target_confirmation": false,
+    "field_context": null,
+    "ball_state_without_ball_detections": "UNAVAILABLE"
+  }
+}

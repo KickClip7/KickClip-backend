@@ -1,0 +1,21 @@
+{
+  "policy_id": "target_centric_tracking_event_candidate_ranking_v1_1_2a_contract_compatibility",
+  "status": "PROVISIONAL_SHADOW_ONLY",
+  "ranking_weight_policy": "../target_centric_tracking_event_candidate_ranking_v1_1/event_candidate_ranking_policy.json",
+  "ranking_weights_changed": false,
+  "approved_shot_review_states": ["REVIEWED_PASS", "CONFIRMED"],
+  "end_frame_aliases": [
+    "end_frame",
+    "end_frame_inclusive",
+    "last_frame",
+    "frame_end"
+  ],
+  "review_state_aliases": [
+    "review_status",
+    "review_state",
+    "status",
+    "boundary_status"
+  ],
+  "stale_discovery_behavior": "STALE_DISCOVERY_INPUT",
+  "automatic_target_confirmation": false
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": "kickclip.scene_discovery_compat_dependency_lock.v1",
+  "runtime_dependencies": {
+    "python": "3.10.20",
+    "opencv": "4.10.0",
+    "numpy": "1.26.4",
+    "torch": "2.12.1+cu126",
+    "torchvision": "0.27.1+cu126",
+    "pillow": "12.3.0",
+    "scipy": "1.15.3"
+  },
+  "test_dependencies": {
+    "pytest": null,
+    "test_strategy": "standalone verifier plus backend pytest regression"
+  },
+  "environment_name": "yolo-soccer",
+  "original_frozen_environment_reproduced": false
+}
+

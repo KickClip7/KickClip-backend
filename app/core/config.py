@@ -124,6 +124,48 @@ class Settings(BaseSettings):
     TRACKING_PREVIEW_ENABLED: bool = True
 
     # -------------------------------------------------------------------------
+    # Scene target selection / event ranking frozen AI runtime
+    # -------------------------------------------------------------------------
+    SCENE_DISCOVERY_PROJECT_ROOT: str = ""
+    SCENE_DISCOVERY_PYTHON_EXECUTABLE: str = ""
+    SCENE_DISCOVERY_SCRIPT_PATH: str = ""
+    SCENE_DISCOVERY_VERIFY_SCRIPT_PATH: str = ""
+    SCENE_DISCOVERY_MANIFEST_PATH: str = ""
+    SCENE_DISCOVERY_MANIFEST_SHA256: str = ""
+    SCENE_DISCOVERY_PROCESS_TIMEOUT_SECONDS: int = Field(
+        default=21600,
+        ge=60,
+    )
+    SCENE_TARGET_SELECTION_PROJECT_ROOT: str = ""
+    SCENE_TARGET_SELECTION_PYTHON_EXECUTABLE: str = ""
+    SCENE_TARGET_SELECTION_SCRIPT_PATH: str = ""
+    SCENE_TARGET_REVIEWABILITY_SCRIPT_PATH: str = ""
+    SCENE_TARGET_SELECTION_VERIFY_SCRIPT_PATH: str = ""
+    SCENE_TARGET_SELECTION_MANIFEST_PATH: str = ""
+    SCENE_TARGET_SELECTION_MANIFEST_SHA256: str = ""
+    SCENE_TARGET_SELECTION_PROCESS_TIMEOUT_SECONDS: int = Field(
+        default=21600,
+        ge=60,
+    )
+    SCENE_TARGET_SELECTION_MAX_CONFIRMABLE_EARLIER_RANK: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+    )
+    SCENE_TARGET_SELECTION_MAX_CONCURRENT_JOBS: int = Field(
+        default=1,
+        ge=1,
+        le=8,
+    )
+    TRACKING_SCENE_SELECTION_VERIFY_SCRIPT_PATH: str = ""
+    TRACKING_R2_MANIFEST_PATH: str = ""
+    TRACKING_R2_MANIFEST_SHA256: str = ""
+    TRACKING_R3_MANIFEST_PATH: str = ""
+    TRACKING_R3_MANIFEST_SHA256: str = ""
+    EVENT_CANDIDATE_RANKING_SCRIPT_PATH: str = ""
+    EVENT_CANDIDATE_RANKING_VERIFY_SCRIPT_PATH: str = ""
+
+    # -------------------------------------------------------------------------
     # Scene-local player candidate detector
     # -------------------------------------------------------------------------
     PLAYER_DETECTOR_BACKEND: Literal["rfdetr", "hog"] = "rfdetr"

@@ -4,6 +4,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.domains.highlight.model import (
+    EventCandidateRanking,
+    EventCandidateScore,
+    EventCandidateLabel,
     EarlierAnchorProposal,
     HighlightDraft,
     HighlightRevision,
@@ -300,6 +303,41 @@ class HighlightRepository:
         self.db.flush()
         return proposal
 
+    def get_earlier_anchor_proposal(
+        self,
+        *,
+        selection_id: str,
+        candidate_id: str,
+    ) -> EarlierAnchorProposal | None:
+        return self.db.scalar(
+            select(EarlierAnchorProposal).where(
+                EarlierAnchorProposal.selection_id == selection_id,
+                EarlierAnchorProposal.candidate_id == candidate_id,
+            )
+        )
+
+    def upsert_earlier_anchor_proposal(
+        self,
+        *,
+        selection_id: str,
+        candidate_id: str,
+        **kwargs,
+    ) -> EarlierAnchorProposal:
+        proposal = self.get_earlier_anchor_proposal(
+            selection_id=selection_id,
+            candidate_id=candidate_id,
+        )
+        if proposal is None:
+            return self.create_earlier_anchor_proposal(
+                selection_id=selection_id,
+                candidate_id=candidate_id,
+                **kwargs,
+            )
+        for key, value in kwargs.items():
+            setattr(proposal, key, value)
+        self.db.flush()
+        return proposal
+
     def list_earlier_anchor_proposals(
         self,
         selection_id: str,
@@ -309,5 +347,84 @@ class HighlightRepository:
                 select(EarlierAnchorProposal)
                 .where(EarlierAnchorProposal.selection_id == selection_id)
                 .order_by(EarlierAnchorProposal.retrieval_rank.asc())
+            ).all()
+        )
+
+    def create_event_candidate_ranking(
+        self,
+        **kwargs,
+    ) -> EventCandidateRanking:
+        ranking = EventCandidateRanking(**kwargs)
+        self.db.add(ranking)
+        self.db.flush()
+        return ranking
+
+    def create_event_candidate_score(
+        self,
+        **kwargs,
+    ) -> EventCandidateScore:
+        score = EventCandidateScore(**kwargs)
+        self.db.add(score)
+        self.db.flush()
+        return score
+
+    def get_event_candidate_ranking(
+        self,
+        ranking_id: str,
+    ) -> EventCandidateRanking | None:
+        return self.db.get(EventCandidateRanking, ranking_id)
+
+    def list_event_candidate_scores(
+        self,
+        ranking_id: str,
+    ) -> list[EventCandidateScore]:
+        return list(
+            self.db.scalars(
+                select(EventCandidateScore)
+                .where(EventCandidateScore.ranking_id == ranking_id)
+                .order_by(EventCandidateScore.rank.asc())
+            ).all()
+        )
+
+    def upsert_event_candidate_label(
+        self,
+        *,
+        ranking_id: str,
+        candidate_id: str,
+        reviewer_id: str,
+        role: str,
+        metadata_: dict,
+    ) -> EventCandidateLabel:
+        label = self.db.scalar(
+            select(EventCandidateLabel).where(
+                EventCandidateLabel.ranking_id == ranking_id,
+                EventCandidateLabel.candidate_id == candidate_id,
+                EventCandidateLabel.reviewer_id == reviewer_id,
+            )
+        )
+        if label is None:
+            label = EventCandidateLabel(
+                ranking_id=ranking_id,
+                candidate_id=candidate_id,
+                reviewer_id=reviewer_id,
+                role=role,
+                metadata_=metadata_,
+            )
+            self.db.add(label)
+        else:
+            label.role = role
+            label.metadata_ = metadata_
+        self.db.flush()
+        return label
+
+    def list_event_candidate_labels(
+        self,
+        ranking_id: str,
+    ) -> list[EventCandidateLabel]:
+        return list(
+            self.db.scalars(
+                select(EventCandidateLabel).where(
+                    EventCandidateLabel.ranking_id == ranking_id
+                )
             ).all()
         )

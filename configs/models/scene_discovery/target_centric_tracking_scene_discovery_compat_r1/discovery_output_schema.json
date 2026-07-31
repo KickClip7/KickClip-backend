@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.scene_discovery_compat_r1.output.schema.json",
+  "title": "Scene Discovery Compatibility R1 Output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "runtime_mode",
+    "scene_id",
+    "discovery_id",
+    "candidate_count",
+    "shot_count",
+    "candidate_cache_key",
+    "scene_candidates",
+    "inputs",
+    "automatic_target_selection"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "kickclip.scene_candidate_manifest.compat_r1.v1"
+    },
+    "runtime_mode": {"const": "COMPAT_R1"},
+    "scene_id": {"type": "string", "minLength": 1},
+    "discovery_id": {"type": "string", "minLength": 1},
+    "candidate_count": {"type": "integer", "minimum": 0},
+    "shot_count": {"type": "integer", "minimum": 1},
+    "candidate_cache_key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scene_candidates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"const": "scene_candidates.json"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_video_sha256",
+        "detections_sha256",
+        "shot_boundaries_sha256"
+      ],
+      "properties": {
+        "source_video_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "detections_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "shot_boundaries_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "automatic_target_selection": {"const": false}
+  }
+}
+

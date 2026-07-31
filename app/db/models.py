@@ -4,12 +4,16 @@ from app.domains.auth.model import RefreshToken, User
 from app.domains.clip_plan.model import ClipPlan, ClipPlanItem
 from app.domains.highlight.model import (
     EarlierAnchorProposal,
+    EventCandidateRanking,
+    EventCandidateScore,
+    EventCandidateLabel,
     HighlightDraft,
     HighlightRevision,
     PlayerFocusSubject,
     SceneTargetSelection,
     SceneTargetSelectionReference,
     ScenePlayerCandidate,
+    SceneAITask,
     SceneTrackingBinding,
 )
 from app.domains.match.model import Match
@@ -37,10 +41,14 @@ __all__ = [
     "RefreshToken",
     "RenderJob",
     "ScenePlayerCandidate",
+    "SceneAITask",
     "SceneTrackingBinding",
     "SceneTargetSelection",
     "SceneTargetSelectionReference",
     "EarlierAnchorProposal",
+    "EventCandidateRanking",
+    "EventCandidateScore",
+    "EventCandidateLabel",
     "TimelineEvent",
     "TrackingJob",
     "User",

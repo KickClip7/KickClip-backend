@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_candidate_input.v1_1",
+  "type": "object",
+  "required": [
+    "scene_candidates_relative_path",
+    "scene_candidates_sha256",
+    "detections_relative_path",
+    "detections_sha256",
+    "source_video_relative_path",
+    "source_video_sha256",
+    "video_width",
+    "video_height",
+    "video_fps",
+    "video_frame_count",
+    "shot_boundaries_relative_path",
+    "shot_boundaries_sha256",
+    "candidate_manifest_sha256"
+  ],
+  "properties": {
+    "scene_candidates_relative_path": {"type": "string", "pattern": "^[^/\\\\].*\\.json$"},
+    "scene_candidates_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "detections_relative_path": {"type": "string"},
+    "detections_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_video_relative_path": {"type": "string"},
+    "source_video_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "video_width": {"type": "integer", "minimum": 1},
+    "video_height": {"type": "integer", "minimum": 1},
+    "video_fps": {"type": "number", "exclusiveMinimum": 0},
+    "video_frame_count": {"type": "integer", "minimum": 1},
+    "shot_boundaries_relative_path": {"type": "string"},
+    "shot_boundaries_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "candidate_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

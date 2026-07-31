@@ -1,0 +1,110 @@
+{
+  "policy_id": "target_centric_tracking_event_candidate_ranking_v1_1",
+  "status": "PROVISIONAL_SHADOW_ONLY",
+  "automatic_target_confirmation": false,
+  "canonical_event_labels": {
+    "goal": ["goal", "goals"],
+    "shot": ["shot", "shots", "shot_on_target", "shot_off_target"],
+    "free_kick": ["free_kick", "freekick", "free kick"],
+    "corner": ["corner", "corner_kick", "corner kick"]
+  },
+  "unsupported_event_result": "UNSUPPORTED_EVENT_CLASS",
+  "event_window": {
+    "before_sec": 6.0,
+    "after_sec": 8.0
+  },
+  "visual": {
+    "closeup_area_ratio": 0.08
+  },
+  "ball": {
+    "labels": ["ball", "sports ball", "soccer ball"],
+    "low_coverage_threshold": 0.2
+  },
+  "event_policy_map": {
+    "goal": "goal_or_shot",
+    "shot": "goal_or_shot",
+    "free_kick": "free_kick",
+    "corner": "corner"
+  },
+  "event_policies": {
+    "goal_or_shot": {
+      "status": "PROVISIONAL_SHADOW_ONLY",
+      "features": {
+        "temporal.representative_time_distance_sec": {"weight": 0.18, "transform": "inverse_decay", "scale": 5.0},
+        "temporal.event_window_overlap": {"weight": 0.12, "transform": "identity"},
+        "visual.bbox_area_ratio": {"weight": 0.1, "transform": "clip", "min": 0.0, "max": 0.18},
+        "visual.center_proximity": {"weight": 0.08, "transform": "identity"},
+        "visual.crop_sharpness": {"weight": 0.06, "transform": "clip", "min": 0.0, "max": 1200.0},
+        "motion.pre_event_motion_magnitude": {"weight": 0.1, "transform": "clip", "min": 0.0, "max": 0.6},
+        "motion.post_event_motion_magnitude": {"weight": 0.06, "transform": "clip", "min": 0.0, "max": 0.6},
+        "broadcast.first_post_event_closeup_delay_sec": {"weight": 0.08, "transform": "inverse_decay", "scale": 4.0},
+        "ball.coverage": {"weight": 0.08, "transform": "identity"},
+        "ball.foot_region_distance": {"weight": 0.14, "transform": "inverse_clip", "min": 0.0, "max": 0.35}
+      },
+      "recommendation_mix": {"event_relevance": 0.8, "trackability": 0.2},
+      "reason_rules": [
+        {"feature": "temporal.event_window_overlap", "gte": 0.5, "code": "EVENT_WINDOW_VISIBLE"},
+        {"feature": "ball.foot_region_distance", "lte": 0.12, "code": "BALL_NEAR_FOOT_REGION"},
+        {"feature": "broadcast.first_post_event_closeup_delay_sec", "lte": 3.0, "code": "EARLY_POST_EVENT_CLOSEUP"}
+      ],
+      "risk_rules": [
+        {"feature": "visual.overlap_occlusion_ratio", "gte": 0.55, "code": "HIGH_OCCLUSION"},
+        {"feature": "visual.border_clipping_ratio", "gte": 0.5, "code": "BORDER_CLIPPED"}
+      ]
+    },
+    "free_kick": {
+      "status": "PROVISIONAL_SHADOW_ONLY",
+      "features": {
+        "temporal.representative_time_distance_sec": {"weight": 0.2, "transform": "inverse_decay", "scale": 6.0},
+        "temporal.visible_duration_before_event_sec": {"weight": 0.15, "transform": "clip", "min": 0.0, "max": 5.0},
+        "visual.bbox_area_ratio": {"weight": 0.08, "transform": "clip", "min": 0.0, "max": 0.16},
+        "visual.center_proximity": {"weight": 0.08, "transform": "identity"},
+        "motion.pre_event_motion_magnitude": {"weight": 0.09, "transform": "clip", "min": 0.0, "max": 0.5},
+        "ball.coverage": {"weight": 0.14, "transform": "identity"},
+        "ball.foot_region_distance": {"weight": 0.2, "transform": "inverse_clip", "min": 0.0, "max": 0.35},
+        "ball.pre_event_distance_change": {"weight": 0.06, "transform": "inverse_clip", "min": -0.2, "max": 0.2}
+      },
+      "recommendation_mix": {"event_relevance": 0.8, "trackability": 0.2},
+      "reason_rules": [
+        {"feature": "temporal.visible_duration_before_event_sec", "gte": 2.0, "code": "PRE_EVENT_SETUP_VISIBLE"},
+        {"feature": "ball.foot_region_distance", "lte": 0.12, "code": "BALL_NEAR_FOOT_REGION"}
+      ],
+      "risk_rules": [
+        {"feature": "visual.overlap_occlusion_ratio", "gte": 0.55, "code": "HIGH_OCCLUSION"}
+      ]
+    },
+    "corner": {
+      "status": "PROVISIONAL_SHADOW_ONLY",
+      "features": {
+        "temporal.representative_time_distance_sec": {"weight": 0.18, "transform": "inverse_decay", "scale": 6.0},
+        "temporal.visible_duration_before_event_sec": {"weight": 0.14, "transform": "clip", "min": 0.0, "max": 5.0},
+        "visual.bbox_area_ratio": {"weight": 0.08, "transform": "clip", "min": 0.0, "max": 0.16},
+        "visual.center_proximity": {"weight": 0.06, "transform": "identity"},
+        "motion.pre_event_motion_magnitude": {"weight": 0.08, "transform": "clip", "min": 0.0, "max": 0.5},
+        "broadcast.post_event_shots_with_appearance": {"weight": 0.08, "transform": "clip", "min": 0.0, "max": 3.0},
+        "ball.coverage": {"weight": 0.14, "transform": "identity"},
+        "ball.foot_region_distance": {"weight": 0.24, "transform": "inverse_clip", "min": 0.0, "max": 0.35}
+      },
+      "recommendation_mix": {"event_relevance": 0.8, "trackability": 0.2},
+      "reason_rules": [
+        {"feature": "temporal.visible_duration_before_event_sec", "gte": 2.0, "code": "CORNER_SETUP_VISIBLE"},
+        {"feature": "ball.foot_region_distance", "lte": 0.12, "code": "BALL_NEAR_FOOT_REGION"}
+      ],
+      "risk_rules": [
+        {"feature": "visual.overlap_occlusion_ratio", "gte": 0.55, "code": "CROWDED_PENALTY_AREA"}
+      ]
+    }
+  },
+  "shortlist_diversity": {
+    "fragment_time_overlap_threshold": 0.65,
+    "fragment_trajectory_distance_threshold": 0.035,
+    "max_post_event_closeup_only": 2
+  },
+  "production_feature_blacklist": [
+    "candidate_id",
+    "jersey_number",
+    "hardcoded_frame",
+    "hardcoded_shot",
+    "human_primary_actor_label"
+  ]
+}

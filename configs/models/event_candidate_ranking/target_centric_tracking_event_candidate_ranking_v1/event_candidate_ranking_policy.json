@@ -1,0 +1,27 @@
+{
+  "policy_id": "target_centric_tracking_event_candidate_ranking_v1",
+  "status": "PROVISIONAL_SHADOW_ONLY",
+  "time_coordinate_system": "SOURCE_VIDEO_SECONDS",
+  "candidate_time_coordinate_system": "SCENE_LOCAL_SECONDS",
+  "shortlist_min": 3,
+  "shortlist_max": 5,
+  "automatic_target_confirmation": false,
+  "temporal_decay_seconds": 6.0,
+  "event_relevance_weights": {
+    "temporal_proximity": 0.28,
+    "pre_event_presence": 0.08,
+    "post_event_presence": 0.08,
+    "bbox_size": 0.12,
+    "sharpness": 0.08,
+    "center_proximity": 0.08,
+    "post_event_closeup": 0.10,
+    "repeated_broadcast_focus": 0.08,
+    "ball_proximity": 0.05,
+    "motion_proxy": 0.05
+  },
+  "recommendation_weights": {
+    "event_relevance": 0.75,
+    "trackability": 0.25,
+    "risk_penalty": 0.10
+  }
+}

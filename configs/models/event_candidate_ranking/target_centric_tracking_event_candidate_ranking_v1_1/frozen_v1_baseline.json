@@ -1,0 +1,11 @@
+{
+  "status": "FROZEN_UNCHANGED_BASELINE",
+  "sha256": {
+    "app/domains/highlight/event_candidate_ranking.py": "ad0a136ac280f171aee90fccc7930ab9307bccb412b4af86809c61d0b842d522",
+    "app/domains/highlight/event_candidate_verifier.py": "a6c132abea1767051b24da1732156d5a39919509811ee8bfc7680f20617bf7ec",
+    "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1/manifest.json": "dd32a795dac2ed1642561bc22b31482b93f3cb7f9b8eaf8275ce395d4c53b0b5",
+    "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1/event_candidate_ranking_policy.json": "4eb717ce3dd9be2e703f70b2047e29b7a43a6f0567e79cfdc26d72a1d909ad1a",
+    "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1/event_candidate_feature_schema.json": "dd5022b95c53a49913be7415776ca5083f0a6a08ef129b121fe57db6d1b440fc",
+    "alembic/versions/20260730_0015_event_candidate_ranking.py": "51b5e2e9a3ea75bb755d684a18e49e74fdcf8771caa9c7434e0c0abe63766bd0"
+  }
+}

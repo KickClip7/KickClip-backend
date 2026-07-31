@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_candidate_ranking.v1_1_2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "package",
+    "status",
+    "ranking_status",
+    "automatic_target_confirmation",
+    "production_recommendation_ui",
+    "event_context",
+    "immutable_candidate_contract",
+    "scene_video_duration_contract",
+    "freeze",
+    "full_gallery_fallback",
+    "feature_completeness_state",
+    "shortlist",
+    "all_candidates",
+    "shortlist_decisions"
+  ],
+  "properties": {
+    "schema_version": {"const": "kickclip.event_candidate_ranking.v1_1_2"},
+    "package": {"const": "target_centric_tracking_event_candidate_ranking_v1_1_2"},
+    "status": {"const": "PROVISIONAL_SHADOW_ONLY"},
+    "ranking_status": {"type": "string"},
+    "automatic_target_confirmation": {"const": false},
+    "production_recommendation_ui": {"const": "BLOCKED"},
+    "event_context": {
+      "type": "object",
+      "required": [
+        "event_id",
+        "event_label",
+        "event_time_sec",
+        "scene_id",
+        "scene_start_sec",
+        "scene_end_sec",
+        "source",
+        "client_event_fields_accepted"
+      ],
+      "properties": {
+        "source": {"const": "SERVER_RESOLVED_TIMELINE_EVENT"},
+        "client_event_fields_accepted": {"const": false}
+      }
+    },
+    "immutable_candidate_contract": {
+      "type": "object",
+      "required": [
+        "current_scene_candidates_sha256",
+        "stored_discovery_scene_candidates_sha256",
+        "manifest_declared_scene_candidates_sha256"
+      ]
+    },
+    "scene_video_duration_contract": {"type": "object"},
+    "freeze": {"type": "object"},
+    "full_gallery_fallback": {"type": "array", "items": {"type": "string"}},
+    "shot_boundary_input_audit": {"type": ["object", "null"]},
+    "feature_completeness_state": {
+      "enum": ["READY", "PARTIAL_FEATURES", "NO_RELIABLE_SHORTLIST"]
+    },
+    "feature_completeness_score": {"type": ["number", "null"]},
+    "candidate_feature_availability_summary": {"type": ["object", "null"]},
+    "shortlist": {"type": "array"},
+    "all_candidates": {"type": "array"},
+    "shortlist_decisions": {"type": "array"}
+  }
+}

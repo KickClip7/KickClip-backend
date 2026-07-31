@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_candidate_features.v1_1_2",
+  "type": "object",
+  "required": [
+    "candidate_id",
+    "shot_id",
+    "raw_features",
+    "feature_availability",
+    "feature_evidence",
+    "feature_completeness_score",
+    "critical_features_missing",
+    "reliability_state",
+    "event_relevance_score",
+    "recommendation_score"
+  ],
+  "properties": {
+    "candidate_id": {"type": "string", "minLength": 1},
+    "shot_id": {"type": "string", "minLength": 1},
+    "raw_features": {
+      "type": "object",
+      "required": ["temporal", "visual", "motion", "broadcast", "ball", "field_context"],
+      "properties": {
+        "broadcast": {
+          "type": "object",
+          "required": [
+            "local_post_event_focus",
+            "cross_shot_repeated_focus",
+            "post_event_shots_with_appearance"
+          ],
+          "properties": {
+            "cross_shot_repeated_focus": {"type": "null"},
+            "post_event_shots_with_appearance": {"type": "null"}
+          }
+        },
+        "ball": {
+          "type": "object",
+          "required": [
+            "state",
+            "candidate_frame_coverage",
+            "trajectory_continuity",
+            "continuity_valid_pair_count",
+            "continuity_selected_pair_count"
+          ]
+        }
+      }
+    },
+    "feature_availability": {"type": "object"},
+    "feature_evidence": {"type": "object"},
+    "feature_completeness_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "critical_features_missing": {"type": "array", "items": {"type": "string"}},
+    "reliability_state": {
+      "enum": ["READY", "PARTIAL_FEATURES", "NO_RELIABLE_SHORTLIST"]
+    },
+    "event_relevance_score": {"type": "number"},
+    "recommendation_score": {"type": "number"}
+  }
+}
