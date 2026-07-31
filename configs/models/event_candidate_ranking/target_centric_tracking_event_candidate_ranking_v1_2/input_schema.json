@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_candidate_ranking.v1_2.input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "source_ranking_artifact_id",
+    "source_ranking_sha256",
+    "source_ranking",
+    "reviewed_shots",
+    "shortlist_size"
+  ],
+  "properties": {
+    "source_ranking_artifact_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_ranking_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source_ranking": {
+      "type": "object",
+      "required": [
+        "package",
+        "schema_version",
+        "automatic_target_confirmation",
+        "event_context",
+        "all_candidates",
+        "full_gallery_fallback",
+        "freeze"
+      ]
+    },
+    "reviewed_shots": {
+      "type": "object",
+      "required": [
+        "video",
+        "shots"
+      ]
+    },
+    "shortlist_size": {
+      "const": 5
+    }
+  }
+}

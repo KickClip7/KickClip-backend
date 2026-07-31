@@ -1,0 +1,25 @@
+{
+  "schema_version": "kickclip.r3.reviewed_shot_boundaries.v1",
+  "fixture_provenance": {
+    "field_shape_source": "tests/fixtures/fake_tracking_runner.py R3 shots contract",
+    "production_artifact_available_in_workspace": false
+  },
+  "shots": [
+    {
+      "shot_index": 0,
+      "shot_id": "shot_0000",
+      "start_frame": 0,
+      "end_frame_inclusive": 4,
+      "frame_count": 5,
+      "review_state": "REVIEWED_PASS"
+    },
+    {
+      "shot_index": 1,
+      "shot_id": "shot_0001",
+      "start_frame": 5,
+      "end_frame_inclusive": 9,
+      "frame_count": 5,
+      "review_state": "CONFIRMED"
+    }
+  ]
+}

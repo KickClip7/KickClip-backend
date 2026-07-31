@@ -383,3 +383,98 @@ class SceneTargetSelectionRead(BaseModel):
 class SceneTargetTrackingCreateRequest(BaseModel):
     scene_video_asset_id: str = Field(min_length=1, max_length=64)
     shot_boundaries_artifact_id: str = Field(min_length=1, max_length=64)
+
+
+class EventCandidateRankingRequest(BaseModel):
+    event_id: str = Field(min_length=1, max_length=64)
+    event_label: str = Field(min_length=1, max_length=64)
+    event_time_sec: float = Field(ge=0)
+    event_confidence: float | None = Field(default=None, ge=0, le=1)
+    scene_id: str = Field(min_length=1, max_length=64)
+    scene_start_sec: float = Field(ge=0)
+    scene_end_sec: float = Field(gt=0)
+    scene_candidate_manifest_sha256: str = Field(
+        min_length=64, max_length=64
+    )
+    shot_boundaries_sha256: str = Field(min_length=64, max_length=64)
+    shortlist_size: int = Field(default=5, ge=3, le=5)
+
+    @model_validator(mode="after")
+    def validate_time_contract(self):
+        if self.scene_end_sec <= self.scene_start_sec:
+            raise ValueError("scene_end_sec must be greater than scene_start_sec")
+        if not self.scene_start_sec <= self.event_time_sec <= self.scene_end_sec:
+            raise ValueError(
+                "event_time_sec must use source-video seconds within the scene"
+            )
+        return self
+
+
+class EventCandidateScoreRead(BaseModel):
+    candidate_id: str
+    rank: int
+    raw_features: dict[str, Any]
+    event_relevance_score: float
+    trackability_score: float
+    recommendation_score: float
+    reason_codes: list[str]
+    risk_codes: list[str]
+    artifact_ids: dict[str, str] = Field(default_factory=dict)
+
+
+class EventCandidateRankingRead(BaseModel):
+    ranking_id: str
+    status: str
+    time_coordinate_system: Literal["SOURCE_VIDEO_SECONDS"]
+    event_id: str
+    event_label: str
+    event_time_sec: float
+    event_confidence: float | None
+    scene_id: str
+    scene_start_sec: float
+    scene_end_sec: float
+    shortlist_size: int
+    shortlist: list[EventCandidateScoreRead]
+    all_candidates: list[EventCandidateScoreRead]
+    automatic_target_confirmation: Literal[False] = False
+    shadow_only: bool = True
+
+
+EventCandidateRole = Literal[
+    "PRIMARY_EVENT_ACTOR",
+    "DIRECTLY_RELATED_PLAYER",
+    "BROADCAST_CLOSEUP_NON_ACTOR",
+    "UNRELATED_PLAYER",
+    "NON_PLAYER",
+    "UNCERTAIN",
+]
+
+
+class EventCandidateLabelRequest(BaseModel):
+    candidate_id: str = Field(min_length=1, max_length=255)
+    role: EventCandidateRole
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class EventCandidateEvaluationRead(BaseModel):
+    ranking_id: str
+    status: Literal["MEASURED", "NOT_RUN"]
+    candidate_generation_actor_coverage: float | None
+    primary_actor_recall_at_1: float | None
+    primary_actor_recall_at_3: float | None
+    primary_actor_recall_at_5: float | None
+    mrr: float | None
+    broadcast_non_actor_top_1_rate: float | None
+    labeled_candidate_count: int
+
+
+class SceneAITaskRead(BaseModel):
+    task_id: str
+    task_type: str
+    status: Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED"]
+    attempt_count: int
+    max_attempts: int
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_message: str | None = None
+    status_url: str
+    retry_url: str | None = None

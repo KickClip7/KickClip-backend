@@ -1,0 +1,13 @@
+{
+  "package": "target_centric_tracking_event_candidate_ranking_v1",
+  "feature_schema": "kickclip.event_candidate_features.v1",
+  "policy": "target_centric_tracking_event_candidate_ranking_v1",
+  "status": "PROVISIONAL_SHADOW_ONLY",
+  "production_feature_blacklist": [
+    "candidate_id",
+    "jersey_number",
+    "hardcoded_frame",
+    "hardcoded_shot"
+  ],
+  "automatic_target_confirmation": false
+}

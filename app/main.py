@@ -10,6 +10,9 @@ from pydantic import BaseModel, ConfigDict
 from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
 from app.domains.tracking.executor import get_tracking_executor
+from app.domains.highlight.scene_ai_task import (
+    get_scene_ai_task_executor,
+)
 
 
 class ServiceInfoResponse(BaseModel):
@@ -92,10 +95,13 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         executor = get_tracking_executor()
+        scene_ai_executor = get_scene_ai_task_executor()
         executor.start()
+        scene_ai_executor.start()
         try:
             yield
         finally:
+            scene_ai_executor.shutdown()
             executor.shutdown()
 
     application = FastAPI(

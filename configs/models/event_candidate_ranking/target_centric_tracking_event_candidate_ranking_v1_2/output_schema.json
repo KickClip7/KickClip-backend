@@ -1,0 +1,382 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_candidate_ranking.v1_2.output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "package",
+    "status",
+    "ranking_status",
+    "ranking_weights_changed",
+    "scores_recomputed",
+    "human_labels_used_for_shortlist",
+    "automatic_target_confirmation",
+    "production_recommendation_ui",
+    "source_ranking",
+    "event_context",
+    "shot_context",
+    "shortlist_policy",
+    "shortlist",
+    "shortlist_decisions",
+    "phase_counts",
+    "shot_counts",
+    "phase_fallbacks",
+    "all_candidates",
+    "global_ranking_invariant",
+    "full_gallery_fallback",
+    "freeze",
+    "diagnostic_evidence_used_for_scoring",
+    "diagnostic_evidence_used_for_shortlist"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "kickclip.event_candidate_ranking.v1_2"
+    },
+    "package": {
+      "const": "target_centric_tracking_event_candidate_ranking_v1_2"
+    },
+    "status": {
+      "const": "PROVISIONAL_SHADOW_ONLY"
+    },
+    "ranking_status": {
+      "const": "PROVISIONAL_SHADOW_ONLY"
+    },
+    "ranking_weights_changed": {
+      "const": false
+    },
+    "scores_recomputed": {
+      "const": false
+    },
+    "human_labels_used_for_shortlist": {
+      "const": false
+    },
+    "automatic_target_confirmation": {
+      "const": false
+    },
+    "production_recommendation_ui": {
+      "const": "BLOCKED"
+    },
+    "source_ranking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "sha256",
+        "package",
+        "schema_version",
+        "global_ranking_fingerprint"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "package": {
+          "const": "target_centric_tracking_event_candidate_ranking_v1_1_2a"
+        },
+        "schema_version": {
+          "const": "kickclip.event_candidate_ranking.v1_1_2a"
+        },
+        "global_ranking_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "event_context": {
+      "type": "object"
+    },
+    "shot_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reviewed_shot_count",
+        "event_shot_id",
+        "event_shot_index",
+        "event_shot_start_time_sec",
+        "event_time_from_shot_start_sec",
+        "action_adjacent_previous_shot_id",
+        "action_adjacent_slot_active"
+      ],
+      "properties": {
+        "reviewed_shot_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "event_shot_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event_shot_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "event_shot_start_time_sec": {
+          "type": "number",
+          "minimum": 0
+        },
+        "event_time_from_shot_start_sec": {
+          "type": "number",
+          "minimum": 0
+        },
+        "action_adjacent_previous_shot_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "action_adjacent_slot_active": {
+          "type": "boolean"
+        }
+      }
+    },
+    "shortlist_policy": {
+      "type": "object"
+    },
+    "shortlist": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": [
+          "candidate_id",
+          "rank",
+          "recommendation_score",
+          "shot_id",
+          "reliability_state",
+          "original_global_rank",
+          "shortlist_rank",
+          "shortlist_patch_reason_codes",
+          "shortlist_phase"
+        ],
+        "properties": {
+          "candidate_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rank": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "recommendation_score": {
+            "type": "number"
+          },
+          "shot_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "original_global_rank": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "shortlist_rank": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "shortlist_patch_reason_codes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "enum": [
+                "CUT_ADJACENT_ACTION_CANDIDATE",
+                "EVENT_CONTAINING_POST_PHASE_SLOT",
+                "PRE_EVENT_ACTION_PHASE_SLOT",
+                "GLOBAL_SCORE_FALLBACK"
+              ]
+            }
+          },
+          "shortlist_phase": {
+            "enum": [
+              "PRE_EVENT_ACTION",
+              "EVENT_CONTAINING_POST"
+            ]
+          }
+        }
+      }
+    },
+    "shortlist_decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "candidate_id",
+          "original_global_rank",
+          "decision",
+          "reason_codes",
+          "phase"
+        ],
+        "properties": {
+          "candidate_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "original_global_rank": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "decision": {
+            "enum": [
+              "INCLUDED",
+              "EXCLUDED"
+            ]
+          },
+          "reason_codes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "enum": [
+                "CUT_ADJACENT_ACTION_CANDIDATE",
+                "EVENT_CONTAINING_POST_PHASE_SLOT",
+                "PRE_EVENT_ACTION_PHASE_SLOT",
+                "GLOBAL_SCORE_FALLBACK",
+                "SHOT_CANDIDATE_CAP",
+                "EVENT_CONTAINING_POST_PHASE_CAP",
+                "SHORTLIST_CAPACITY_REACHED",
+                "INELIGIBLE_RELIABILITY_STATE"
+              ]
+            }
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "PRE_EVENT_ACTION",
+              "EVENT_CONTAINING_POST",
+              null
+            ]
+          }
+        }
+      }
+    },
+    "phase_counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "shot_counts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2
+      }
+    },
+    "phase_fallbacks": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "all_candidates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "candidate_id",
+          "rank",
+          "recommendation_score",
+          "shot_id"
+        ]
+      }
+    },
+    "global_ranking_invariant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_fingerprint",
+        "output_fingerprint",
+        "original_global_ranks_unchanged",
+        "original_scores_unchanged"
+      ],
+      "properties": {
+        "source_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "output_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "original_global_ranks_unchanged": {
+          "const": true
+        },
+        "original_scores_unchanged": {
+          "const": true
+        }
+      }
+    },
+    "full_gallery_fallback": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "freeze": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_v1_1_2a_manifest_sha256",
+        "source_ranking_policy_sha256",
+        "shortlist_policy_sha256",
+        "input_schema_sha256",
+        "output_schema_sha256",
+        "ranking_evidence_artifact_schema_sha256",
+        "source_manifest_sha256",
+        "shortlist_selection_fingerprint"
+      ],
+      "properties": {
+        "source_v1_1_2a_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_ranking_policy_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "shortlist_policy_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "input_schema_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "output_schema_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "ranking_evidence_artifact_schema_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "shortlist_selection_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "diagnostic_evidence_used_for_scoring": {
+      "const": false
+    },
+    "diagnostic_evidence_used_for_shortlist": {
+      "const": false
+    }
+  }
+}

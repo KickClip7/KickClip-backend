@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_candidate_features.v1_1_2a",
+  "type": "object",
+  "required": [
+    "candidate_id",
+    "shot_id",
+    "rank",
+    "raw_features",
+    "feature_availability",
+    "feature_evidence",
+    "feature_completeness_score",
+    "critical_features_missing",
+    "reliability_state",
+    "event_relevance_score",
+    "recommendation_score"
+  ],
+  "properties": {
+    "candidate_id": {"type": "string", "minLength": 1},
+    "shot_id": {"type": "string", "minLength": 1},
+    "rank": {"type": "integer", "minimum": 1},
+    "shortlist_rank": {"type": "integer", "minimum": 1, "maximum": 5},
+    "raw_features": {
+      "type": "object",
+      "required": [
+        "temporal",
+        "visual",
+        "motion",
+        "broadcast",
+        "ball",
+        "field_context"
+      ],
+      "properties": {
+        "broadcast": {
+          "type": "object",
+          "required": [
+            "local_post_event_focus",
+            "cross_shot_repeated_focus",
+            "post_event_shots_with_appearance"
+          ],
+          "properties": {
+            "local_post_event_focus": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "cross_shot_repeated_focus": {"type": "null"},
+            "post_event_shots_with_appearance": {"type": "null"}
+          }
+        },
+        "ball": {
+          "type": "object",
+          "required": [
+            "state",
+            "candidate_frame_coverage",
+            "selected_ball_observation_count",
+            "valid_continuity_pair_count",
+            "reset_gap_pair_count",
+            "continuity_passing_pair_count",
+            "trajectory_continuity"
+          ],
+          "properties": {
+            "state": {
+              "enum": ["AVAILABLE", "LOW_COVERAGE", "UNAVAILABLE"]
+            },
+            "candidate_frame_coverage": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "maximum": 1
+            },
+            "coverage": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "maximum": 1
+            },
+            "selected_ball_observation_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "valid_continuity_pair_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "reset_gap_pair_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "continuity_passing_pair_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "trajectory_continuity": {
+              "type": ["number", "null"],
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        }
+      }
+    },
+    "feature_availability": {"type": "object"},
+    "feature_evidence": {
+      "type": "object",
+      "properties": {
+        "ball_frames": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 0}
+        },
+        "ball_shot_frames": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "shot_id",
+              "global_frame",
+              "trajectory_segment_id"
+            ],
+            "properties": {
+              "shot_id": {"type": "string", "minLength": 1},
+              "global_frame": {"type": "integer", "minimum": 0},
+              "trajectory_segment_id": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "feature_completeness_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "critical_features_missing": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "reliability_state": {
+      "enum": ["READY", "PARTIAL_FEATURES", "NO_RELIABLE_SHORTLIST"]
+    },
+    "event_relevance_score": {"type": "number"},
+    "recommendation_score": {"type": "number"}
+  }
+}

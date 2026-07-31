@@ -23,20 +23,20 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.alter_column(
-        "media_assets",
-        "size_bytes",
-        type_=sa.BigInteger(),
-        existing_type=sa.Integer(),
-        existing_nullable=True,
-    )
+    with op.batch_alter_table("media_assets") as batch_op:
+        batch_op.alter_column(
+            "size_bytes",
+            type_=sa.BigInteger(),
+            existing_type=sa.Integer(),
+            existing_nullable=True,
+        )
 
 
 def downgrade() -> None:
-    op.alter_column(
-        "media_assets",
-        "size_bytes",
-        type_=sa.Integer(),
-        existing_type=sa.BigInteger(),
-        existing_nullable=True,
-    )
+    with op.batch_alter_table("media_assets") as batch_op:
+        batch_op.alter_column(
+            "size_bytes",
+            type_=sa.Integer(),
+            existing_type=sa.BigInteger(),
+            existing_nullable=True,
+        )

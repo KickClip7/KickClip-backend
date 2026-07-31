@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_candidate_features.v1_1",
+  "type": "object",
+  "required": [
+    "candidate_id",
+    "raw_features",
+    "feature_availability",
+    "feature_evidence"
+  ],
+  "properties": {
+    "candidate_id": {"type": "string"},
+    "raw_features": {
+      "type": "object",
+      "required": ["temporal", "visual", "motion", "broadcast", "ball", "field_context"]
+    },
+    "feature_availability": {
+      "type": "object",
+      "required": ["temporal", "visual", "motion", "broadcast", "ball", "field_context"]
+    },
+    "feature_evidence": {"type": "object"}
+  }
+}

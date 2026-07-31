@@ -1,0 +1,84 @@
+{
+  "schema_version": "kickclip.scene_discovery_compat_runtime_manifest.v1",
+  "runtime": "target_centric_tracking_scene_discovery_compat_r1",
+  "runtime_mode": "COMPAT_R1",
+  "status": "FROZEN_DISCOVERY_ONLY",
+  "original_scene_target_selection_manifest_sha256": "de16b76b89fa7585b70e121a693b538a1a7ddf859f92cd2cb175977e99c15a55",
+  "original_v1_v2_frozen_tree_reproduced": false,
+  "original_scene_package_files": {
+    "README.md": "61a8b09640fc626f090be86b463ac42c0eea3652609bd7cbdeac7b7c1edd17d1",
+    "__init__.py": "44c7defb6a0f88fada6b00728f743e9b0e5c1dba9c00b818cf8df149dc937791",
+    "appearance.py": "de0c87a0382ed0a9117116f4347f810f7d98057531b03f3a06351dc09c4b476a",
+    "common.py": "fb9d859dbe0140ae48d1a70e2131f5d30391efc61aa27fc329506d6179d2dafc",
+    "contracts.py": "847bcf92e9f4e5dbd88a8d226f169b486466c75ebefa9a2973e35a42fb5e0405",
+    "discovery.py": "984f7bbd2d8994ee49c86a8f0f0a33efcba5ad20d5ec356b3f5e93e22faa79c7",
+    "earlier_anchor.py": "a1a661093ca14b431039b26630b265836ec39fd069c247d5c345ddaa1e316124",
+    "earlier_anchor_decision_schema.json": "c1d3580f646cea582649990ed354d5cdc5d82436f33294556a3c38f9d28b92f6",
+    "earlier_anchor_proposal_schema.json": "93756c0beb51ddde4f8b9093bea7448e42e2e90ac6016163ce572dc2499e87a1",
+    "freeze_scene_target_selection.py": "f25ed038cee0622b87c04b6423c8b6eec9a6abae3acad6535c509d67352061b9",
+    "gallery.py": "b83a3cf99b17e8991292f740656d7631115f6422128c49207ad16826d4cb6b64",
+    "launch.py": "3d81d1857f1e1b7990c98e53f8dd36e691f14c2442b86f7f779f0ba8cd4d04c9",
+    "run_scene_target_selection.py": "41e4d96262ea950b5ffb8dba9b96b1bed7dbb859c8d4f525f6cfcc786398c82a",
+    "scene_player_candidate_schema.json": "27c5b7b8e8f61cdc1340a5889652d731288b161ff8d32c6cd3f3dfe4bd17b4ff",
+    "scene_target_selection_dependency_lock.json": "f5e34673a0ac8d21c61b96fabb4d73a41dba186aa32d08172f30e5656358253b",
+    "scene_target_selection_policy.json": "9aed9e9aef9930a085915251bd2407b2b67742d8a3c21b6ab1e57623fa6a22ad",
+    "selection.py": "b03b77e6da24075f457902e4628f4f2078edac0b7be673b72166daf2e0ef97db",
+    "target_reference_set_schema.json": "6ef6a4c1ed3c767e0f4dc201cfc0ab1bfa350c1268eed81558e3fa1aff9b2aad",
+    "target_selection_schema.json": "7d8f6728793de6d95818ac77ec5d5cf17ae0b213e20b3d91eec85f80bfdfcf20",
+    "tests/test_scene_target_selection_contracts.py": "a66353313b86b82ab80f1ddbadab2ab5d4e12e534d1ec5b1b9d57ed0435e0d8c",
+    "tracking_launch_manifest_schema.json": "29698567f731548f6b119fb6ac727c01134461ef83931c46985109ab4b0cbf48"
+  },
+  "discovery_dependencies": {
+    "v1_stage2": {
+      "path": "target_centric_tracking_v1/stage2_run_conservative_target_association.py",
+      "sha256": "2bb8793556f02dc3435cedac7ba4048a98b2167950c30086041d3236f1dddf5d"
+    },
+    "v2_stage3b0": {
+      "path": "target_centric_tracking_v2/stage3b0_build_postcut_candidate_tracklets.py",
+      "sha256": "7105bf25f7da769b920604394b75faf1f2f420841e7fabe655fd06b8ab8388a4"
+    }
+  },
+  "rfdetr_checkpoint": {
+    "path": "weights/rfdetr/checkpoint_best_regular.pth",
+    "sha256": "5d1d05cf78b6a777430430955d0e745ce5c61913c659b2e96ae5deddbd1a3a94"
+  },
+  "compatibility_wrapper": {
+    "path": "compat_runtime.py",
+    "sha256": "dcf1e1103887be5a960c1af4f294492a21d86f23a8ea29ee81dd31215d3db6d5",
+    "entrypoint": "discover",
+    "direct_call": "discovery.discover_from_frozen_detections"
+  },
+  "schemas": {
+    "input": {
+      "path": "discovery_input_schema.json",
+      "sha256": "b804f99ba358ca33f56526841e6f426504b528039304f33d918e06f7f237d617"
+    },
+    "output": {
+      "path": "discovery_output_schema.json",
+      "sha256": "e3d900e5599f8a0ad1a45d9b3831d82e33f01cedf93d0251912cc016c22bb0c3"
+    }
+  },
+  "dependency_lock": {
+    "path": "compat_dependency_lock.json",
+    "sha256": "451e625a9c9ab30dc867f767c3252688fb6e49f98ff539e78a0f6a033aba198a"
+  },
+  "runtime_files": {
+    "__init__.py": "5d2b432c3142b8136b55403411a7427ba9966eb39dcda5cb38dd3cf4fe4750fe",
+    "compat_dependency_lock.json": "451e625a9c9ab30dc867f767c3252688fb6e49f98ff539e78a0f6a033aba198a",
+    "compat_runtime.py": "dcf1e1103887be5a960c1af4f294492a21d86f23a8ea29ee81dd31215d3db6d5",
+    "discovery_input_schema.json": "b804f99ba358ca33f56526841e6f426504b528039304f33d918e06f7f237d617",
+    "discovery_output_schema.json": "e3d900e5599f8a0ad1a45d9b3831d82e33f01cedf93d0251912cc016c22bb0c3",
+    "tests/fixtures/reviewed_shots_template.json": "b77b3c03e14812088371ba90c3ee9e3df704baef08a5251d81bed536b41d14f2",
+    "tests/fixtures/synthetic_detections.csv": "3dc8af117e833b85e1505c7cf3dd0c4b51694d315d8e9c87c0f9d0f8fec8ac87",
+    "tests/test_compat_runtime_contracts.py": "b770f27df4c574966a80d72e894d4cca3282ef55e25abfc4a4957eec4388a8ca",
+    "verify_compat_runtime.py": "cf022479fba994a38d3d181dbcccc8b0cc351c910a23b8af2fcc98224f7e6c9f"
+  },
+  "safety_contract": {
+    "automatic_target_selection": false,
+    "automatic_earlier_anchor_confirmation": false,
+    "r2_required": false,
+    "r3_required": false,
+    "sports_osnet_required": false,
+    "cross_shot_identity_linking": false
+  }
+}

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import (
     JSON,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     String,
     Text,
@@ -374,6 +377,15 @@ class SceneTargetSelection(Base, TimestampMixin):
             "selection_revision",
             name="uq_scene_target_selection_revision",
         ),
+        ForeignKeyConstraint(
+            ["revision_id", "selected_candidate_id"],
+            [
+                "scene_player_candidates.revision_id",
+                "scene_player_candidates.candidate_id",
+            ],
+            name="fk_target_selection_revision_candidate",
+            ondelete="RESTRICT",
+        ),
     )
 
     selection_id: Mapped[str] = mapped_column(
@@ -424,6 +436,33 @@ class SceneTargetSelection(Base, TimestampMixin):
         index=True,
     )
     artifact_root: Mapped[str] = mapped_column(String(2048), nullable=False)
+    selection_artifact_root: Mapped[str] = mapped_column(
+        String(2048), nullable=False
+    )
+    target_selection_path: Mapped[str] = mapped_column(
+        String(2048), nullable=False
+    )
+    target_selection_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    target_reference_set_path: Mapped[str] = mapped_column(
+        String(2048), nullable=False
+    )
+    target_reference_set_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    earlier_proposals_path: Mapped[str | None] = mapped_column(
+        String(2048), nullable=True
+    )
+    earlier_proposals_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    earlier_decision_path: Mapped[str | None] = mapped_column(
+        String(2048), nullable=True
+    )
+    earlier_decision_sha256: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     selection_artifact: Mapped[dict] = mapped_column(
         JSON, default=dict, nullable=False
     )
@@ -520,6 +559,12 @@ class EarlierAnchorProposal(Base, TimestampMixin):
         index=True,
     )
     candidate_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_revision_id: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    source_discovery_id: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
     retrieval_rank: Mapped[int] = mapped_column(Integer, nullable=False)
     retrieval_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     prototype_similarity: Mapped[float | None] = mapped_column(
@@ -534,3 +579,197 @@ class EarlierAnchorProposal(Base, TimestampMixin):
     )
 
     selection = relationship("SceneTargetSelection")
+
+
+class EventCandidateRanking(Base, TimestampMixin):
+    """Immutable event-context ranking over one discovery candidate set."""
+
+    __tablename__ = "event_candidate_rankings"
+
+    ranking_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=lambda: generate_prefixed_id("ecrank"),
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    match_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("matches.match_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    revision_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("highlight_revisions.revision_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scene_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("timeline_events.timeline_event_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    event_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("timeline_events.timeline_event_id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    event_label: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_time_sec: Mapped[float] = mapped_column(Float, nullable=False)
+    event_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    scene_start_sec: Mapped[float] = mapped_column(Float, nullable=False)
+    scene_end_sec: Mapped[float] = mapped_column(Float, nullable=False)
+    scene_candidate_manifest_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    shot_boundaries_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    policy_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    feature_schema_sha256: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(64),
+        default="PROVISIONAL_SHADOW_ONLY",
+        nullable=False,
+        index=True,
+    )
+    shortlist_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    output_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+
+
+class EventCandidateScore(Base, TimestampMixin):
+    """Raw event features and scores for one candidate in one ranking."""
+
+    __tablename__ = "event_candidate_scores"
+    __table_args__ = (
+        UniqueConstraint(
+            "ranking_id",
+            "candidate_id",
+            name="uq_event_candidate_score_candidate",
+        ),
+    )
+
+    score_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=lambda: generate_prefixed_id("ecscore"),
+    )
+    ranking_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("event_candidate_rankings.ranking_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    candidate_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_features: Mapped[dict] = mapped_column(JSON, nullable=False)
+    event_relevance_score: Mapped[float] = mapped_column(Float, nullable=False)
+    trackability_score: Mapped[float] = mapped_column(Float, nullable=False)
+    recommendation_score: Mapped[float] = mapped_column(Float, nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    risk_codes: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+
+    ranking = relationship("EventCandidateRanking")
+
+
+class EventCandidateLabel(Base, TimestampMixin):
+    """Human event-role ground truth, isolated from production features."""
+
+    __tablename__ = "event_candidate_labels"
+    __table_args__ = (
+        UniqueConstraint(
+            "ranking_id",
+            "candidate_id",
+            "reviewer_id",
+            name="uq_event_candidate_label_reviewer",
+        ),
+    )
+
+    label_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=lambda: generate_prefixed_id("eclabel"),
+    )
+    ranking_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("event_candidate_rankings.ranking_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    candidate_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewer_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata", JSON, default=dict, nullable=False
+    )
+
+    ranking = relationship("EventCandidateRanking")
+
+
+class SceneAITask(Base, TimestampMixin):
+    """Durable local queue record for scene-selection AI operations."""
+
+    __tablename__ = "scene_ai_tasks"
+
+    task_id: Mapped[str] = mapped_column(
+        String(64),
+        primary_key=True,
+        default=lambda: generate_prefixed_id("saitask"),
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    match_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("matches.match_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(
+        String(32), default="QUEUED", nullable=False, index=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, index=True
+    )
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    result: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    process_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

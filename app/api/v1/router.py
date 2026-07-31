@@ -7,6 +7,7 @@ from app.api.v1 import (
     artifacts,
     auth,
     clip_plans,
+    event_candidate_ranking_v1_1_2a,
     health,
     highlights,
     matches,
@@ -21,10 +22,14 @@ from app.api.v1 import (
     tracking,
 )
 from app.domains.auth.dependencies import get_current_user
+from app.domains.highlight.event_candidate_ranking_v1_1_2a_integration import (
+    install_v112a_integration,
+)
 
 
 api_router = APIRouter()
 authenticated = [Depends(get_current_user)]
+install_v112a_integration(highlights)
 
 api_router.include_router(health.router, prefix="/health", tags=["health"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -35,6 +40,11 @@ api_router.include_router(
 )
 api_router.include_router(
     highlights.router,
+    tags=["highlight"],
+    dependencies=authenticated,
+)
+api_router.include_router(
+    event_candidate_ranking_v1_1_2a.router,
     tags=["highlight"],
     dependencies=authenticated,
 )

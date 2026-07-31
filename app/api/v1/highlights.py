@@ -26,11 +26,56 @@ from app.domains.highlight.draft_service import (
     HighlightDraftVersionConflict,
 )
 from app.domains.highlight.repository import HighlightRepository
+from app.domains.highlight.event_candidate_ranking import (
+    EventCandidateRankingService,
+)
 from app.domains.highlight.scene_target_selection import (
     SceneTargetSelectionService,
 )
+from app.domains.highlight.scene_ai_task import (
+    DISCOVERY,
+    EARLIER_DECISION,
+    EARLIER_DISCOVERY,
+    EVENT_RANKING,
+    EVENT_RANKING_V1_1,
+    EVENT_RANKING_V1_1_1,
+    EVENT_RANKING_V1_1_2,
+    REFERENCE_BUILD,
+    TRACKING_PREPARATION,
+    SceneAITaskService,
+    get_scene_ai_task_executor,
+)
+from app.domains.highlight.event_candidate_ranking_v1_1.backend_adapter import (
+    EventCandidateRankingV11BackendAdapter,
+)
+from app.domains.highlight.event_candidate_ranking_v1_1_2.annotation_service import (
+    EventAnnotationCompatibilityService,
+)
+from app.domains.highlight.event_candidate_ranking_v1_1.schema import (
+    EventAnnotationArtifactRead,
+    EventAnnotationFinalizeRequest,
+    EventAnnotationReviewRequest,
+    EventCandidateEvaluationV11Read,
+    EventCandidateRankingV11Request,
+)
+from app.domains.highlight.event_candidate_ranking_v1_1_1.backend_adapter import (
+    EventCandidateRankingV111BackendAdapter,
+)
+from app.domains.highlight.event_candidate_ranking_v1_1_1.schema import (
+    EventCandidateRankingV111Request,
+)
+from app.domains.highlight.event_candidate_ranking_v1_1_2.backend_adapter import (
+    EventCandidateRankingV112BackendAdapter,
+)
+from app.domains.highlight.event_candidate_ranking_v1_1_2.schema import (
+    EventCandidateRankingV112Request,
+)
 from app.domains.highlight.schema import (
     EarlierAnchorConfirmationRequest,
+    EventCandidateEvaluationRead,
+    EventCandidateLabelRequest,
+    EventCandidateRankingRead,
+    EventCandidateRankingRequest,
     HighlightAnalyzeRequest,
     HighlightAnalyzeResponse,
     HighlightClipPlanRequest,
@@ -49,6 +94,7 @@ from app.domains.highlight.schema import (
     PlayerFocusStartRequest,
     SceneTargetSelectionCreateRequest,
     SceneTargetSelectionRead,
+    SceneAITaskRead,
     SceneTargetTrackingCreateRequest,
     SceneWideCandidateRead,
     SceneWideCandidateDiscoveryRequest,
@@ -56,8 +102,6 @@ from app.domains.highlight.schema import (
 )
 from app.domains.highlight.service import HighlightWorkflowService
 from app.domains.render.service import RenderJobService
-from app.domains.tracking.schema import TrackingJobCreateResponse
-
 router = APIRouter()
 
 
@@ -273,7 +317,8 @@ def confirm_scene_player(
 @router.post(
     "/projects/{project_id}/highlight/revisions/{revision_id}"
     "/player-candidates/discover",
-    response_model=SceneWideCandidateGalleryResponse,
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
     summary="Discover scene-wide, shot-local player candidates",
 )
 def discover_scene_wide_candidates(
@@ -282,7 +327,7 @@ def discover_scene_wide_candidates(
     payload: SceneWideCandidateDiscoveryRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> SceneWideCandidateGalleryResponse:
+) -> SceneAITaskRead:
     project = require_project_access(db, project_id, current_user)
     video = require_media_access(
         db, payload.scene_video_asset_id, current_user
@@ -293,24 +338,22 @@ def discover_scene_wide_candidates(
     detections = require_artifact_access(
         db, payload.detections_artifact_id, current_user
     )
-    service = SceneTargetSelectionService(db)
-    try:
-        service.discover(
-            project=project,
-            revision_id=revision_id,
-            scene_id=payload.scene_id,
-            scene_video=video,
-            shot_boundaries_artifact=boundaries,
-            detections_artifact=detections,
-        )
-        revision, rows = service.candidate_rows(
-            project=project,
-            revision_id=revision_id,
-            scene_id=payload.scene_id,
-        )
-    except (ValueError, RuntimeError) as exc:
-        _raise_scene_selection_error(exc)
-    return _scene_candidate_gallery(revision, payload.scene_id, rows)
+    task_service = SceneAITaskService(db)
+    task, _ = task_service.enqueue(
+        user=current_user,
+        project=project,
+        task_type=DISCOVERY,
+        payload={
+            "revision_id": revision_id,
+            "scene_id": payload.scene_id,
+            "scene_video_asset_id": video.asset_id,
+            "shot_boundaries_artifact_id": boundaries.artifact_id,
+            "detections_artifact_id": detections.artifact_id,
+        },
+    )
+    if task.status == "QUEUED":
+        get_scene_ai_task_executor().submit(task.task_id)
+    return task_service.read(task)
 
 
 @router.get(
@@ -390,8 +433,8 @@ def get_scene_wide_candidate(
 @router.post(
     "/projects/{project_id}/highlight/revisions/{revision_id}"
     "/target-selections",
-    response_model=SceneTargetSelectionRead,
-    status_code=status.HTTP_201_CREATED,
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
     summary="Create an immutable scene-wide target selection revision",
 )
 def create_scene_target_selection(
@@ -400,24 +443,377 @@ def create_scene_target_selection(
     payload: SceneTargetSelectionCreateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> SceneTargetSelectionRead:
+) -> SceneAITaskRead:
     project = require_project_access(db, project_id, current_user)
     video = require_media_access(
         db, payload.scene_video_asset_id, current_user
     )
-    service = SceneTargetSelectionService(db)
+    task_service = SceneAITaskService(db)
+    task, _ = task_service.enqueue(
+        user=current_user,
+        project=project,
+        task_type=REFERENCE_BUILD,
+        payload={
+            "revision_id": revision_id,
+            "scene_id": payload.scene_id,
+            "candidate_id": payload.candidate_id,
+            "scene_video_asset_id": video.asset_id,
+        },
+    )
+    if task.status == "QUEUED":
+        get_scene_ai_task_executor().submit(task.task_id)
+    return task_service.read(task)
+
+
+@router.post(
+    "/projects/{project_id}/highlight/revisions/{revision_id}"
+    "/event-candidate-rankings",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Create a shadow-only event-aware candidate shortlist",
+)
+def create_event_candidate_ranking(
+    project_id: str,
+    revision_id: str,
+    payload: EventCandidateRankingRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SceneAITaskRead:
+    project = require_project_access(db, project_id, current_user)
+    task_service = SceneAITaskService(db)
+    task, _ = task_service.enqueue(
+        user=current_user,
+        project=project,
+        task_type=EVENT_RANKING,
+        payload={
+            "revision_id": revision_id,
+            "ranking": payload.model_dump(),
+        },
+    )
+    if task.status == "QUEUED":
+        get_scene_ai_task_executor().submit(task.task_id)
+    return task_service.read(task)
+
+
+@router.post(
+    "/projects/{project_id}/highlight/revisions/{revision_id}"
+    "/event-candidate-rankings/v1.1",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Extract immutable V1.1 event raw features in shadow mode",
+)
+def create_event_candidate_ranking_v1_1(
+    project_id: str,
+    revision_id: str,
+    payload: EventCandidateRankingV11Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SceneAITaskRead:
+    project = require_project_access(db, project_id, current_user)
+    adapter = EventCandidateRankingV11BackendAdapter(db)
     try:
-        selection = service.create_selection(
+        freeze_material = adapter.freeze_material(
             project=project,
             revision_id=revision_id,
             scene_id=payload.scene_id,
-            candidate_id=payload.candidate_id,
-            scene_video=video,
+            event_id=payload.event_id,
+            event_label=payload.event_label,
+            event_time_sec=payload.event_time_sec,
+        )
+    except ValueError as exc:
+        _raise_scene_selection_error(exc)
+    task_service = SceneAITaskService(db)
+    task, _ = task_service.enqueue(
+        user=current_user,
+        project=project,
+        task_type=EVENT_RANKING_V1_1,
+        payload={
+            "revision_id": revision_id,
+            "ranking": payload.model_dump(),
+            "freeze_material": freeze_material,
+        },
+    )
+    if task.status == "QUEUED":
+        get_scene_ai_task_executor().submit(task.task_id)
+    return task_service.read(task)
+
+
+@router.post(
+    "/projects/{project_id}/highlight/revisions/{revision_id}"
+    "/event-candidate-rankings/v1.1.1",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Run server-resolved V1.1.1 ranking safety revision",
+)
+def create_event_candidate_ranking_v1_1_1(
+    project_id: str,
+    revision_id: str,
+    payload: EventCandidateRankingV111Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SceneAITaskRead:
+    project = require_project_access(db, project_id, current_user)
+    adapter = EventCandidateRankingV111BackendAdapter(db)
+    try:
+        resolved, freeze_material = adapter.prepare(
+            project=project,
+            revision_id=revision_id,
+            event_id=payload.event_id,
+            scene_id=payload.scene_id,
+        )
+    except ValueError as exc:
+        _raise_scene_selection_error(exc)
+    task_service = SceneAITaskService(db)
+    task, _ = task_service.enqueue(
+        user=current_user,
+        project=project,
+        task_type=EVENT_RANKING_V1_1_1,
+        payload={
+            "revision_id": revision_id,
+            "shortlist_size": payload.shortlist_size,
+            "resolved_event": resolved.to_dict(),
+            "freeze_material": freeze_material,
+        },
+    )
+    if task.status == "QUEUED":
+        get_scene_ai_task_executor().submit(task.task_id)
+    return task_service.read(task)
+
+
+@router.post(
+    "/projects/{project_id}/highlight/revisions/{revision_id}"
+    "/event-candidate-rankings/v1.1.2",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Run strict V1.1.2 ranking contract fix",
+)
+def create_event_candidate_ranking_v1_1_2(
+    project_id: str,
+    revision_id: str,
+    payload: EventCandidateRankingV112Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SceneAITaskRead:
+    project = require_project_access(db, project_id, current_user)
+    adapter = EventCandidateRankingV112BackendAdapter(db)
+    try:
+        resolved, freeze_material = adapter.prepare(
+            project=project,
+            revision_id=revision_id,
+            event_id=payload.event_id,
+            scene_id=payload.scene_id,
+        )
+    except ValueError as exc:
+        _raise_scene_selection_error(exc)
+    task_service = SceneAITaskService(db)
+    task, _ = task_service.enqueue(
+        user=current_user,
+        project=project,
+        task_type=EVENT_RANKING_V1_1_2,
+        payload={
+            "revision_id": revision_id,
+            "shortlist_size": payload.shortlist_size,
+            "resolved_event": resolved.to_dict(),
+            "freeze_material": freeze_material,
+        },
+    )
+    if task.status == "QUEUED":
+        get_scene_ai_task_executor().submit(task.task_id)
+    return task_service.read(task)
+
+
+@router.post(
+    "/event-candidate-rankings/v1.1/artifacts/{ranking_artifact_id}"
+    "/annotation-reviews",
+    response_model=EventAnnotationArtifactRead,
+    summary="Submit one independent V1.1 event-actor review",
+)
+def submit_event_annotation_v1_1_review(
+    ranking_artifact_id: str,
+    payload: EventAnnotationReviewRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EventAnnotationArtifactRead:
+    try:
+        artifact = EventAnnotationCompatibilityService(db).submit_review(
+            ranking_artifact_id=ranking_artifact_id,
+            user=current_user,
+            payload=payload,
+        )
+    except ValueError as exc:
+        _raise_scene_selection_error(exc)
+    metadata = artifact.metadata_ or {}
+    return EventAnnotationArtifactRead(
+        artifact_id=artifact.artifact_id,
+        ranking_id=metadata["ranking_id"],
+        annotation_status=metadata["annotation_status"],
+        approval_mode="UNAPPROVED",
+        sha256=metadata["sha256"],
+    )
+
+
+@router.post(
+    "/event-candidate-rankings/v1.1/artifacts/{ranking_artifact_id}"
+    "/annotations/finalize",
+    response_model=EventAnnotationArtifactRead,
+    summary="Approve one review or an explicit no-union consensus",
+)
+def finalize_event_annotation_v1_1(
+    ranking_artifact_id: str,
+    payload: EventAnnotationFinalizeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EventAnnotationArtifactRead:
+    try:
+        artifact = EventAnnotationCompatibilityService(db).finalize(
+            ranking_artifact_id=ranking_artifact_id,
+            user=current_user,
+            payload=payload,
+        )
+    except ValueError as exc:
+        _raise_scene_selection_error(exc)
+    metadata = artifact.metadata_ or {}
+    return EventAnnotationArtifactRead(
+        artifact_id=artifact.artifact_id,
+        ranking_id=metadata["ranking_id"],
+        annotation_status=metadata["annotation_status"],
+        approval_mode=metadata["approval_mode"],
+        sha256=metadata["sha256"],
+    )
+
+
+@router.get(
+    "/event-candidate-rankings/v1.1/artifacts/{ranking_artifact_id}"
+    "/evaluation",
+    response_model=EventCandidateEvaluationV11Read,
+    summary="Evaluate a complete approved V1.1 annotation",
+)
+def evaluate_event_candidate_ranking_v1_1(
+    ranking_artifact_id: str,
+    annotation_artifact_id: str = Query(min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EventCandidateEvaluationV11Read:
+    service = EventAnnotationCompatibilityService(db)
+    try:
+        evaluation = service.evaluate(
+            ranking_artifact_id=ranking_artifact_id,
+            annotation_artifact_id=annotation_artifact_id,
             user=current_user,
         )
-    except (ValueError, RuntimeError) as exc:
+        ranking = service._owned_ranking(ranking_artifact_id, current_user)
+    except ValueError as exc:
         _raise_scene_selection_error(exc)
-    return service.read(selection)
+    return EventCandidateEvaluationV11Read(
+        ranking_id=(ranking.metadata_ or {})["ranking_id"],
+        evaluation=evaluation,
+    )
+
+
+@router.get(
+    "/event-candidate-rankings/{ranking_id}",
+    response_model=EventCandidateRankingRead,
+)
+def get_event_candidate_ranking(
+    ranking_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EventCandidateRankingRead:
+    service = EventCandidateRankingService(db)
+    ranking = service.repository.get_event_candidate_ranking(ranking_id)
+    if ranking is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Event candidate ranking not found.",
+        )
+    try:
+        return service.read(ranking, user=current_user)
+    except ValueError as exc:
+        _raise_scene_selection_error(exc)
+
+
+@router.put(
+    "/event-candidate-rankings/{ranking_id}/labels",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    summary="Record offline human event-role ground truth",
+)
+def label_event_candidate(
+    ranking_id: str,
+    payload: EventCandidateLabelRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    service = EventCandidateRankingService(db)
+    ranking = service.repository.get_event_candidate_ranking(ranking_id)
+    if ranking is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Event candidate ranking not found.",
+        )
+    try:
+        service.label(ranking, user=current_user, payload=payload)
+    except ValueError as exc:
+        _raise_scene_selection_error(exc)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/event-candidate-rankings/{ranking_id}/evaluation",
+    response_model=EventCandidateEvaluationRead,
+    summary="Evaluate human-labeled event actor retrieval",
+)
+def evaluate_event_candidate_ranking(
+    ranking_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EventCandidateEvaluationRead:
+    service = EventCandidateRankingService(db)
+    ranking = service.repository.get_event_candidate_ranking(ranking_id)
+    if ranking is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Event candidate ranking not found.",
+        )
+    try:
+        return service.evaluate(ranking, user=current_user)
+    except ValueError as exc:
+        _raise_scene_selection_error(exc)
+
+
+@router.get(
+    "/scene-ai-tasks/{task_id}",
+    response_model=SceneAITaskRead,
+)
+def get_scene_ai_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SceneAITaskRead:
+    service = SceneAITaskService(db)
+    try:
+        return service.read(service.owned(task_id, current_user))
+    except ValueError as exc:
+        _raise_scene_selection_error(exc)
+
+
+@router.post(
+    "/scene-ai-tasks/{task_id}/retry",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_scene_ai_task(
+    task_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SceneAITaskRead:
+    service = SceneAITaskService(db)
+    try:
+        task = service.retry(service.owned(task_id, current_user))
+    except ValueError as exc:
+        _raise_scene_selection_error(exc)
+    get_scene_ai_task_executor().submit(task.task_id)
+    return service.read(task)
 
 
 @router.get(
@@ -437,55 +833,69 @@ def get_scene_target_selection(
 
 @router.post(
     "/target-selections/{selection_id}/earlier-candidates/discover",
-    response_model=SceneTargetSelectionRead,
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
     summary="Blind-rank earlier local candidates without auto-confirming",
 )
 def discover_earlier_anchor_candidates(
     selection_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> SceneTargetSelectionRead:
+) -> SceneAITaskRead:
     service, selection = _owned_target_selection(
         db, selection_id, current_user, for_update=True
     )
-    try:
-        selection = service.discover_earlier(
-            selection=selection,
-            user=current_user,
-        )
-    except (ValueError, RuntimeError) as exc:
-        _raise_scene_selection_error(exc)
-    return service.read(selection)
+    project = require_project_access(
+        db, selection.project_id, current_user
+    )
+    task_service = SceneAITaskService(db)
+    task, _ = task_service.enqueue(
+        user=current_user,
+        project=project,
+        task_type=EARLIER_DISCOVERY,
+        payload={"selection_id": selection.selection_id},
+    )
+    if task.status == "QUEUED":
+        get_scene_ai_task_executor().submit(task.task_id)
+    return task_service.read(task)
 
 
 @router.post(
     "/target-selections/{selection_id}/earlier-anchor/confirm",
-    response_model=SceneTargetSelectionRead,
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def decide_earlier_anchor(
     selection_id: str,
     payload: EarlierAnchorConfirmationRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> SceneTargetSelectionRead:
+) -> SceneAITaskRead:
     service, selection = _owned_target_selection(
         db, selection_id, current_user, for_update=True
     )
-    try:
-        selection = service.decide_earlier(
-            selection=selection,
-            user=current_user,
-            decision=payload.decision,
-            candidate_id=payload.candidate_id,
-        )
-    except (ValueError, RuntimeError) as exc:
-        _raise_scene_selection_error(exc)
-    return service.read(selection)
+    project = require_project_access(
+        db, selection.project_id, current_user
+    )
+    task_service = SceneAITaskService(db)
+    task, _ = task_service.enqueue(
+        user=current_user,
+        project=project,
+        task_type=EARLIER_DECISION,
+        payload={
+            "selection_id": selection.selection_id,
+            "decision": payload.decision,
+            "candidate_id": payload.candidate_id,
+        },
+    )
+    if task.status == "QUEUED":
+        get_scene_ai_task_executor().submit(task.task_id)
+    return task_service.read(task)
 
 
 @router.post(
     "/target-selections/{selection_id}/tracking-jobs",
-    response_model=TrackingJobCreateResponse,
+    response_model=SceneAITaskRead,
     status_code=status.HTTP_202_ACCEPTED,
 )
 def create_scene_target_tracking_job(
@@ -493,7 +903,7 @@ def create_scene_target_tracking_job(
     payload: SceneTargetTrackingCreateRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> TrackingJobCreateResponse:
+) -> SceneAITaskRead:
     service, selection = _owned_target_selection(
         db, selection_id, current_user, for_update=True
     )
@@ -506,16 +916,20 @@ def create_scene_target_tracking_job(
     boundaries = require_artifact_access(
         db, payload.shot_boundaries_artifact_id, current_user
     )
-    try:
-        return service.create_tracking_job(
-            selection=selection,
-            project=project,
-            user=current_user,
-            scene_video=video,
-            shot_boundaries_artifact=boundaries,
-        )
-    except (ValueError, RuntimeError) as exc:
-        _raise_scene_selection_error(exc)
+    task_service = SceneAITaskService(db)
+    task, _ = task_service.enqueue(
+        user=current_user,
+        project=project,
+        task_type=TRACKING_PREPARATION,
+        payload={
+            "selection_id": selection.selection_id,
+            "scene_video_asset_id": video.asset_id,
+            "shot_boundaries_artifact_id": boundaries.artifact_id,
+        },
+    )
+    if task.status == "QUEUED":
+        get_scene_ai_task_executor().submit(task.task_id)
+    return task_service.read(task)
 
 
 @router.get(

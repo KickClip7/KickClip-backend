@@ -1,0 +1,11 @@
+{
+  "annotation_status": "DRAFT",
+  "approval_mode": "UNAPPROVED",
+  "primary_actor_visible": false,
+  "primary_actor_in_candidate_set": false,
+  "primary_actor_candidate_ids": [],
+  "directly_related_candidate_ids": [],
+  "actor_missing_reason": null,
+  "reviewer": "",
+  "reviewed_at": null
+}

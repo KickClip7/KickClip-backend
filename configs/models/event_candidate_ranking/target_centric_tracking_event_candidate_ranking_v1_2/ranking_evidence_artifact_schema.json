@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_candidate_ranking.v1_2.ranking_evidence",
+  "title": "Future ranking evidence artifact contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "player_discovery_detections",
+    "ranking_object_detections",
+    "connected_to_scoring"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "kickclip.ranking_evidence.v1"
+    },
+    "player_discovery_detections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "sha256",
+        "classes",
+        "immutable"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "classes": {
+          "const": [
+            "player",
+            "goalkeeper"
+          ]
+        },
+        "immutable": {
+          "const": true
+        }
+      }
+    },
+    "ranking_object_detections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_id",
+        "sha256",
+        "classes",
+        "frame_range",
+        "diagnostic_only"
+      ],
+      "properties": {
+        "artifact_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "classes": {
+          "const": [
+            "player",
+            "goalkeeper",
+            "referee",
+            "staff",
+            "ball"
+          ]
+        },
+        "frame_range": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "diagnostic_only": {
+          "const": true
+        }
+      }
+    },
+    "connected_to_scoring": {
+      "const": false
+    }
+  }
+}

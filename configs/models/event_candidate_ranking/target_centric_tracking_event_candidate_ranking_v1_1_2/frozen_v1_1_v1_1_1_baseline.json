@@ -1,0 +1,7 @@
+{
+  "status": "FROZEN_UNCHANGED_BASELINES",
+  "sha256": {
+    "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1_1/manifest.json": "198c866a46c59c4d176ef8067018d8f1140adf959d4b54e43185d7be14f02e7f",
+    "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1_1_1/manifest.json": "fa27300155575a5dc04a11cd58a987847ec695c408f95d092e5a7d8e2036b7c3"
+  }
+}

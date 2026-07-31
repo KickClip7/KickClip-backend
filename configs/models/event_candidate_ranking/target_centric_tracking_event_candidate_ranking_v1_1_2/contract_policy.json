@@ -1,0 +1,8 @@
+{
+  "policy_id": "target_centric_tracking_event_candidate_ranking_v1_1_2_contract",
+  "status": "PROVISIONAL_SHADOW_ONLY",
+  "ranking_weights_changed": false,
+  "automatic_target_confirmation": false,
+  "approved_shot_review_states": ["REVIEWED_PASS", "CONFIRMED"],
+  "scene_video_duration_tolerance_sec": 0.25
+}

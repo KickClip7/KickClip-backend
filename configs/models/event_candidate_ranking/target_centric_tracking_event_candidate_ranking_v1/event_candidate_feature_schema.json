@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_candidate_features.v1",
+  "type": "object",
+  "required": [
+    "event_relative_time_sec",
+    "temporal_proximity",
+    "pre_event_presence",
+    "post_event_presence",
+    "bbox_size",
+    "sharpness",
+    "center_proximity",
+    "post_event_closeup",
+    "repeated_broadcast_focus",
+    "ball_coverage",
+    "ball_proximity",
+    "motion_proxy",
+    "trackability",
+    "risk"
+  ],
+  "properties": {
+    "event_relative_time_sec": {"type": "number"},
+    "temporal_proximity": {"type": "number", "minimum": 0, "maximum": 1},
+    "pre_event_presence": {"type": ["number", "null"]},
+    "post_event_presence": {"type": ["number", "null"]},
+    "bbox_size": {"type": ["number", "null"]},
+    "sharpness": {"type": ["number", "null"]},
+    "center_proximity": {"type": ["number", "null"]},
+    "post_event_closeup": {"type": ["number", "null"]},
+    "repeated_broadcast_focus": {"type": "number"},
+    "ball_coverage": {"type": ["number", "null"]},
+    "ball_proximity": {"type": ["number", "null"]},
+    "motion_proxy": {"type": ["number", "null"]},
+    "trackability": {"type": "number", "minimum": 0, "maximum": 1},
+    "risk": {"type": "number", "minimum": 0, "maximum": 1}
+  }
+}

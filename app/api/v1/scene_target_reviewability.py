@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 
@@ -17,7 +17,18 @@ from app.domains.auth.model import User
 from app.domains.highlight.scene_target_reviewability import (
     SceneTargetReviewabilityService,
 )
-from app.domains.tracking.schema import TrackingJobCreateResponse
+from app.domains.highlight.scene_ai_task import (
+    MANUAL_ANCHOR_CONFIRM,
+    MANUAL_ANCHOR_VALIDATE,
+    MANUAL_TRACKING_PREPARATION,
+    REVIEW_EARLIER_PREPARE,
+    REVIEW_SELECTED_DECISION,
+    REVIEW_SELECTED_PREPARE,
+    REVIEW_UI_RENDER,
+    SceneAITaskService,
+    get_scene_ai_task_executor,
+)
+from app.domains.highlight.schema import SceneAITaskRead
 
 
 router = APIRouter()
@@ -64,149 +75,194 @@ def _context(
     return service, selection, project, video, boundaries
 
 
-def _error(exc: Exception) -> None:
-    raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail=str(exc),
-    ) from exc
+def _enqueue(
+    *,
+    db: Session,
+    user: User,
+    project,
+    task_type: str,
+    payload: dict[str, Any],
+) -> SceneAITaskRead:
+    service = SceneAITaskService(db)
+    task, _ = service.enqueue(
+        user=user,
+        project=project,
+        task_type=task_type,
+        payload=payload,
+    )
+    if task.status == "QUEUED":
+        get_scene_ai_task_executor().submit(task.task_id)
+    return service.read(task)
 
 
-@router.post("/target-selections/{selection_id}/selected-target-review/prepare")
+@router.post(
+    "/target-selections/{selection_id}/selected-target-review/prepare",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def prepare_selected_target_review(
     selection_id: str,
     payload: ReviewMediaRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> dict[str, Any]:
+) -> SceneAITaskRead:
     service, selection, project, video, boundaries = _context(
         db, current_user, selection_id, payload
     )
-    try:
-        return service.prepare_selected_review(
-            selection=selection,
-            user=current_user,
-            project=project,
-            video=video,
-            boundaries=boundaries,
-        )
-    except (ValueError, RuntimeError) as exc:
-        _error(exc)
+    return _enqueue(
+        db=db,
+        user=current_user,
+        project=project,
+        task_type=REVIEW_SELECTED_PREPARE,
+        payload={
+            "selection_id": selection.selection_id,
+            "scene_video_asset_id": video.asset_id,
+            "shot_boundaries_artifact_id": boundaries.artifact_id,
+        },
+    )
 
 
-@router.post("/target-selections/{selection_id}/selected-target-review/decision")
+@router.post(
+    "/target-selections/{selection_id}/selected-target-review/decision",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def decide_selected_target_identity(
     selection_id: str,
     payload: SelectedIdentityDecisionRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> dict[str, Any]:
+) -> SceneAITaskRead:
     service = SceneTargetReviewabilityService(db)
     selection = service.owned(selection_id, current_user, for_update=True)
-    try:
-        return service.decide_selected_identity(
-            selection=selection,
-            user=current_user,
-            decision=payload.decision,
-            identity_basis=payload.identity_basis,
-        )
-    except (ValueError, RuntimeError) as exc:
-        _error(exc)
+    project = require_project_access(
+        db, selection.project_id, current_user
+    )
+    return _enqueue(
+        db=db,
+        user=current_user,
+        project=project,
+        task_type=REVIEW_SELECTED_DECISION,
+        payload={
+            "selection_id": selection.selection_id,
+            "decision": payload.decision,
+            "identity_basis": payload.identity_basis,
+        },
+    )
 
 
-@router.post("/target-selections/{selection_id}/earlier-candidates/review-media")
+@router.post(
+    "/target-selections/{selection_id}/earlier-candidates/review-media",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def prepare_earlier_candidate_media(
     selection_id: str,
     payload: ReviewMediaRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> dict[str, Any]:
+) -> SceneAITaskRead:
     service, selection, project, video, boundaries = _context(
         db, current_user, selection_id, payload
     )
-    try:
-        return service.prepare_earlier_review(
-            selection=selection,
-            project=project,
-            video=video,
-            boundaries=boundaries,
-        )
-    except (ValueError, RuntimeError) as exc:
-        _error(exc)
+    return _enqueue(
+        db=db,
+        user=current_user,
+        project=project,
+        task_type=REVIEW_EARLIER_PREPARE,
+        payload={
+            "selection_id": selection.selection_id,
+            "scene_video_asset_id": video.asset_id,
+            "shot_boundaries_artifact_id": boundaries.artifact_id,
+        },
+    )
 
 
-@router.post("/target-selections/{selection_id}/review-ui")
+@router.post(
+    "/target-selections/{selection_id}/review-ui",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def render_target_identity_review_ui(
     selection_id: str,
     payload: ReviewMediaRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> dict[str, Any]:
+) -> SceneAITaskRead:
     service, selection, project, video, boundaries = _context(
         db, current_user, selection_id, payload
     )
-    try:
-        return service.render_review_ui(
-            selection=selection,
-            project=project,
-            video=video,
-            boundaries=boundaries,
-        )
-    except (ValueError, RuntimeError) as exc:
-        _error(exc)
+    return _enqueue(
+        db=db,
+        user=current_user,
+        project=project,
+        task_type=REVIEW_UI_RENDER,
+        payload={
+            "selection_id": selection.selection_id,
+            "scene_video_asset_id": video.asset_id,
+            "shot_boundaries_artifact_id": boundaries.artifact_id,
+        },
+    )
 
 
-@router.post("/target-selections/{selection_id}/manual-earlier-anchor/validate")
+@router.post(
+    "/target-selections/{selection_id}/manual-earlier-anchor/validate",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def validate_manual_earlier_anchor(
     selection_id: str,
     payload: ManualAnchorValidationRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> dict[str, Any]:
+) -> SceneAITaskRead:
     service, selection, project, video, boundaries = _context(
         db, current_user, selection_id, payload
     )
-    try:
-        return service.validate_manual_anchor(
-            selection=selection,
-            user=current_user,
-            project=project,
-            video=video,
-            boundaries=boundaries,
-            global_frame=payload.global_frame,
-            click_xy=payload.click_xy,
-            drawn_bbox=payload.drawn_bbox_xyxy,
-            identity_basis=payload.identity_basis,
-        )
-    except (ValueError, RuntimeError) as exc:
-        _error(exc)
+    return _enqueue(
+        db=db,
+        user=current_user,
+        project=project,
+        task_type=MANUAL_ANCHOR_VALIDATE,
+        payload={
+            "selection_id": selection.selection_id,
+            "scene_video_asset_id": video.asset_id,
+            "shot_boundaries_artifact_id": boundaries.artifact_id,
+            "global_frame": payload.global_frame,
+            "click_xy": payload.click_xy,
+            "drawn_bbox_xyxy": payload.drawn_bbox_xyxy,
+            "identity_basis": payload.identity_basis,
+        },
+    )
 
 
-@router.post("/target-selections/{selection_id}/manual-earlier-anchor/confirm")
+@router.post(
+    "/target-selections/{selection_id}/manual-earlier-anchor/confirm",
+    response_model=SceneAITaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def confirm_manual_earlier_anchor(
     selection_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> dict[str, Any]:
+) -> SceneAITaskRead:
     service = SceneTargetReviewabilityService(db)
     selection = service.owned(selection_id, current_user, for_update=True)
-    try:
-        created = service.confirm_manual_anchor(
-            selection=selection,
-            user=current_user,
-        )
-        return {
-            "selection_id": created.selection_id,
-            "selection_revision": created.selection_revision,
-            "status": created.status,
-            "previous_selection_id": selection.selection_id,
-        }
-    except (ValueError, RuntimeError) as exc:
-        _error(exc)
+    project = require_project_access(
+        db, selection.project_id, current_user
+    )
+    return _enqueue(
+        db=db,
+        user=current_user,
+        project=project,
+        task_type=MANUAL_ANCHOR_CONFIRM,
+        payload={"selection_id": selection.selection_id},
+    )
 
 
 @router.post(
     "/target-selections/{selection_id}/manual-anchor-tracking-jobs",
-    response_model=TrackingJobCreateResponse,
+    response_model=SceneAITaskRead,
     status_code=status.HTTP_202_ACCEPTED,
 )
 def create_manual_anchor_tracking_job(
@@ -214,18 +270,19 @@ def create_manual_anchor_tracking_job(
     payload: ReviewMediaRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> TrackingJobCreateResponse:
+) -> SceneAITaskRead:
     service, selection, project, video, boundaries = _context(
         db, current_user, selection_id, payload
     )
-    try:
-        return service.create_manual_tracking_job(
-            selection=selection,
-            user=current_user,
-            project=project,
-            video=video,
-            boundaries=boundaries,
-        )
-    except (ValueError, RuntimeError) as exc:
-        _error(exc)
+    return _enqueue(
+        db=db,
+        user=current_user,
+        project=project,
+        task_type=MANUAL_TRACKING_PREPARATION,
+        payload={
+            "selection_id": selection.selection_id,
+            "scene_video_asset_id": video.asset_id,
+            "shot_boundaries_artifact_id": boundaries.artifact_id,
+        },
+    )
 

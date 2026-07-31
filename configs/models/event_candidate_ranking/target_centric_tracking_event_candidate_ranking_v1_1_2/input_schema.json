@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_candidate_ranking_input.v1_1_2",
+  "type": "object",
+  "required": [
+    "event_id",
+    "scene_id",
+    "revision_id",
+    "project_id",
+    "match_id",
+    "event_label",
+    "event_time_sec",
+    "scene_start_sec",
+    "scene_end_sec",
+    "scene_candidates_sha256",
+    "stored_discovery_scene_candidates_sha256",
+    "manifest_declared_scene_candidates_sha256",
+    "source_video_sha256",
+    "shot_boundaries_sha256"
+  ],
+  "properties": {
+    "event_id": {"type": "string", "minLength": 1},
+    "scene_id": {"type": "string", "minLength": 1},
+    "revision_id": {"type": "string", "minLength": 1},
+    "project_id": {"type": "string", "minLength": 1},
+    "match_id": {"type": "string", "minLength": 1},
+    "event_label": {"type": "string", "minLength": 1},
+    "event_time_sec": {"type": "number", "minimum": 0},
+    "scene_start_sec": {"type": "number", "minimum": 0},
+    "scene_end_sec": {"type": "number", "exclusiveMinimum": 0},
+    "scene_candidates_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "stored_discovery_scene_candidates_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "manifest_declared_scene_candidates_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_video_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "shot_boundaries_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,31 @@
+{
+  "package": "target_centric_tracking_event_candidate_ranking_v1_1_1",
+  "status": "PROVISIONAL_SHADOW_ONLY",
+  "safety_revision_of": "target_centric_tracking_event_candidate_ranking_v1_1",
+  "v1_1_manifest_sha256": "198c866a46c59c4d176ef8067018d8f1140adf959d4b54e43185d7be14f02e7f",
+  "ranking_policy_sha256": "7359adf60fba7128080bcd59895074f883a5c18f456ad16f1510d92b8af21e44",
+  "ranking_weights_changed": false,
+  "automatic_target_confirmation": false,
+  "production_ui_recommendation_activation": "BLOCKED",
+  "full_event_recommendation_e2e_verified": false,
+  "sha256": {
+    "app/domains/highlight/event_candidate_ranking_v1_1_1/__init__.py": "dc6350d1888f22f8b70b7bcd8a5e5f8da66bf49f300b6c0fd38e8af511046c66",
+    "app/domains/highlight/event_candidate_ranking_v1_1_1/contract.py": "99f8f8d59c3758738d49e0cf87fbf10a392fa4166b3465b8b36943745173b59b",
+    "app/domains/highlight/event_candidate_ranking_v1_1_1/frame_reader.py": "428157d5cf7e416e07819ed960a016850d2fdefcb870c411988d43bde9f878c0",
+    "app/domains/highlight/event_candidate_ranking_v1_1_1/feature_extractor.py": "fd1854d83565838b9e399bb6e5c2978c42efa7e25b3b8e3f8fb385e48605d5f4",
+    "app/domains/highlight/event_candidate_ranking_v1_1_1/diversity.py": "c54c193730f232a6eba47102d9ad4d58f145a3e1dad95652d7e65afa1809a84f",
+    "app/domains/highlight/event_candidate_ranking_v1_1_1/service.py": "0bfbd7ea579bc813c79908fd54e9204cb94df7713c4e3baadd1443367436fb98",
+    "app/domains/highlight/event_candidate_ranking_v1_1_1/backend_adapter.py": "36e4316aba24056d3b4d11ea6030afabd84833b46a57ca63f90309cdff646629",
+    "app/domains/highlight/event_candidate_ranking_v1_1_1/schema.py": "ca00e088f082cb3fb2c8c0cb52db00a8044f7bc00cdc4980591e2f76e1125af4",
+    "app/domains/highlight/event_candidate_ranking_v1_1_1/verifier.py": "0f57f104f8fe9fa467830263acb6e385c9f4fe678cd17923d67b8907ff1fdb5b",
+    "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1_1_1/safety_policy.json": "b32c7af03abc2dfe53476904184993db8ba434cb931e056681ba3e954ef53862",
+    "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1_1_1/event_candidate_feature_schema.json": "d3101bf0f69883d06787b635906c0dcf437bc1a2079b08d3844c43e1d7242538",
+    "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1_1_1/frozen_v1_1_baseline.json": "39cabc38e3fbf3b29a2d1a8a70060ba55de720c375d3f89e3252742e1b48e35e",
+    "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1_1/event_candidate_ranking_policy.json": "7359adf60fba7128080bcd59895074f883a5c18f456ad16f1510d92b8af21e44",
+    "tests/test_event_candidate_ranking_v1_1_1.py": "dbfe8fec91b6219e8a45909c6c9659ee10fa56bc0e29356d444b79ffe5952873",
+    "artifacts/event_candidate_ranking_v1_1_1/frame_decoder_749x1080p_memory_measurement.json": "279042ad0301428f4854347ba403bb5f9eff6050b97cc918075223f2e5329052",
+    "artifacts/event_candidate_ranking_v1_1_1/representative_goal_shadow_run_status.json": "61dcc4b3a0ead11e3f1dee34f295e412def041a9e6fa2232a0f62b6eb252bf85",
+    "docs/event_candidate_ranking_v1_1_1.md": "111f6f6ea2e15c1eb8805721740f46c1c4065ca7f6570b797fad950325368f70",
+    "requirements.txt": "76c1a427333897570248ab41034e34adafe19e4441eb82fdcab08a1147a78f54"
+  }
+}

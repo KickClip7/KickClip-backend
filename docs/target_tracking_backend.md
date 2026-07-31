@@ -90,7 +90,7 @@ alembic upgrade head
 alembic heads
 ```
 
-head는 `20260727_0010` 하나여야 한다. `tracking_jobs`는 실행 입력, 소유권,
+head는 `20260730_0016` 하나여야 한다. `tracking_jobs`는 실행 입력, 소유권,
 backend/pipeline 상태, pending action, 내부 경로, provenance, process 결과와 시간을
 보존한다. frame별 row를 생성하지 않고 원본 `target_timeline.json`을 artifact로
 보존한다. 기존 action spotting `timeline_events`와 분리되어 있다.

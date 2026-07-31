@@ -20,6 +20,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .pyre/
+.pytype/
+.hypothesis/
+.dmypy.json
+.dmypy.json.*
 .tox/
 .nox/
 
@@ -40,6 +44,7 @@ env/
 ENV/
 
 pip-wheel-metadata/
+__pypackages__/
 build/
 dist/
 *.egg-info/
@@ -57,8 +62,15 @@ logs/
 
 *.tmp
 *.temp
+*.bak
+*.orig
 tmp/
 temp/
+
+# Local backups and database snapshots
+/_backups/
+/backups/
+*.dump
 
 
 # =============================================================================
@@ -149,6 +161,10 @@ storage/models/action_spotting/*
 !storage/models/action_spotting/sampling_v1_loss_v2_ms_stem_v1/transformer_best.pt
 !storage/models/action_spotting/soccer_spotter_v9/
 !storage/models/action_spotting/soccer_spotter_v9/v9_best_model.pth
+
+# Training/evaluation reports are outputs, not runtime inputs.
+storage/models/**/transformer_history.json
+storage/models/**/valid_eval.json
 
 
 # =============================================================================
@@ -244,6 +260,7 @@ Desktop.ini
 # Local-only tracking development and handoff materials.
 # Backend integration code under app/ and database migrations remain tracked.
 /tracking_runtime_adapter/
+/handoff/
 /handoffs/
 /scripts/inspect_tracking_anchor.py
 /scripts/install_tracking_runtime_adapter.py

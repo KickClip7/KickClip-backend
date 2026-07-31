@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -14,16 +12,20 @@ from app.domains.artifact.model import Artifact
 from app.domains.auth.model import User
 from app.domains.highlight.model import SceneTargetSelection
 from app.domains.highlight.repository import HighlightRepository
+from app.domains.highlight.runtime_contract import (
+    JSON_SUFFIXES,
+    ConfiguredSceneRuntime,
+    load_runtime_json,
+    prepare_selection_workspace,
+    project_relative,
+    sha256_file,
+    validated_runtime_file,
+)
 from app.domains.media.model import MediaAsset
 from app.domains.project.model import Project
 from app.domains.tracking.schema import TrackingJobCreateRequest
 from app.domains.tracking.service import TrackingJobService
 from app.storage.local_storage import LocalStorage
-
-
-R2_MANIFEST_SHA256 = (
-    "751338f51c4f7c08bb24576e5afea7d82b9cbbdefbb651ff1a3c1d5c45ffcc86"
-)
 
 
 class SceneTargetReviewabilityService:
@@ -39,9 +41,15 @@ class SceneTargetReviewabilityService:
         self.settings = settings or get_settings()
         self.repository = HighlightRepository(db)
         self.storage = LocalStorage()
+        configured_root = (
+            self.settings.SCENE_TARGET_SELECTION_PROJECT_ROOT
+            or self.settings.TRACKING_PROJECT_ROOT
+        )
         self.runtime_root = (
-            self.storage.project_root / ".tracking-runtime"
-        ).resolve()
+            Path(configured_root).expanduser().resolve()
+            if configured_root
+            else (self.storage.project_root / ".tracking-runtime").resolve()
+        )
         self.package_root = (
             self.runtime_root
             / "target_centric_tracking_scene_target_selection_r2"
@@ -68,39 +76,48 @@ class SceneTargetReviewabilityService:
         return selection
 
     def _run(self, arguments: list[str]) -> dict[str, Any]:
-        environment = dict(os.environ)
-        existing = environment.get("PYTHONPATH", "")
-        environment["PYTHONPATH"] = (
-            str(self.package_root)
-            if not existing
-            else f"{self.package_root}{os.pathsep}{existing}"
-        )
-        completed = subprocess.run(
+        result = ConfiguredSceneRuntime(
+            self.settings,
+            default_script=self.runner,
+            configured_script=(
+                self.settings.SCENE_TARGET_REVIEWABILITY_SCRIPT_PATH
+            ),
+            script_setting_name="SCENE_TARGET_REVIEWABILITY_SCRIPT_PATH",
+        ).run(
             [
-                sys.executable,
-                str(self.runner),
                 "--project-root",
                 str(self.runtime_root),
                 *arguments,
             ],
-            cwd=str(self.storage.project_root),
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
+            expect_json_stdout=True,
         )
-        if completed.returncode != 0:
-            raise RuntimeError(
-                "Scene target reviewability runtime failed: "
-                + (completed.stderr[-3000:] or completed.stdout[-3000:])
-            )
-        return json.loads(completed.stdout)
+        assert result is not None
+        return result
 
     def _output(self, selection: SceneTargetSelection) -> Path:
         output = self.storage.resolve_path(selection.artifact_root)
         if not output.is_relative_to(self.storage.storage_root):
             raise ValueError("Target selection artifact root is invalid.")
         return output
+
+    def _immutable_selection_file(
+        self,
+        selection: SceneTargetSelection,
+        *,
+        path_attribute: str,
+        sha_attribute: str,
+    ) -> Path:
+        root = self._output(selection)
+        relative = getattr(selection, path_attribute)
+        expected = getattr(selection, sha_attribute)
+        if not relative or not expected:
+            raise ValueError(f"Selection is missing {path_attribute}.")
+        path = self.storage.resolve_path(relative)
+        if not path.is_relative_to(root) or not path.is_file():
+            raise ValueError("Immutable selection artifact path is invalid.")
+        if sha256_file(path) != expected:
+            raise ValueError("Immutable selection artifact hash mismatch.")
+        return path
 
     def _artifact_path(
         self,
@@ -292,33 +309,135 @@ class SceneTargetReviewabilityService:
         user: User,
     ) -> SceneTargetSelection:
         self._assert_selected_confirmed(selection)
+        expected_revision = self.repository.next_target_selection_revision(
+            revision_id=selection.revision_id,
+            scene_id=selection.scene_id,
+        )
+        discovery_root_value = (selection.metadata_ or {}).get(
+            "discovery_artifact_root"
+        )
+        if not discovery_root_value:
+            raise ValueError("Selection is missing its discovery artifact root.")
+        workspace = prepare_selection_workspace(
+            self.storage.resolve_path(discovery_root_value),
+            source_root=self._output(selection),
+            revision=expected_revision,
+        )
         result = self._run(
             [
                 "confirm-manual-anchor",
                 "--output-root",
-                str(self._output(selection)),
+                str(workspace.staging_root),
                 "--reviewer",
                 user.user_id,
             ]
         )
         selection_artifact = result["target_selection"]
         decision = result["decision"]
-        expected_revision = self.repository.next_target_selection_revision(
-            revision_id=selection.revision_id,
-            scene_id=selection.scene_id,
-        )
         if int(selection_artifact["target_selection_revision"]) != expected_revision:
             raise RuntimeError(
                 "Manual selection revision disagrees with database."
             )
-        reference_artifact = json.loads(
-            (
-                self._output(selection)
-                / f"target_reference_set_r{expected_revision:04d}.json"
-            ).read_text(encoding="utf-8")
+        versioned_selection_path = validated_runtime_file(
+            workspace.staging_root,
+            f"target_selection_r{expected_revision:04d}.json",
+            allowed_suffixes=JSON_SUFFIXES,
         )
+        versioned_reference_path = validated_runtime_file(
+            workspace.staging_root,
+            f"target_reference_set_r{expected_revision:04d}.json",
+            allowed_suffixes=JSON_SUFFIXES,
+        )
+        decision_path = validated_runtime_file(
+            workspace.staging_root,
+            "reviewability_r2/manual_anchor/manual_earlier_anchor_decision.json",
+            allowed_suffixes=JSON_SUFFIXES,
+        )
+        shutil.copy2(
+            versioned_selection_path,
+            workspace.staging_root / "target_selection.json",
+        )
+        shutil.copy2(
+            versioned_reference_path,
+            workspace.staging_root / "target_reference_set.json",
+        )
+        reference_artifact, _ = load_runtime_json(
+            workspace.staging_root,
+            "target_reference_set.json",
+        )
+        selection_id = str(selection_artifact["selection_id"])
+        if not selection_id.replace("_", "").replace("-", "").isalnum():
+            raise RuntimeError("Runtime returned an unsafe selection identifier.")
+        output = workspace.finalize(selection_id)
+        target_selection_path = validated_runtime_file(
+            output,
+            "target_selection.json",
+            allowed_suffixes=JSON_SUFFIXES,
+        )
+        target_reference_set_path = validated_runtime_file(
+            output,
+            "target_reference_set.json",
+            allowed_suffixes=JSON_SUFFIXES,
+        )
+        final_decision_path = validated_runtime_file(
+            output,
+            decision_path.relative_to(workspace.staging_root),
+            allowed_suffixes=JSON_SUFFIXES,
+        )
+        output_relative = project_relative(output, self.storage.project_root)
+        from app.domains.highlight.scene_target_selection import (
+            SceneTargetSelectionService,
+        )
+
+        artifact_service = SceneTargetSelectionService(
+            self.db,
+            settings=self.settings,
+        )
+        artifact_ids_by_path = dict(
+            (selection.metadata_ or {}).get("artifact_ids_by_path") or {}
+        )
+        artifact_metadata = {
+            "revision_id": selection.revision_id,
+            "scene_id": selection.scene_id,
+            "selection_id": selection_id,
+            "selection_revision": expected_revision,
+        }
+        artifact_ids_by_path.update(
+            artifact_service._register_portable_paths(
+                project=selection.revision.project,
+                output=output,
+                value=reference_artifact,
+                metadata=artifact_metadata,
+            )
+        )
+        for portable, path, artifact_type in (
+            (
+                "target_selection.json",
+                target_selection_path,
+                "SCENE_TARGET_SELECTION_JSON",
+            ),
+            (
+                "target_reference_set.json",
+                target_reference_set_path,
+                "SCENE_TARGET_REFERENCE_SET_JSON",
+            ),
+            (
+                final_decision_path.relative_to(output).as_posix(),
+                final_decision_path,
+                "SCENE_TARGET_EARLIER_DECISION_JSON",
+            ),
+        ):
+            artifact_ids_by_path[portable] = (
+                artifact_service._register_runtime_artifact(
+                    project=selection.revision.project,
+                    path=path,
+                    artifact_type=artifact_type,
+                    mime_type="application/json",
+                    metadata=artifact_metadata,
+                )
+            )
         created = self.repository.create_target_selection(
-            selection_id=selection_artifact["selection_id"],
+            selection_id=selection_id,
             owner_id=selection.owner_id,
             match_id=selection.match_id,
             project_id=selection.project_id,
@@ -327,7 +446,27 @@ class SceneTargetReviewabilityService:
             selection_revision=expected_revision,
             selected_candidate_id=selection.selected_candidate_id,
             status="USER_MANUALLY_SELECTED_EARLIER_ANCHOR",
-            artifact_root=selection.artifact_root,
+            artifact_root=output_relative,
+            selection_artifact_root=output_relative,
+            target_selection_path=project_relative(
+                target_selection_path,
+                self.storage.project_root,
+            ),
+            target_selection_sha256=sha256_file(target_selection_path),
+            target_reference_set_path=project_relative(
+                target_reference_set_path,
+                self.storage.project_root,
+            ),
+            target_reference_set_sha256=sha256_file(
+                target_reference_set_path
+            ),
+            earlier_proposals_path=selection.earlier_proposals_path,
+            earlier_proposals_sha256=selection.earlier_proposals_sha256,
+            earlier_decision_path=project_relative(
+                final_decision_path,
+                self.storage.project_root,
+            ),
+            earlier_decision_sha256=sha256_file(final_decision_path),
             selection_artifact=selection_artifact,
             reference_set_artifact=reference_artifact,
             earlier_proposals_artifact=selection.earlier_proposals_artifact,
@@ -337,6 +476,11 @@ class SceneTargetReviewabilityService:
                 **(selection.metadata_ or {}),
                 "previous_selection_id": selection.selection_id,
                 "manual_anchor_detection_validated": True,
+                "discovery_id": (
+                    selection.metadata_ or {}
+                ).get("discovery_id"),
+                "discovery_artifact_root": discovery_root_value,
+                "artifact_ids_by_path": artifact_ids_by_path,
                 "scene_video_asset_id": (
                     selection.metadata_ or {}
                 ).get("scene_video_asset_id"),
@@ -385,19 +529,25 @@ class SceneTargetReviewabilityService:
             ]
         )
         revision = selection.selection_revision
-        launch_path = (
-            output
-            / "reviewability_r2"
-            / "manual_anchor"
-            / "tracking_launch_manifest.json"
+        launch_path = validated_runtime_file(
+            output,
+            "reviewability_r2/manual_anchor/tracking_launch_manifest.json",
+            allowed_suffixes=JSON_SUFFIXES,
         )
-        selection_path = output / f"target_selection_r{revision:04d}.json"
-        references_path = output / f"target_reference_set_r{revision:04d}.json"
-        decision_path = (
-            output
-            / "reviewability_r2"
-            / "manual_anchor"
-            / "manual_earlier_anchor_decision.json"
+        selection_path = self._immutable_selection_file(
+            selection,
+            path_attribute="target_selection_path",
+            sha_attribute="target_selection_sha256",
+        )
+        references_path = self._immutable_selection_file(
+            selection,
+            path_attribute="target_reference_set_path",
+            sha_attribute="target_reference_set_sha256",
+        )
+        decision_path = self._immutable_selection_file(
+            selection,
+            path_attribute="earlier_decision_path",
+            sha_attribute="earlier_decision_sha256",
         )
         response = TrackingJobService(self.db).create_job(
             user=user,
@@ -420,14 +570,26 @@ class SceneTargetReviewabilityService:
                         "anchor_candidate_id"
                     ],
                     "tracking_cache_key": result["tracking_cache_key"],
-                    "r2_production_manifest_sha256": R2_MANIFEST_SHA256,
+                    "selection_artifact_root": str(output),
+                    "r2_production_manifest_sha256": (
+                        self.settings.TRACKING_R2_MANIFEST_SHA256
+                    ),
                     "tracking_launch_manifest_path": str(launch_path),
                     "shot_boundaries_path": str(
                         self._artifact_path(boundaries, project=project)
                     ),
                     "target_selection_path": str(selection_path),
+                    "target_selection_sha256": (
+                        selection.target_selection_sha256
+                    ),
                     "target_reference_set_path": str(references_path),
+                    "target_reference_set_sha256": (
+                        selection.target_reference_set_sha256
+                    ),
                     "earlier_anchor_decision_path": str(decision_path),
+                    "earlier_anchor_decision_sha256": (
+                        selection.earlier_decision_sha256
+                    ),
                 }
             },
         )

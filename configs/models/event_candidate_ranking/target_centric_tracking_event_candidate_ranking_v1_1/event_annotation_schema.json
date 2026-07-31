@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.event_actor_annotation.v1_1",
+  "type": "object",
+  "required": [
+    "annotation_status",
+    "primary_actor_visible",
+    "primary_actor_in_candidate_set",
+    "primary_actor_candidate_ids",
+    "directly_related_candidate_ids",
+    "reviewer",
+    "reviewed_at"
+  ],
+  "properties": {
+    "annotation_status": {"enum": ["DRAFT", "IN_REVIEW", "COMPLETE"]},
+    "approval_mode": {"enum": ["UNAPPROVED", "FINAL_APPROVED", "EXPLICIT_CONSENSUS"]},
+    "primary_actor_visible": {"type": "boolean"},
+    "primary_actor_in_candidate_set": {"type": "boolean"},
+    "primary_actor_candidate_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "directly_related_candidate_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "actor_missing_reason": {"type": ["string", "null"]},
+    "reviewer": {"type": "string"},
+    "reviewed_at": {"type": "string", "format": "date-time"}
+  }
+}

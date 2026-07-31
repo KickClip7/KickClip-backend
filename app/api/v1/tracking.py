@@ -28,7 +28,10 @@ from app.domains.tracking.schema import (
 from app.domains.tracking.service import TrackingJobService
 from app.domains.tracking.status import TrackingBackendStatus
 from app.domains.tracking.timeline import TrackingTimelineService
-from app.domains.tracking.verifier import get_tracking_verifier
+from app.domains.tracking.verifier import (
+    get_scene_target_tracking_verifier,
+    get_tracking_verifier,
+)
 
 
 router = APIRouter()
@@ -54,6 +57,27 @@ def tracking_diagnostics(
         code=result.code,
         message=result.message,
         verifier_return_code=result.verifier_return_code,
+        components=dict(result.components or {}),
+    )
+
+
+@router.get(
+    "/diagnostics/scene-target-r3",
+    response_model=TrackingDiagnosticsResponse,
+    summary="Selection-assisted R3 runtime diagnostics",
+)
+def scene_target_r3_diagnostics(
+    refresh: bool = Query(default=False),
+) -> TrackingDiagnosticsResponse:
+    result = get_scene_target_tracking_verifier().check(force=refresh)
+    return TrackingDiagnosticsResponse(
+        enabled=result.enabled,
+        available=result.available,
+        checked_at=result.checked_at,
+        code=result.code,
+        message=result.message,
+        verifier_return_code=result.verifier_return_code,
+        components=dict(result.components or {}),
     )
 
 
