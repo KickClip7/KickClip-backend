@@ -10,6 +10,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.domains.highlight.detection_cache import (
+    DETECTION_CACHE_POLICY_VERSION,
+    PlayerDetectionCache,
+)
 from app.domains.highlight.model import HighlightRevision, ScenePlayerCandidate
 from app.domains.highlight.player_detector import (
     PlayerDetector,
@@ -66,6 +70,9 @@ class SceneClipService:
         self.detector = detector
         self.storage = LocalStorage()
         self.media_repository = MediaAssetRepository(db)
+        self.detection_cache = PlayerDetectionCache(
+            self.storage.storage_root / "player_detection_cache_r1"
+        )
 
     def extract_for_candidate(
         self,
@@ -267,10 +274,12 @@ class SceneClipService:
             "artifact_paths": artifact_paths,
         }
         self._write_json(validation_path, validation)
+        output_sha256 = self._sha256(output_path)
 
         try:
             match = self._validate_frame0_initialization(
                 output_path=output_path,
+                output_sha256=output_sha256,
                 bbox_xyxy=[float(value) for value in candidate.bbox_xyxy],
                 preview_path=frame0_preview_path,
                 match_path=detection_match_path,
@@ -314,7 +323,7 @@ class SceneClipService:
             width=clip_metadata.get("width"),
             height=clip_metadata.get("height"),
             size_bytes=clip_metadata.get("size_bytes"),
-            sha256=self._sha256(output_path),
+            sha256=output_sha256,
         )
         self.db.flush()
         return ExtractedSceneClip(
@@ -335,6 +344,7 @@ class SceneClipService:
         self,
         *,
         output_path: Path,
+        output_sha256: str,
         bbox_xyxy: list[float],
         preview_path: Path,
         match_path: Path,
@@ -359,7 +369,13 @@ class SceneClipService:
             )
 
         detector = self.detector or create_player_detector(self.settings)
-        detections_by_frame = detector.detect_batch([frame0])
+        cache_result = self.detection_cache.detect_batch(
+            source_video_sha256=output_sha256,
+            frame_indices=[0],
+            frames_bgr=[frame0],
+            detector=detector,
+        )
+        detections_by_frame = cache_result.detections_by_frame
         detections = detections_by_frame[0] if detections_by_frame else []
         matched = None
         for detection in detections:
@@ -404,6 +420,10 @@ class SceneClipService:
             "matched_detection": matched,
             "detection_count": len(detections),
             "detector_provenance": detector.runtime_metadata,
+            "detection_cache": {
+                "policy_version": DETECTION_CACHE_POLICY_VERSION,
+                **cache_result.as_dict(),
+            },
         }
         self._write_json(match_path, result)
 

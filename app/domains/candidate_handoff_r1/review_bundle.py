@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -9,18 +10,24 @@ import cv2
 import numpy as np
 
 from .artifacts import sha256_file, write_json_atomic
+from .media_cache import SharedFrameCache
 from .schema import CandidateQuality
+from .work_metrics import CandidatePreparationWorkMetrics
 
 
-MEDIA_FILENAMES = {
+MEDIA_MATERIALIZATION_POLICY = "CORE_EAGER_DETAIL_LAZY_R1"
+CORE_MEDIA_FILENAMES = {
     "full_frame_context": "full_frame_context.jpg",
     "best_crop_native": "best_crop_native.jpg",
+    "quality": "candidate_quality.json",
+}
+LAZY_MEDIA_FILENAMES = {
     "best_crop_display": "best_crop_display.jpg",
     "first_middle_last": "first_middle_last.jpg",
     "tracklet_video": "candidate_tracklet.mp4",
     "reference_gallery": "reference_gallery.jpg",
-    "quality": "candidate_quality.json",
 }
+LAZY_MEDIA_SCHEMA_VERSION = "kickclip.candidate_lazy_media.r1"
 
 
 @dataclass
@@ -117,102 +124,224 @@ def extract_observation_features(
     video_path: Path,
     observations: list[dict[str, Any]],
     frame_offset: int = 0,
+    source_video_sha256: str | None = None,
+    shared_frame_cache: SharedFrameCache | None = None,
+    metrics: CandidatePreparationWorkMetrics | None = None,
 ) -> tuple[list[ObservationFeature], dict[str, Any]]:
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        raise ValueError(f"Video cannot be opened: {video_path}")
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = float(capture.get(cv2.CAP_PROP_FPS))
-    features: list[ObservationFeature] = []
-    try:
-        mapped = [
-            (int(observation["frame_index"]) + int(frame_offset), observation)
-            for observation in observations
-        ]
-        mapped = [
-            (frame_index, observation)
-            for frame_index, observation in mapped
+    mapped_raw = [
+        (
+            int(observation["frame_index"])
+            + int(frame_offset),
+            observation,
+        )
+        for observation in observations
+    ]
+
+    wanted = sorted(
+        {
+            frame_index
+            for frame_index, _ in mapped_raw
+            if frame_index >= 0
+        }
+    )
+
+    if shared_frame_cache is not None:
+        if not source_video_sha256:
+            raise ValueError(
+                "source_video_sha256 is required when "
+                "shared_frame_cache is used."
+            )
+
+        cache_result = shared_frame_cache.load_frames(
+            video_path=video_path,
+            video_sha256=source_video_sha256,
+            frame_indices=wanted,
+            metrics=metrics,
+        )
+
+        width = cache_result.width
+        height = cache_result.height
+        frame_count = cache_result.frame_count
+        fps = cache_result.fps
+        frame_images = cache_result.frames
+
+    else:
+        capture = cv2.VideoCapture(str(video_path))
+
+        if not capture.isOpened():
+            raise ValueError(
+                f"Video cannot be opened: {video_path}"
+            )
+
+        width = int(
+            capture.get(cv2.CAP_PROP_FRAME_WIDTH)
+        )
+        height = int(
+            capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        )
+        frame_count = int(
+            capture.get(cv2.CAP_PROP_FRAME_COUNT)
+        )
+        fps = float(
+            capture.get(cv2.CAP_PROP_FPS)
+        )
+
+        mapped_for_decode = [
+            frame_index
+            for frame_index in wanted
             if 0 <= frame_index < frame_count
         ]
-        if mapped:
+
+        frame_images: dict[int, np.ndarray] = {}
+
+        if mapped_for_decode:
             capture.set(
                 cv2.CAP_PROP_POS_FRAMES,
-                min(frame_index for frame_index, _ in mapped),
+                mapped_for_decode[0],
             )
-        frame_cache: dict[int, np.ndarray] = {}
-        wanted = {frame_index for frame_index, _ in mapped}
-        if wanted:
-            for frame_index in range(min(wanted), max(wanted) + 1):
+
+            wanted_set = set(mapped_for_decode)
+
+            for frame_index in range(
+                mapped_for_decode[0],
+                mapped_for_decode[-1] + 1,
+            ):
                 ok, frame = capture.read()
+
                 if not ok or frame is None:
+                    capture.release()
                     raise ValueError(
-                        f"Video frame is not decodable: {frame_index}"
+                        "Video frame is not decodable: "
+                        f"{frame_index}"
                     )
-                if frame_index in wanted:
-                    frame_cache[frame_index] = frame.copy()
-        for frame_index, observation in mapped:
-            source_frame = int(observation["frame_index"])
-            frame = frame_cache[frame_index]
-            x1, y1, x2, y2 = _clip_bbox(
-                observation["bbox_xyxy"], width, height
-            )
-            crop = frame[y1:y2, x1:x2].copy()
-            if crop.size == 0:
-                continue
-            bbox_width = float(x2 - x1)
-            bbox_height = float(y2 - y1)
-            sharpness = float(
-                cv2.Laplacian(
-                    cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F
-                ).var()
-            )
-            border = bool(
-                x1 <= 1 or y1 <= 1 or x2 >= width - 1 or y2 >= height - 1
-            )
-            confidence = float(
-                observation.get(
-                    "confidence",
-                    observation.get("detector_confidence", 0.0),
-                )
-            )
-            features.append(
-                ObservationFeature(
-                    frame_index=frame_index,
-                    source_frame_index=source_frame,
-                    bbox=tuple(
-                        float(value) for value in observation["bbox_xyxy"]
-                    ),
-                    confidence=confidence,
-                    width=bbox_width,
-                    height=bbox_height,
-                    area_ratio=(
-                        bbox_width * bbox_height / float(width * height)
-                    ),
-                    sharpness=sharpness,
-                    border_clipping=border,
-                    crop=crop,
-                    histogram=_histogram(crop),
-                    dominant_color=_dominant_color(crop),
-                    review_score=_review_score(
-                        bbox_width=bbox_width,
-                        bbox_height=bbox_height,
-                        frame_width=width,
-                        frame_height=height,
-                        sharpness=sharpness,
-                        border=border,
-                        confidence=confidence,
-                    ),
-                )
-            )
-    finally:
+
+                if metrics is not None:
+                    metrics.increment(
+                        "video_frames_decoded"
+                    )
+
+                if frame_index in wanted_set:
+                    frame_images[frame_index] = (
+                        frame.copy()
+                    )
+
         capture.release()
+
+        if metrics is not None:
+            metrics.increment(
+                "video_capture_open_count"
+            )
+
+    mapped = [
+        (frame_index, observation)
+        for frame_index, observation in mapped_raw
+        if 0 <= frame_index < frame_count
+    ]
+
+    features: list[ObservationFeature] = []
+
+    for frame_index, observation in mapped:
+        source_frame = int(
+            observation["frame_index"]
+        )
+
+        frame = frame_images.get(frame_index)
+
+        if frame is None:
+            raise ValueError(
+                f"Video frame is not available: "
+                f"{frame_index}"
+            )
+
+        x1, y1, x2, y2 = _clip_bbox(
+            observation["bbox_xyxy"],
+            width,
+            height,
+        )
+
+        crop = frame[y1:y2, x1:x2].copy()
+
+        if crop.size == 0:
+            continue
+
+        bbox_width = float(x2 - x1)
+        bbox_height = float(y2 - y1)
+
+        sharpness = float(
+            cv2.Laplacian(
+                cv2.cvtColor(
+                    crop,
+                    cv2.COLOR_BGR2GRAY,
+                ),
+                cv2.CV_64F,
+            ).var()
+        )
+
+        border = bool(
+            x1 <= 1
+            or y1 <= 1
+            or x2 >= width - 1
+            or y2 >= height - 1
+        )
+
+        confidence = float(
+            observation.get(
+                "confidence",
+                observation.get(
+                    "detector_confidence",
+                    0.0,
+                ),
+            )
+        )
+
+        features.append(
+            ObservationFeature(
+                frame_index=frame_index,
+                source_frame_index=source_frame,
+                bbox=tuple(
+                    float(value)
+                    for value
+                    in observation["bbox_xyxy"]
+                ),
+                confidence=confidence,
+                width=bbox_width,
+                height=bbox_height,
+                area_ratio=(
+                    bbox_width
+                    * bbox_height
+                    / float(width * height)
+                ),
+                sharpness=sharpness,
+                border_clipping=border,
+                crop=crop,
+                histogram=_histogram(crop),
+                dominant_color=_dominant_color(
+                    crop
+                ),
+                review_score=_review_score(
+                    bbox_width=bbox_width,
+                    bbox_height=bbox_height,
+                    frame_width=width,
+                    frame_height=height,
+                    sharpness=sharpness,
+                    border=border,
+                    confidence=confidence,
+                ),
+            )
+        )
+
+    if metrics is not None:
+        metrics.increment(
+            "candidate_observations_processed",
+            len(features),
+        )
+
     return features, {
         "width": width,
         "height": height,
         "frame_count": frame_count,
         "fps": fps,
+        "frames": frame_images,
     }
 
 
@@ -478,16 +607,33 @@ def build_candidate_review_bundle(
     reviewed_shot_boundaries_sha256: str,
     frame_offset: int = 0,
     force_identity_pure: bool | None = None,
+    shared_frame_cache: SharedFrameCache | None = None,
+    metrics: CandidatePreparationWorkMetrics | None = None,
 ) -> tuple[dict[str, Any], str]:
     output_root = output_root.resolve()
     if output_root.exists():
         raise FileExistsError(f"Immutable review bundle already exists: {output_root}")
     output_root.mkdir(parents=True)
-    features, video = extract_observation_features(
-        video_path=video_path,
-        observations=list(candidate.get("observations") or []),
-        frame_offset=frame_offset,
-    )
+    if metrics is not None:
+        metrics.increment(
+            "candidate_review_bundle_build_count"
+        )
+
+    with (
+        metrics.stage("candidate_feature_extraction")
+        if metrics is not None
+        else nullcontext()
+    ):
+        features, video = extract_observation_features(
+            video_path=video_path,
+            observations=list(
+                candidate.get("observations") or []
+            ),
+            frame_offset=frame_offset,
+            source_video_sha256=source_video_sha256,
+            shared_frame_cache=shared_frame_cache,
+            metrics=metrics,
+        )
     if not features:
         raise ValueError("Candidate has no decodable observations.")
     purity = analyze_tracklet_purity(features)
@@ -554,11 +700,15 @@ def build_candidate_review_bundle(
         purity_diagnostics=purity,
     ).model_dump(mode="json")
 
-    capture = cv2.VideoCapture(str(video_path))
-    try:
-        full = _read_frame(capture, best.frame_index)
-    finally:
-        capture.release()
+    full = video["frames"].get(best.frame_index)
+
+    if full is None:
+        raise ValueError(
+            "Best observation frame is unavailable: "
+            f"{best.frame_index}"
+        )
+
+    full = full.copy()
     x1, y1, x2, y2 = _clip_bbox(
         best.bbox, int(video["width"]), int(video["height"])
     )
@@ -574,17 +724,13 @@ def build_candidate_review_bundle(
             ),
         ],
     )
-    cv2.imwrite(str(output_root / MEDIA_FILENAMES["full_frame_context"]), context)
     cv2.imwrite(
-        str(output_root / MEDIA_FILENAMES["best_crop_native"]), best.crop
+        str(output_root / CORE_MEDIA_FILENAMES["full_frame_context"]),
+        context,
     )
-    display = cv2.resize(
+    cv2.imwrite(
+        str(output_root / CORE_MEDIA_FILENAMES["best_crop_native"]),
         best.crop,
-        (best.crop.shape[1] * 3, best.crop.shape[0] * 3),
-        interpolation=cv2.INTER_LANCZOS4,
-    )
-    cv2.imwrite(
-        str(output_root / MEDIA_FILENAMES["best_crop_display"]), display
     )
 
     first_middle_last = [
@@ -592,32 +738,6 @@ def build_candidate_review_bundle(
         pure_features[len(pure_features) // 2],
         pure_features[-1],
     ]
-    cv2.imwrite(
-        str(output_root / MEDIA_FILENAMES["first_middle_last"]),
-        _contact_sheet(
-            [
-                (value.crop, f"frame {value.frame_index} / {label}")
-                for value, label in zip(
-                    first_middle_last, ("FIRST", "MIDDLE", "LAST")
-                )
-            ]
-        ),
-    )
-    cv2.imwrite(
-        str(output_root / MEDIA_FILENAMES["reference_gallery"]),
-        _contact_sheet(
-            [
-                (
-                    value.crop,
-                    (
-                        f"frame {value.frame_index} "
-                        f"{int(value.width)}x{int(value.height)}"
-                    ),
-                )
-                for value in references
-            ]
-        ),
-    )
     reference_records = []
     reference_root = output_root / "references"
     reference_root.mkdir()
@@ -643,7 +763,10 @@ def build_candidate_review_bundle(
             }
         )
 
-    feature_by_frame = {value.frame_index: value for value in pure_features}
+    feature_by_frame = {
+        value.frame_index: value
+        for value in pure_features
+    }
     start_frame = max(
         min(feature_by_frame),
         best.frame_index - int(round(video["fps"] * 1.5)),
@@ -652,50 +775,115 @@ def build_candidate_review_bundle(
         max(feature_by_frame),
         start_frame + int(round(video["fps"] * 3.0)) - 1,
     )
-    writer = cv2.VideoWriter(
-        str(output_root / MEDIA_FILENAMES["tracklet_video"]),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        min(float(video["fps"]), 15.0),
-        (int(video["width"]), int(video["height"])),
+
+    source_fps = float(video["fps"])
+    output_fps = min(source_fps, 15.0)
+    source_frame_span = end_frame - start_frame + 1
+    render_frame_count = max(
+        1,
+        int(round(source_frame_span * output_fps / source_fps)),
     )
-    capture = cv2.VideoCapture(str(video_path))
-    try:
-        last_feature: ObservationFeature | None = None
-        capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        for frame_index in range(start_frame, end_frame + 1):
-            ok, frame = capture.read()
-            if not ok or frame is None:
-                raise ValueError(
-                    f"Video frame is not decodable: {frame_index}"
+    if render_frame_count >= source_frame_span:
+        tracklet_frame_indices = list(range(start_frame, end_frame + 1))
+    elif render_frame_count == 1:
+        tracklet_frame_indices = [start_frame]
+    else:
+        tracklet_frame_indices = sorted(
+            {
+                int(round(start_frame + index * (source_frame_span - 1) / (render_frame_count - 1)))
+                for index in range(render_frame_count)
+            }
+        )
+
+    lazy_media = {
+        "best_crop_display": {
+            "schema_version": LAZY_MEDIA_SCHEMA_VERSION,
+            "kind": "BEST_CROP_DISPLAY",
+            "filename": LAZY_MEDIA_FILENAMES["best_crop_display"],
+            "source_file_key": "best_crop_native",
+            "scale_factor": 3,
+            "interpolation": "Lanczos",
+            "generative_super_resolution": False,
+        },
+        "first_middle_last": {
+            "schema_version": LAZY_MEDIA_SCHEMA_VERSION,
+            "kind": "FIRST_MIDDLE_LAST",
+            "filename": LAZY_MEDIA_FILENAMES["first_middle_last"],
+            "items": [
+                {
+                    "label": label,
+                    "source_frame": value.source_frame_index,
+                    "frame": value.frame_index,
+                    "bbox_xyxy": list(value.bbox),
+                }
+                for value, label in zip(
+                    first_middle_last,
+                    ("FIRST", "MIDDLE", "LAST"),
                 )
-            if frame_index in feature_by_frame:
-                last_feature = feature_by_frame[frame_index]
-            if last_feature is not None and (
-                frame_index - last_feature.frame_index <= 2
-            ):
-                bx1, by1, bx2, by2 = _clip_bbox(
-                    last_feature.bbox,
-                    int(video["width"]),
-                    int(video["height"]),
-                )
-                cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 255, 255), 4)
-            _label_image(
-                frame,
-                [
-                    f"{candidate['candidate_id']} frame={frame_index}",
-                    "REVIEW ONLY - no automatic target confirmation",
-                ],
-            )
-            writer.write(frame)
-    finally:
-        writer.release()
-        capture.release()
+            ],
+        },
+        "reference_gallery": {
+            "schema_version": LAZY_MEDIA_SCHEMA_VERSION,
+            "kind": "REFERENCE_GALLERY",
+            "filename": LAZY_MEDIA_FILENAMES["reference_gallery"],
+            "items": [
+                {
+                    "path": record["path"],
+                    "sha256": record["crop_sha256"],
+                    "source_frame": record["source_frame"],
+                    "frame": record["frame"],
+                    "width": next(
+                        int(value.width)
+                        for value in references
+                        if value.frame_index == record["frame"]
+                    ),
+                    "height": next(
+                        int(value.height)
+                        for value in references
+                        if value.frame_index == record["frame"]
+                    ),
+                }
+                for record in reference_records
+            ],
+        },
+        "tracklet_video": {
+            "schema_version": LAZY_MEDIA_SCHEMA_VERSION,
+            "kind": "TRACKLET_VIDEO",
+            "filename": LAZY_MEDIA_FILENAMES["tracklet_video"],
+            "candidate_id": candidate["candidate_id"],
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "source_fps": source_fps,
+            "output_fps": output_fps,
+            "frame_indices": tracklet_frame_indices,
+            "width": int(video["width"]),
+            "height": int(video["height"]),
+            "max_bbox_age_frames": 2,
+            "observations": [
+                {
+                    "frame": value.frame_index,
+                    "bbox_xyxy": list(value.bbox),
+                }
+                for value in pure_features
+                if start_frame <= value.frame_index <= end_frame
+            ],
+        },
+    }
+
+    if metrics is not None:
+        metrics.increment("lazy_media_deferred_count", len(lazy_media))
+        metrics.increment(
+            "review_video_frames_deferred",
+            len(tracklet_frame_indices),
+        )
+        metrics.increment("contact_sheets_deferred", 2)
 
     quality_sha = write_json_atomic(
-        output_root / MEDIA_FILENAMES["quality"], quality
+        output_root / CORE_MEDIA_FILENAMES["quality"],
+        quality,
     )
     file_records: dict[str, dict[str, Any]] = {}
-    for key, filename in MEDIA_FILENAMES.items():
+    for key, filename in CORE_MEDIA_FILENAMES.items():
         path = output_root / filename
         file_records[key] = {
             "path": filename,
@@ -709,9 +897,54 @@ def build_candidate_review_bundle(
             "sha256": record["crop_sha256"],
             "size_bytes": path.stat().st_size,
         }
+
+    if metrics is not None:
+        metrics.increment(
+            "review_bundle_media_files_written",
+            len(file_records),
+        )
+        metrics.increment(
+            "review_bundle_media_bytes_written",
+            sum(
+                int(record["size_bytes"])
+                for record in file_records.values()
+            ),
+        )
+
     manifest = {
         "schema_version": "kickclip.candidate_review_bundle.r1",
         "immutable": True,
+        "media_materialization_policy": MEDIA_MATERIALIZATION_POLICY,
+        "candidate_grouping_policy": str(
+            candidate.get("candidate_grouping_policy") or ""
+        ),
+        "candidate_grouping_sha256": str(
+            candidate.get("candidate_grouping_sha256") or ""
+        ),
+        "candidate_group_id": str(
+            candidate.get("candidate_group_id") or candidate["candidate_id"]
+        ),
+        "group_member_candidate_ids": list(
+            candidate.get("group_member_candidate_ids")
+            or [candidate["candidate_id"]]
+        ),
+        "group_member_source_candidate_ids": list(
+            candidate.get("group_member_source_candidate_ids")
+            or [candidate.get("source_candidate_id") or candidate["candidate_id"]]
+        ),
+        "group_member_fingerprint": str(
+            candidate.get("group_member_fingerprint") or ""
+        ),
+        "grouping_reason_codes": list(
+            candidate.get("grouping_reason_codes") or []
+        ),
+        "grouping_evidence": list(
+            candidate.get("grouping_evidence") or []
+        ),
+        "possible_fragment_duplicate": bool(
+            candidate.get("possible_fragment_duplicate", False)
+        ),
+        "grouping_is_identity_confirmation": False,
         "candidate_id": candidate["candidate_id"],
         "candidate_media_id": candidate["candidate_id"],
         "ranking_id": ranking_id,
@@ -755,6 +988,7 @@ def build_candidate_review_bundle(
         ],
         "quality": quality,
         "files": file_records,
+        "lazy_media": lazy_media,
         "automatic_target_confirmation": False,
         "identity_evidence_source": "best_crop_native.jpg",
         "display_upscale": {

@@ -32,19 +32,32 @@ from app.domains.timeline.model import TimelineEvent
 from app.storage.local_storage import LocalStorage
 from app.utils.id_generator import generate_prefixed_id
 
-from .artifacts import canonical_sha256, sha256_file
+from .artifacts import canonical_sha256, sha256_file, write_json_atomic
+from .candidate_grouping import (
+    CANDIDATE_GROUPING_POLICY_VERSION,
+    build_candidate_grouping,
+)
 from .errors import CandidatePreparationError
-from .review_bundle import build_candidate_review_bundle
+from .review_bundle import (
+    MEDIA_MATERIALIZATION_POLICY,
+    build_candidate_review_bundle,
+)
 from .reviewed_input_recovery import (
     ReviewedInputRecoveryError,
     find_recoverable_reviewed_input_bundle,
 )
-from .service import BUNDLE_ARTIFACT_TYPE, public_candidate_id
+from .service import (
+    BUNDLE_ARTIFACT_TYPE,
+    GROUPING_ARTIFACT_TYPE,
+    public_candidate_id,
+)
+from .media_cache import SharedFrameCache
+from .work_metrics import CandidatePreparationWorkMetrics
 
 
 SOURCE_ARTIFACT_TYPE = "EVENT_CANDIDATE_RANKING_V1_1_2A_SHADOW"
 REVIEWED_SHOTS_ARTIFACT_TYPE = "REVIEWED_SHOT_BOUNDARIES"
-PREPARATION_TASK_TYPE = "EVENT_CANDIDATE_RECOMMENDATION_PREPARE_R1"
+PREPARATION_TASK_TYPE = "EVENT_CANDIDATE_RECOMMENDATION_PREPARE_R1C"
 USABLE_RANKING_STATES = {
     "AVAILABLE",
     "COMPLETED",
@@ -1246,7 +1259,24 @@ class EventCandidateRecommendationPreparationService:
                 "INPUT_PROVENANCE_MISMATCH", "Ranking identifiers are missing."
             )
         bundle_count = 0
-        revision = self.db.get(HighlightRevision, revision_id)
+
+        work_metrics = CandidatePreparationWorkMetrics()
+
+        shared_frame_cache = SharedFrameCache(
+            self.storage.storage_root
+            / "shared_frame_cache_r1"
+        )
+
+        shortlist_rows = list(ranking.get("shortlist") or [])
+        work_metrics.increment(
+            "shortlisted_candidate_count",
+            len(shortlist_rows),
+        )
+
+        revision = self.db.get(
+            HighlightRevision,
+            revision_id,
+        )
         mapping = (
             (revision.options or {}).get("candidate_pipeline_inputs") or {}
             if revision is not None
@@ -1256,13 +1286,24 @@ class EventCandidateRecommendationPreparationService:
         video_frame_offset_contract = mapping.get(
             "candidate_source_to_video_frame_offset"
         )
-        for shortlist_row in ranking.get("shortlist") or []:
-            source_candidate_id = str(shortlist_row.get("candidate_id") or "")
+
+        prepared_by_candidate_id: dict[str, dict[str, Any]] = {}
+        grouping_inputs: list[dict[str, Any]] = []
+        for shortlist_rank, shortlist_row in enumerate(
+            shortlist_rows,
+            start=1,
+        ):
+            source_candidate_id = str(
+                shortlist_row.get("candidate_id") or ""
+            )
             raw = source_candidates.get(source_candidate_id)
             if raw is None:
                 raise CandidatePreparationError(
                     "INPUT_PROVENANCE_MISMATCH",
-                    f"Shortlisted candidate is absent from frozen discovery: {source_candidate_id}",
+                    (
+                        "Shortlisted candidate is absent from frozen "
+                        f"discovery: {source_candidate_id}"
+                    ),
                 )
             candidate, frame_offset = self._bundle_candidate(
                 raw,
@@ -1278,15 +1319,230 @@ class EventCandidateRecommendationPreparationService:
                     else None
                 ),
             )
+            candidate_id = str(candidate["candidate_id"])
+            if candidate_id in prepared_by_candidate_id:
+                raise CandidatePreparationError(
+                    "INPUT_PROVENANCE_MISMATCH",
+                    "Public candidate IDs are not unique.",
+                )
+            global_rank = int(
+                shortlist_row.get(
+                    "original_global_rank",
+                    shortlist_row.get("rank"),
+                )
+            )
+            prepared_by_candidate_id[candidate_id] = {
+                "candidate": candidate,
+                "frame_offset": frame_offset,
+                "shortlist_row": shortlist_row,
+                "shortlist_rank": shortlist_rank,
+                "global_rank": global_rank,
+            }
+            grouping_inputs.append(
+                {
+                    **candidate,
+                    "frame_offset": frame_offset,
+                    "shortlist_rank": shortlist_rank,
+                    "global_rank": global_rank,
+                }
+            )
+
+        with work_metrics.stage("candidate_fragment_grouping"):
+            grouping_document = build_candidate_grouping(
+                video_path=immutable.source_video_path,
+                source_video_sha256=immutable.source_video_sha256,
+                shortlist_patch_id=patch_id,
+                ranking_id=source_ranking_id,
+                candidates=grouping_inputs,
+                shared_frame_cache=shared_frame_cache,
+                metrics=work_metrics,
+            )
+
+        grouping_document = {
+            **grouping_document,
+            "revision_id": revision_id,
+            "event_id": event_id,
+            "scene_id": scene_id,
+            "candidate_manifest_sha256": (
+                immutable.candidate_manifest_sha256
+            ),
+            "reviewed_shot_boundaries_sha256": reviewed_sha,
+            "media_materialization_policy": (
+                MEDIA_MATERIALIZATION_POLICY
+            ),
+        }
+        grouping_fingerprint = canonical_sha256(grouping_document)
+        grouping_root = (
+            self.storage.storage_root
+            / "event_candidate_groupings_r1"
+            / patch_id
+            / grouping_fingerprint[:24]
+        ).resolve()
+        if not grouping_root.is_relative_to(self.storage.storage_root):
+            raise CandidatePreparationError(
+                "INPUT_PROVENANCE_MISMATCH",
+                "Candidate grouping path escapes immutable storage.",
+            )
+        grouping_path = grouping_root / "candidate_grouping.json"
+        if grouping_path.exists():
+            existing_grouping_document = self._load_json(grouping_path)
+            if canonical_sha256(existing_grouping_document) != grouping_fingerprint:
+                raise CandidatePreparationError(
+                    "INPUT_PROVENANCE_MISMATCH",
+                    "Existing candidate grouping content differs.",
+                )
+            grouping_sha256 = sha256_file(grouping_path)
+        else:
+            grouping_sha256 = write_json_atomic(
+                grouping_path,
+                grouping_document,
+            )
+
+        grouping_artifact_contract = {
+            "revision_id": revision_id,
+            "event_id": event_id,
+            "scene_id": scene_id,
+            "shortlist_patch_id": patch_id,
+            "candidate_grouping_policy": (
+                CANDIDATE_GROUPING_POLICY_VERSION
+            ),
+            "source_video_sha256": immutable.source_video_sha256,
+            "candidate_manifest_sha256": (
+                immutable.candidate_manifest_sha256
+            ),
+            "sha256": grouping_sha256,
+        }
+        grouping_rows = self.db.scalars(
+            select(Artifact).where(
+                Artifact.project_id == project.project_id,
+                Artifact.artifact_type == GROUPING_ARTIFACT_TYPE,
+            )
+        ).all()
+        existing_grouping_artifact = next(
+            (
+                row
+                for row in grouping_rows
+                if row.match_id == project.match_id
+                and self._metadata_matches(
+                    row,
+                    grouping_artifact_contract,
+                )
+            ),
+            None,
+        )
+        if existing_grouping_artifact is None:
+            self.artifacts.create(
+                match_id=project.match_id,
+                project_id=project.project_id,
+                analysis_job_id=None,
+                artifact_type=GROUPING_ARTIFACT_TYPE,
+                file_path=grouping_path.relative_to(
+                    self.storage.project_root
+                ).as_posix(),
+                mime_type="application/json",
+                metadata_={
+                    **grouping_artifact_contract,
+                    "ranking_id": source_ranking_id,
+                    "source_candidate_count": grouping_document[
+                        "source_candidate_count"
+                    ],
+                    "display_candidate_count": grouping_document[
+                        "display_candidate_count"
+                    ],
+                    "status": "READY",
+                    "owner_id": user.user_id,
+                    "automatic_target_confirmation": False,
+                },
+            )
+            self.db.commit()
+            work_metrics.increment(
+                "candidate_grouping_artifact_records_created"
+            )
+        else:
+            work_metrics.increment(
+                "candidate_grouping_artifact_cache_hits"
+            )
+
+        for group in grouping_document["groups"]:
+            representative_candidate_id = str(
+                group["representative_candidate_id"]
+            )
+            prepared = prepared_by_candidate_id.get(
+                representative_candidate_id
+            )
+            if prepared is None:
+                raise CandidatePreparationError(
+                    "INPUT_PROVENANCE_MISMATCH",
+                    "Candidate group representative is not shortlisted.",
+                )
+
+            member_candidate_ids = [
+                str(value)
+                for value in group["member_candidate_ids"]
+            ]
+            member_source_candidate_ids = [
+                str(value)
+                for value in group[
+                    "member_source_candidate_ids"
+                ]
+            ]
+            group_member_fingerprint = canonical_sha256(
+                {
+                    "candidate_grouping_policy": (
+                        CANDIDATE_GROUPING_POLICY_VERSION
+                    ),
+                    "member_candidate_ids": member_candidate_ids,
+                }
+            )
+            candidate = {
+                **prepared["candidate"],
+                "candidate_grouping_policy": (
+                    CANDIDATE_GROUPING_POLICY_VERSION
+                ),
+                "candidate_grouping_sha256": grouping_sha256,
+                "candidate_group_id": group["candidate_group_id"],
+                "group_member_candidate_ids": member_candidate_ids,
+                "group_member_source_candidate_ids": (
+                    member_source_candidate_ids
+                ),
+                "group_member_fingerprint": group_member_fingerprint,
+                "grouping_reason_codes": list(
+                    group.get("grouping_reason_codes") or []
+                ),
+                "grouping_evidence": list(
+                    group.get("evidence") or []
+                ),
+                "possible_fragment_duplicate": bool(
+                    group.get("possible_fragment_duplicate", False)
+                ),
+            }
+            frame_offset = int(prepared["frame_offset"])
             contract = {
                 "shortlist_patch_id": patch_id,
-                "candidate_id": str(candidate["candidate_id"]),
+                "candidate_id": representative_candidate_id,
                 "source_video_sha256": immutable.source_video_sha256,
-                "candidate_manifest_sha256": immutable.candidate_manifest_sha256,
+                "candidate_manifest_sha256": (
+                    immutable.candidate_manifest_sha256
+                ),
                 "reviewed_shot_boundaries_sha256": reviewed_sha,
+                "media_materialization_policy": (
+                    MEDIA_MATERIALIZATION_POLICY
+                ),
+                "candidate_grouping_policy": (
+                    CANDIDATE_GROUPING_POLICY_VERSION
+                ),
+                "candidate_grouping_sha256": grouping_sha256,
+                "candidate_group_id": str(group["candidate_group_id"]),
+                "group_member_fingerprint": group_member_fingerprint,
             }
-            existing = self._existing_bundle(project=project, contract=contract)
+            existing = self._existing_bundle(
+                project=project,
+                contract=contract,
+            )
             if existing is not None:
+                work_metrics.increment(
+                    "review_bundle_cache_hits"
+                )
                 bundle_count += 1
                 continue
             bundle_key = canonical_sha256(contract)
@@ -1294,7 +1550,7 @@ class EventCandidateRecommendationPreparationService:
                 self.storage.storage_root
                 / "event_candidate_review_bundles_r1"
                 / patch_id
-                / str(candidate["candidate_id"])
+                / representative_candidate_id
                 / bundle_key[:24]
             ).resolve()
             if not output_root.is_relative_to(self.storage.storage_root):
@@ -1303,29 +1559,65 @@ class EventCandidateRecommendationPreparationService:
                     "Candidate review bundle path escapes immutable storage.",
                 )
             if output_root.exists():
-                manifest, manifest_sha = self._verify_bundle_directory(
-                    output_root, contract=contract
+                work_metrics.increment(
+                    "review_bundle_directory_reuse_count"
                 )
+                with work_metrics.stage(
+                    "review_bundle_integrity_verification"
+                ):
+                    manifest, manifest_sha = (
+                        self._verify_bundle_directory(
+                            output_root,
+                            contract=contract,
+                        )
+                    )
             else:
                 staging_root = (
                     output_root.parent
                     / f".tmp_{generate_prefixed_id('bld')}"
                 ).resolve()
-                build_candidate_review_bundle(
-                    video_path=immutable.source_video_path,
-                    candidate=candidate,
-                    output_root=staging_root,
-                    ranking_id=source_ranking_id,
-                    shortlist_patch_id=patch_id,
-                    candidate_manifest_sha256=immutable.candidate_manifest_sha256,
-                    source_video_sha256=immutable.source_video_sha256,
-                    reviewed_shot_boundaries_sha256=reviewed_sha,
-                    frame_offset=frame_offset,
-                )
-                manifest, manifest_sha = self._verify_bundle_directory(
-                    staging_root, contract=contract
-                )
-                staging_root.rename(output_root)
+                try:
+                    with work_metrics.stage(
+                        "review_bundle_build"
+                    ):
+                        build_candidate_review_bundle(
+                            video_path=immutable.source_video_path,
+                            candidate=candidate,
+                            output_root=staging_root,
+                            ranking_id=source_ranking_id,
+                            shortlist_patch_id=patch_id,
+                            candidate_manifest_sha256=(
+                                immutable.candidate_manifest_sha256
+                            ),
+                            source_video_sha256=(
+                                immutable.source_video_sha256
+                            ),
+                            reviewed_shot_boundaries_sha256=(
+                                reviewed_sha
+                            ),
+                            frame_offset=frame_offset,
+                            shared_frame_cache=shared_frame_cache,
+                            metrics=work_metrics,
+                        )
+                    with work_metrics.stage(
+                        "review_bundle_integrity_verification"
+                    ):
+                        manifest, manifest_sha = (
+                            self._verify_bundle_directory(
+                                staging_root,
+                                contract=contract,
+                            )
+                        )
+                    staging_root.rename(output_root)
+                except Exception:
+                    if staging_root.exists():
+                        shutil.rmtree(
+                            self._windows_access_path(
+                                staging_root
+                            ),
+                            ignore_errors=True,
+                        )
+                    raise
             self.artifacts.create(
                 match_id=project.match_id,
                 project_id=project.project_id,
@@ -1343,7 +1635,16 @@ class EventCandidateRecommendationPreparationService:
                     "scene_id": scene_id,
                     "shot_id": candidate["shot_id"],
                     "tracklet_id": candidate["tracklet_id"],
-                    "source_candidate_id": candidate["source_candidate_id"],
+                    "source_candidate_id": candidate[
+                        "source_candidate_id"
+                    ],
+                    "group_member_candidate_ids": member_candidate_ids,
+                    "group_member_source_candidate_ids": (
+                        member_source_candidate_ids
+                    ),
+                    "possible_fragment_duplicate": bool(
+                        group.get("possible_fragment_duplicate", False)
+                    ),
                     "status": "READY",
                     "sha256": manifest_sha,
                     "owner_id": user.user_id,
@@ -1351,13 +1652,57 @@ class EventCandidateRecommendationPreparationService:
                 },
             )
             self.db.commit()
+            work_metrics.increment(
+                "review_bundle_artifact_records_created"
+            )
             bundle_count += 1
-        candidate_count = len(ranking.get("shortlist") or [])
+
+        source_candidate_count = int(
+            grouping_document["source_candidate_count"]
+        )
+        candidate_count = int(
+            grouping_document["display_candidate_count"]
+        )
         if bundle_count != candidate_count:
             raise CandidatePreparationError(
                 "REVIEW_BUNDLES_INCOMPLETE",
-                "Not all shortlisted candidates have immutable review bundles.",
+                (
+                    "Not all candidate group representatives have "
+                    "immutable review bundles."
+                ),
             )
+        work_metrics.increment(
+            "review_bundle_count",
+            bundle_count,
+        )
+
+        metrics_path = (
+            self.storage.storage_root
+            / "candidate_preparation_metrics_r1"
+            / patch_id
+            / revision_id
+            / event_id
+            / f"{scene_id}.json"
+        ).resolve()
+
+        if not metrics_path.is_relative_to(
+            self.storage.storage_root
+        ):
+            raise CandidatePreparationError(
+                "INPUT_PROVENANCE_MISMATCH",
+                (
+                    "Candidate preparation metrics path "
+                    "escapes immutable storage."
+                ),
+            )
+
+        metrics_snapshot = work_metrics.snapshot()
+
+        metrics_sha256 = write_json_atomic(
+            metrics_path,
+            metrics_snapshot,
+        )
+
         recommendations_url = (
             f"/api/v1/projects/{project.project_id}/highlight/revisions/"
             f"{revision_id}/events/{event_id}/candidate-recommendations"
@@ -1366,11 +1711,31 @@ class EventCandidateRecommendationPreparationService:
         return {
             "ready": True,
             "ranking_version": "v1.2",
-            "ranking_artifact_id": ranking_artifact.artifact_id,
+            "ranking_artifact_id": (
+                ranking_artifact.artifact_id
+            ),
             "ranking_id": source_ranking_id,
             "shortlist_patch_id": patch_id,
+            "source_candidate_count": source_candidate_count,
             "candidate_count": candidate_count,
+            "display_candidate_count": candidate_count,
+            "candidate_grouping_policy": (
+                CANDIDATE_GROUPING_POLICY_VERSION
+            ),
+            "candidate_grouping_path": (
+                grouping_path.relative_to(
+                    self.storage.project_root
+                ).as_posix()
+            ),
+            "candidate_grouping_sha256": grouping_sha256,
             "review_bundle_count": bundle_count,
+            "work_metrics_path": (
+                metrics_path.relative_to(
+                    self.storage.project_root
+                ).as_posix()
+            ),
+            "work_metrics_sha256": metrics_sha256,
+            "work_metrics": metrics_snapshot,
             "recommendations_url": recommendations_url,
             "automatic_target_confirmation": False,
         }

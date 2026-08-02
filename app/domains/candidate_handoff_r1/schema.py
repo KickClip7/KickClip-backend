@@ -51,6 +51,10 @@ class EventCandidateRecommendationRead(BaseModel):
     media: CandidateMediaRead
     reason_codes: list[str] = Field(default_factory=list)
     risk_codes: list[str] = Field(default_factory=list)
+    candidate_group_id: str
+    group_member_candidate_ids: list[str] = Field(default_factory=list)
+    grouped_candidate_count: int = Field(ge=1)
+    grouping_reason_codes: list[str] = Field(default_factory=list)
     possible_fragment_duplicate: bool = False
     automatic_target_confirmation: Literal[False] = False
 
@@ -63,6 +67,9 @@ class EventCandidateRecommendationResponse(BaseModel):
     event_id: str
     scene_id: str
     source_video_asset_id: str
+    source_candidate_count: int = Field(ge=1)
+    display_candidate_count: int = Field(ge=1)
+    candidate_grouping_policy: str
     candidates: list[EventCandidateRecommendationRead]
     automatic_target_confirmation: Literal[False] = False
     production_recommendation_ui: Literal["BLOCKED"] = "BLOCKED"

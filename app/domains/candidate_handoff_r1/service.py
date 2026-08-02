@@ -31,11 +31,19 @@ from .artifacts import (
     verify_manifest,
     write_json_atomic,
 )
+from .candidate_grouping import (
+    CANDIDATE_GROUPING_POLICY_VERSION,
+    CANDIDATE_GROUPING_SCHEMA_VERSION,
+)
 from .errors import (
     CandidateRecommendationNotPrepared,
     CandidateSelectionProvenanceMismatch,
     InsufficientReviewableTargetReference,
     TrackletIdentityInconsistent,
+)
+from .lazy_media import (
+    LazyCandidateMediaError,
+    LazyCandidateMediaMaterializer,
 )
 from .model import (
     EventCandidateAmbiguityR1,
@@ -62,6 +70,7 @@ RANKING_ARTIFACT_TYPE = (
     "EVENT_CANDIDATE_RANKING_V1_2_SHADOW_SHORTLIST_PATCH"
 )
 BUNDLE_ARTIFACT_TYPE = "EVENT_CANDIDATE_REVIEW_BUNDLE_R1_MANIFEST"
+GROUPING_ARTIFACT_TYPE = "EVENT_CANDIDATE_GROUPING_R1"
 SELECTION_ARTIFACT_TYPE = "EVENT_CANDIDATE_SELECTION_R1"
 PROVENANCE_ARTIFACT_TYPE = "CANDIDATE_SELECTION_INTEGRATION_PROVENANCE_R1"
 PUBLIC_ID_PATTERN = re.compile(r"(shot_\d{4}_track_\d{4})$")
@@ -77,6 +86,9 @@ class CandidateHandoffR1Service:
         self.db = db
         self.storage = LocalStorage()
         self.artifacts = ArtifactRepository(db)
+        self.lazy_media = LazyCandidateMediaMaterializer(
+            storage_root=self.storage.storage_root
+        )
 
     @staticmethod
     def _load_json(path: Path) -> dict[str, Any]:
@@ -219,6 +231,121 @@ class CandidateHandoffR1Service:
             )
         return artifact, document, ranking_id, shortlist_patch_id
 
+    def _grouping_context(
+        self,
+        *,
+        project: Project,
+        revision_id: str,
+        event_id: str,
+        scene_id: str,
+        ranking: dict[str, Any],
+        ranking_id: str,
+        shortlist_patch_id: str,
+    ) -> tuple[Artifact, dict[str, Any]]:
+        rows = self.db.scalars(
+            select(Artifact).where(
+                Artifact.project_id == project.project_id,
+                Artifact.artifact_type == GROUPING_ARTIFACT_TYPE,
+            )
+        ).all()
+        matches = [
+            row
+            for row in rows
+            if row.match_id == project.match_id
+            and (row.metadata_ or {}).get("revision_id") == revision_id
+            and (row.metadata_ or {}).get("event_id") == event_id
+            and (row.metadata_ or {}).get("scene_id") == scene_id
+            and (row.metadata_ or {}).get("shortlist_patch_id")
+            == shortlist_patch_id
+            and (row.metadata_ or {}).get("candidate_grouping_policy")
+            == CANDIDATE_GROUPING_POLICY_VERSION
+            and (row.metadata_ or {}).get("status") == "READY"
+        ]
+        if not matches:
+            raise CandidateRecommendationNotPrepared(
+                "CANDIDATE_GROUPING_MISSING"
+            )
+        matches.sort(key=lambda row: row.created_at, reverse=True)
+        artifact = matches[0]
+        try:
+            document = self._load_json(
+                self._prepared_artifact_path(
+                    artifact,
+                    kind="CANDIDATE_GROUPING",
+                )
+            )
+        except CandidateRecommendationNotPrepared:
+            raise
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise CandidateRecommendationNotPrepared(
+                "CANDIDATE_GROUPING_PROVENANCE_MISMATCH"
+            ) from exc
+
+        groups = document.get("groups")
+        if (
+            document.get("schema_version")
+            != CANDIDATE_GROUPING_SCHEMA_VERSION
+            or document.get("policy_version")
+            != CANDIDATE_GROUPING_POLICY_VERSION
+            or document.get("ranking_id") != ranking_id
+            or document.get("shortlist_patch_id")
+            != shortlist_patch_id
+            or document.get("revision_id") != revision_id
+            or document.get("event_id") != event_id
+            or document.get("scene_id") != scene_id
+            or document.get("automatic_target_confirmation") is not False
+            or document.get("grouping_is_identity_confirmation") is not False
+            or not isinstance(groups, list)
+            or not groups
+        ):
+            raise CandidateRecommendationNotPrepared(
+                "CANDIDATE_GROUPING_PROVENANCE_MISMATCH"
+            )
+
+        expected_candidate_ids = {
+            public_candidate_id(str(row["candidate_id"]))
+            for row in ranking.get("shortlist") or []
+        }
+        seen_members: set[str] = set()
+        representatives: set[str] = set()
+        for group in groups:
+            if not isinstance(group, dict):
+                raise CandidateRecommendationNotPrepared(
+                    "CANDIDATE_GROUPING_PROVENANCE_MISMATCH"
+                )
+            representative = str(
+                group.get("representative_candidate_id") or ""
+            )
+            members = [
+                str(value)
+                for value in group.get("member_candidate_ids") or []
+            ]
+            if (
+                not representative
+                or representative not in members
+                or representative in representatives
+                or not members
+                or len(members) != len(set(members))
+                or seen_members.intersection(members)
+            ):
+                raise CandidateRecommendationNotPrepared(
+                    "CANDIDATE_GROUPING_PROVENANCE_MISMATCH"
+                )
+            representatives.add(representative)
+            seen_members.update(members)
+
+        if (
+            seen_members != expected_candidate_ids
+            or int(document.get("source_candidate_count", -1))
+            != len(expected_candidate_ids)
+            or int(document.get("display_candidate_count", -1))
+            != len(groups)
+        ):
+            raise CandidateRecommendationNotPrepared(
+                "CANDIDATE_GROUPING_PROVENANCE_MISMATCH"
+            )
+        return artifact, document
+
     def _bundle_artifact(
         self,
         *,
@@ -275,9 +402,39 @@ class CandidateHandoffR1Service:
             event_id=event_id,
             scene_id=scene_id,
         )
+        grouping_artifact, grouping = self._grouping_context(
+            project=project,
+            revision_id=revision_id,
+            event_id=event_id,
+            scene_id=scene_id,
+            ranking=ranking,
+            ranking_id=ranking_id,
+            shortlist_patch_id=patch_id,
+        )
+        grouping_sha256 = str(
+            (grouping_artifact.metadata_ or {}).get("sha256") or ""
+        )
+        ranking_by_candidate_id = {
+            public_candidate_id(str(row["candidate_id"])): row
+            for row in ranking["shortlist"]
+        }
+
         candidates: list[EventCandidateRecommendationRead] = []
-        for shortlist_rank, row in enumerate(ranking["shortlist"], start=1):
-            candidate_id = public_candidate_id(str(row["candidate_id"]))
+        groups = sorted(
+            grouping["groups"],
+            key=lambda row: int(
+                row["representative_shortlist_rank"]
+            ),
+        )
+        for group in groups:
+            candidate_id = str(
+                group["representative_candidate_id"]
+            )
+            row = ranking_by_candidate_id.get(candidate_id)
+            if row is None:
+                raise CandidateRecommendationNotPrepared(
+                    "CANDIDATE_GROUPING_PROVENANCE_MISMATCH"
+                )
             bundle_artifact = self._bundle_artifact(
                 project_id=project.project_id,
                 shortlist_patch_id=patch_id,
@@ -286,7 +443,8 @@ class CandidateHandoffR1Service:
             try:
                 manifest = self._load_json(
                     self._prepared_artifact_path(
-                        bundle_artifact, kind="REVIEW_BUNDLE"
+                        bundle_artifact,
+                        kind="REVIEW_BUNDLE",
                     )
                 )
             except CandidateRecommendationNotPrepared:
@@ -295,28 +453,64 @@ class CandidateHandoffR1Service:
                 raise CandidateRecommendationNotPrepared(
                     f"REVIEW_BUNDLE_PROVENANCE_MISMATCH:{candidate_id}"
                 ) from exc
+
+            member_candidate_ids = [
+                str(value)
+                for value in group["member_candidate_ids"]
+            ]
             if (
                 manifest.get("candidate_id") != candidate_id
                 or manifest.get("candidate_media_id") != candidate_id
                 or manifest.get("ranking_id") != ranking_id
                 or manifest.get("shortlist_patch_id") != patch_id
+                or manifest.get("candidate_grouping_policy")
+                != CANDIDATE_GROUPING_POLICY_VERSION
+                or manifest.get("candidate_grouping_sha256")
+                != grouping_sha256
+                or manifest.get("candidate_group_id")
+                != group["candidate_group_id"]
+                or list(manifest.get("group_member_candidate_ids") or [])
+                != member_candidate_ids
+                or manifest.get("grouping_is_identity_confirmation")
+                is not False
             ):
                 raise CandidateRecommendationNotPrepared(
                     f"REVIEW_BUNDLE_PROVENANCE_MISMATCH:{candidate_id}"
                 )
+
             quality = manifest["quality"]
             base = (
                 f"/api/v1/event-candidate-recommendations/{patch_id}"
                 f"/candidates/{candidate_id}/media"
             )
             project_query = f"?project_id={project.project_id}"
+            grouping_reason_codes = list(
+                group.get("grouping_reason_codes") or []
+            )
+            risk_codes = list(
+                quality.get("purity_diagnostics", {}).get(
+                    "reason_codes",
+                    [],
+                )
+            )
+            if len(member_candidate_ids) > 1:
+                risk_codes.append("POSSIBLE_FRAGMENT_DUPLICATE_GROUP")
+
+            reason_codes = list(
+                row.get("shortlist_patch_reason_codes") or []
+            )
+            if len(member_candidate_ids) > 1:
+                reason_codes.append("FRAGMENT_GROUP_REPRESENTATIVE")
+
             candidates.append(
                 EventCandidateRecommendationRead(
                     ranking_version=RANKING_VERSION,
                     ranking_id=ranking_id,
                     shortlist_patch_id=patch_id,
                     candidate_id=candidate_id,
-                    shortlist_rank=shortlist_rank,
+                    shortlist_rank=int(
+                        group["representative_shortlist_rank"]
+                    ),
                     global_rank=int(
                         row.get("original_global_rank", row.get("rank"))
                     ),
@@ -344,16 +538,14 @@ class CandidateHandoffR1Service:
                             f"{base}/reference_gallery{project_query}"
                         ),
                     ),
-                    reason_codes=list(
-                        row.get("shortlist_patch_reason_codes") or []
-                    ),
-                    risk_codes=list(
-                        quality.get("purity_diagnostics", {}).get(
-                            "reason_codes", []
-                        )
-                    ),
-                    possible_fragment_duplicate=bool(
-                        manifest.get("possible_fragment_duplicate", False)
+                    reason_codes=reason_codes,
+                    risk_codes=sorted(set(risk_codes)),
+                    candidate_group_id=str(group["candidate_group_id"]),
+                    group_member_candidate_ids=member_candidate_ids,
+                    grouped_candidate_count=len(member_candidate_ids),
+                    grouping_reason_codes=grouping_reason_codes,
+                    possible_fragment_duplicate=(
+                        len(member_candidate_ids) > 1
                     ),
                     automatic_target_confirmation=False,
                 )
@@ -366,9 +558,52 @@ class CandidateHandoffR1Service:
             event_id=event_id,
             scene_id=scene_id,
             source_video_asset_id=source_video_asset_id,
+            source_candidate_count=int(
+                grouping["source_candidate_count"]
+            ),
+            display_candidate_count=int(
+                grouping["display_candidate_count"]
+            ),
+            candidate_grouping_policy=(
+                CANDIDATE_GROUPING_POLICY_VERSION
+            ),
             candidates=candidates,
             automatic_target_confirmation=False,
             production_recommendation_ui="BLOCKED",
+        )
+
+    def _lazy_source_video_path(
+        self,
+        *,
+        project: Project,
+        source_video_sha256: str,
+    ) -> Path:
+        if len(source_video_sha256) != 64:
+            raise ValueError("Candidate source video SHA-256 is invalid.")
+        rows = self.db.scalars(
+            select(MediaAsset).where(
+                MediaAsset.match_id == project.match_id,
+                MediaAsset.sha256 == source_video_sha256,
+            )
+        ).all()
+        rows.sort(
+            key=lambda row: (
+                row.asset_type != "HIGHLIGHT_SCENE_CLIP",
+                row.created_at,
+            )
+        )
+        for asset in rows:
+            try:
+                path = self.storage.resolve_path(asset.file_path)
+            except ValueError:
+                continue
+            if len(str(path)) >= 248 and not str(path).startswith("\\\\?\\"):
+                path = Path("\\\\?\\" + str(path))
+            if path.is_file() and sha256_file(path) == source_video_sha256:
+                return path
+        raise ValueError(
+            "The immutable source video required for lazy candidate media "
+            "is missing or changed."
         )
 
     def resolve_media(
@@ -386,19 +621,54 @@ class CandidateHandoffR1Service:
         )
         manifest_path = self._artifact_path(artifact)
         manifest = self._load_json(manifest_path)
-        record = (manifest.get("files") or {}).get(media_name)
-        if not isinstance(record, Mapping):
-            raise ValueError("Candidate media is not allowlisted.")
         root = manifest_path.parent.resolve()
-        path = (root / str(record.get("path") or "")).resolve()
-        if (
-            not path.is_relative_to(root)
-            or not path.is_file()
-            or sha256_file(path) != record.get("sha256")
-        ):
-            raise ValueError("Candidate media integrity validation failed.")
-        mime = "video/mp4" if path.suffix.lower() == ".mp4" else "image/jpeg"
-        return path, mime
+
+        record = (manifest.get("files") or {}).get(media_name)
+        if isinstance(record, Mapping):
+            path = (root / str(record.get("path") or "")).resolve()
+            if (
+                not path.is_relative_to(root)
+                or not path.is_file()
+                or sha256_file(path) != record.get("sha256")
+            ):
+                raise ValueError(
+                    "Candidate media integrity validation failed."
+                )
+            mime = (
+                "video/mp4"
+                if path.suffix.lower() == ".mp4"
+                else "image/jpeg"
+            )
+            return path, mime
+
+        lazy_spec = (manifest.get("lazy_media") or {}).get(media_name)
+        if not isinstance(lazy_spec, Mapping):
+            raise ValueError("Candidate media is not allowlisted.")
+
+        source_video_path: Path | None = None
+        if str(lazy_spec.get("kind") or "") in {
+            "FIRST_MIDDLE_LAST",
+            "TRACKLET_VIDEO",
+        }:
+            source_video_path = self._lazy_source_video_path(
+                project=project,
+                source_video_sha256=str(
+                    manifest.get("source_video_sha256") or ""
+                ),
+            )
+        manifest_sha256 = str(
+            (artifact.metadata_ or {}).get("sha256") or ""
+        )
+        try:
+            return self.lazy_media.materialize(
+                bundle_root=root,
+                bundle_manifest_sha256=manifest_sha256,
+                manifest=manifest,
+                media_name=media_name,
+                source_video_path=source_video_path,
+            )
+        except LazyCandidateMediaError as exc:
+            raise ValueError(str(exc)) from exc
 
     def create_selection(
         self,
@@ -426,6 +696,31 @@ class CandidateHandoffR1Service:
             raise CandidateSelectionProvenanceMismatch(
                 "The submitted ranking identity is not the served V1.2 ranking."
             )
+        grouping_artifact, grouping = self._grouping_context(
+            project=project,
+            revision_id=revision_id,
+            event_id=event_id,
+            scene_id=scene_id,
+            ranking=ranking,
+            ranking_id=actual_ranking_id,
+            shortlist_patch_id=actual_patch_id,
+        )
+        selected_group = next(
+            (
+                group
+                for group in grouping["groups"]
+                if str(group["representative_candidate_id"])
+                == candidate_id
+            ),
+            None,
+        )
+        if selected_group is None:
+            raise CandidateSelectionProvenanceMismatch(
+                "The selected candidate is not a served group representative."
+            )
+        grouping_sha256 = str(
+            (grouping_artifact.metadata_ or {}).get("sha256") or ""
+        )
         ranking_row = next(
             (
                 row
@@ -445,11 +740,30 @@ class CandidateHandoffR1Service:
         )
         manifest_path = self._artifact_path(bundle_artifact)
         manifest = self._load_json(manifest_path)
+        manifest_sha256 = sha256_file(manifest_path)
         if verify_manifest(manifest_path.parent, manifest):
             raise ValueError("Candidate review bundle integrity validation failed.")
         if manifest.get("source_video_sha256") != source_video.sha256:
             raise CandidateSelectionProvenanceMismatch(
                 "The selected candidate bundle targets a different source video."
+            )
+        expected_group_members = [
+            str(value)
+            for value in selected_group["member_candidate_ids"]
+        ]
+        if (
+            manifest.get("candidate_grouping_policy")
+            != CANDIDATE_GROUPING_POLICY_VERSION
+            or manifest.get("candidate_grouping_sha256")
+            != grouping_sha256
+            or manifest.get("candidate_group_id")
+            != selected_group["candidate_group_id"]
+            or list(manifest.get("group_member_candidate_ids") or [])
+            != expected_group_members
+            or manifest.get("grouping_is_identity_confirmation") is not False
+        ):
+            raise CandidateSelectionProvenanceMismatch(
+                "The selected candidate grouping provenance does not match."
             )
         identities = {
             public_candidate_id(str(ranking_row["candidate_id"])),
@@ -478,6 +792,16 @@ class CandidateHandoffR1Service:
                 or existing.shortlist_patch_id != shortlist_patch_id
                 or existing.candidate_id != candidate_id
                 or existing.source_video_sha256 != source_video.sha256
+                or existing.candidate_media_bundle_sha256
+                != manifest_sha256
+                or (existing.metadata_ or {}).get(
+                    "candidate_grouping_sha256"
+                )
+                != grouping_sha256
+                or (existing.metadata_ or {}).get(
+                    "candidate_group_id"
+                )
+                != selected_group["candidate_group_id"]
             ):
                 continue
             try:
@@ -513,6 +837,15 @@ class CandidateHandoffR1Service:
             "shortlist_patch_id": shortlist_patch_id,
             "discovery_id": str(manifest["discovery_id"]),
             "candidate_id": candidate_id,
+            "candidate_group_id": str(
+                selected_group["candidate_group_id"]
+            ),
+            "group_member_candidate_ids": expected_group_members,
+            "candidate_grouping_policy": (
+                CANDIDATE_GROUPING_POLICY_VERSION
+            ),
+            "candidate_grouping_sha256": grouping_sha256,
+            "grouping_is_identity_confirmation": False,
             "shot_id": str(manifest["shot_id"]),
             "tracklet_id": str(manifest["tracklet_id"]),
             "user_id": user.user_id,
@@ -520,7 +853,7 @@ class CandidateHandoffR1Service:
             "candidate_manifest_sha256": str(
                 manifest["candidate_manifest_sha256"]
             ),
-            "candidate_media_bundle_sha256": sha256_file(manifest_path),
+            "candidate_media_bundle_sha256": manifest_sha256,
             "source_video_sha256": str(source_video.sha256),
             "reviewed_shot_boundaries_sha256": str(
                 manifest["reviewed_shot_boundaries_sha256"]
@@ -547,7 +880,7 @@ class CandidateHandoffR1Service:
                 candidate_manifest_sha256=str(
                     manifest["candidate_manifest_sha256"]
                 ),
-                candidate_media_bundle_sha256=sha256_file(manifest_path),
+                candidate_media_bundle_sha256=manifest_sha256,
                 source_video_sha256=str(source_video.sha256),
                 reviewed_shot_boundaries_sha256=str(
                     manifest["reviewed_shot_boundaries_sha256"]
@@ -562,6 +895,15 @@ class CandidateHandoffR1Service:
                 metadata_={
                     "automatic_target_confirmation": False,
                     "frozen_source_candidate_id": ranking_row["candidate_id"],
+                    "candidate_group_id": str(
+                        selected_group["candidate_group_id"]
+                    ),
+                    "group_member_candidate_ids": expected_group_members,
+                    "candidate_grouping_policy": (
+                        CANDIDATE_GROUPING_POLICY_VERSION
+                    ),
+                    "candidate_grouping_sha256": grouping_sha256,
+                    "grouping_is_identity_confirmation": False,
                 },
             )
             self.db.add(row)
@@ -576,6 +918,14 @@ class CandidateHandoffR1Service:
                     "selection_id": selection_id,
                     "sha256": selection_sha,
                     "candidate_id": candidate_id,
+                    "candidate_group_id": str(
+                        selected_group["candidate_group_id"]
+                    ),
+                    "group_member_candidate_ids": expected_group_members,
+                    "candidate_grouping_policy": (
+                        CANDIDATE_GROUPING_POLICY_VERSION
+                    ),
+                    "candidate_grouping_sha256": grouping_sha256,
                     "shortlist_patch_id": shortlist_patch_id,
                     "owner_id": user.user_id,
                 },
