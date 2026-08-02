@@ -1,0 +1,57 @@
+{
+  "schema_version": "kickclip.backend_r1_v1_v2_adapter_manifest.v1",
+  "integration_path": "B.ADD_THIN_BACKEND_ADAPTER_TO_V1_V2_STAGES",
+  "production_r3_directory_assumed": false,
+  "global_id_v7_aliased_to_v6": false,
+  "observation_copy_used_as_tracking_success": false,
+  "synthetic_tracking_used_in_production": false,
+  "automatic_target_confirmation": false,
+  "selection_aware_video_adapter": true,
+  "reviewed_shot_boundary_translation": true,
+  "runtime_candidate_evidence_materialization": true,
+  "confirmed_memory_revision_scoring_safety_gate": true,
+  "live_frozen_runtime_verified": false,
+  "source_files": [
+    {
+      "path": "app/domains/candidate_handoff_r1/r3_adapter.py",
+      "sha256": "7fb3a1476ded640e717a7d961da80f414957f16f71be384a6459e39f57531d55"
+    },
+    {
+      "path": "app/domains/candidate_handoff_r1/runtime/r1_v1_v2_adapter_cli.py",
+      "sha256": "a90d7f511a4eefaa0049d2aa62e839b793608901a39d609fce9b20b49c324b86"
+    },
+    {
+      "path": "app/domains/candidate_handoff_r1/runtime/verify_r1_v1_v2_adapter.py",
+      "sha256": "a81196d6c8dd209df46f7de0dc22f289683de1e43c0b2ab95fc0f51f4dd28c23"
+    },
+    {
+      "path": "app/domains/candidate_handoff_r1/runtime/verify_scene_target_selection_source.py",
+      "sha256": "5c072dc026e59f335689e03a598138d0c5e01fef642d84dd4466777baf2f1afe"
+    },
+    {
+      "path": "app/domains/candidate_handoff_r1/runtime_sync.py",
+      "sha256": "95ac4d933fa3f6346f9236a6d40ed3cc74b4e740409b2de7790e76094c730516"
+    },
+    {
+      "path": "app/domains/tracking/r1_executor.py",
+      "sha256": "0aa96c272f0242deb9efc72c11a4b0f2d0ee9bf12e3677a4655de40aa53bac0f"
+    },
+    {
+      "path": "app/domains/tracking/process_runner.py",
+      "sha256": "155a6a1ce9b27b49364c39fdd746324d47f9842deedf8fdd5646c0a29262b79b"
+    },
+    {
+      "path": "app/domains/tracking/verifier.py",
+      "sha256": "b9f5252e067dda4c6b02e9959417bcb175320c60b5d08bcd13a19732a3a3c82c"
+    }
+  ],
+  "known_runtime_blockers": [
+    "global_ID_tracking_upgrade_v6/stage2b1_extract_frozen_tracking_reid_embeddings_v6.py missing",
+    "RF-DETR checkpoint SHA-256 5d1d05cf78b6a777430430955d0e745ce5c61913c659b2e96ae5deddbd1a3a94 missing",
+    "Sports OSNet checkpoint SHA-256 8d5b2fd8763db34c2aad69810466adf413f0426d9f8119d322227e0e639c5fbd missing",
+    "provided E2E does not load a new backend memory revision before the next candidate search",
+    "provided E2E CLI has no DIFFERENT_PLAYER/UNREVIEWABLE candidate resume contract",
+    "selection-anchor suffix leaves the selected-shot prefix unresolved unless a reverse same-shot source entrypoint is supplied",
+    "provided E2E may require internal MEMORY/SEGMENT visual-review gates not exposed by the four-state R1 API"
+  ]
+}

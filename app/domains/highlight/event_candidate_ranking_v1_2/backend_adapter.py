@@ -28,8 +28,7 @@ class EventCandidateRankingV12BackendAdapter:
         self.storage = LocalStorage()
         self.artifacts = ArtifactRepository(db)
         self.package_root = (
-            self.storage.project_root
-            / "configs/models/event_candidate_ranking/"
+            self.storage.project_root / "configs/models/event_candidate_ranking/"
             "target_centric_tracking_event_candidate_ranking_v1_2"
         )
 
@@ -39,6 +38,13 @@ class EventCandidateRankingV12BackendAdapter:
         if not isinstance(value, dict):
             raise ValueError("Expected a JSON object artifact.")
         return value
+
+    @staticmethod
+    def _access_path(path: Path) -> Path:
+        value = str(path)
+        if value.startswith("\\\\?\\") or value.startswith("//?/"):
+            return path
+        return Path("\\\\?\\" + value) if len(value) >= 248 else path
 
     def _owned_source(
         self,
@@ -58,13 +64,12 @@ class EventCandidateRankingV12BackendAdapter:
             raise ValueError(f"Required artifact is missing: {artifact_type}")
         metadata = artifact.metadata_ or {}
         if (
-            artifact_type
-            == "EVENT_CANDIDATE_RANKING_V1_1_2A_SHADOW"
+            artifact_type == "EVENT_CANDIDATE_RANKING_V1_1_2A_SHADOW"
             and metadata.get("owner_id") != user.user_id
             and not user.developer_mode_enabled
         ):
             raise ValueError("Source ranking artifact is not accessible.")
-        path = self.storage.resolve_path(artifact.file_path)
+        path = self._access_path(self.storage.resolve_path(artifact.file_path))
         expected = str(metadata.get("sha256") or "")
         if len(expected) != 64 or sha256_file(path) != expected:
             raise ValueError("Source artifact SHA-256 mismatch.")
@@ -93,8 +98,10 @@ class EventCandidateRankingV12BackendAdapter:
         )
         source_path = self.storage.resolve_path(source.file_path)
         shots_path = self.storage.resolve_path(shots.file_path)
-        source_sha = sha256_file(source_path)
-        shots_sha = sha256_file(shots_path)
+        source_access_path = self._access_path(source_path)
+        shots_access_path = self._access_path(shots_path)
+        source_sha = sha256_file(source_access_path)
+        shots_sha = sha256_file(shots_access_path)
         cache_key = canonical_sha256(
             {
                 "source_ranking_artifact_id": source.artifact_id,
@@ -110,19 +117,50 @@ class EventCandidateRankingV12BackendAdapter:
                 ),
             }
         )
-        existing = self.db.scalar(
+        existing_rows = self.db.scalars(
             select(Artifact).where(
                 Artifact.project_id == project.project_id,
                 Artifact.artifact_type == ARTIFACT_TYPE,
             )
-        )
-        if existing is not None:
-            if (existing.metadata_ or {}).get("cache_key") != cache_key:
-                raise ValueError("Existing V1.2 patch has different inputs.")
-            return existing
+        ).all()
+        source_metadata = source.metadata_ or {}
+        identity = {
+            "cache_key": cache_key,
+            "revision_id": source_metadata.get("revision_id"),
+            "event_id": source_metadata.get("event_id"),
+            "scene_id": source_metadata.get("scene_id"),
+            "source_ranking_artifact_id": source.artifact_id,
+            "reviewed_shots_artifact_id": shots.artifact_id,
+        }
+        matching = [
+            row
+            for row in existing_rows
+            if all(
+                (row.metadata_ or {}).get(key) == value
+                for key, value in identity.items()
+            )
+        ]
+        if matching:
+            matching.sort(key=lambda row: row.created_at, reverse=True)
+            for row in matching:
+                metadata = row.metadata_ or {}
+                try:
+                    path = self._access_path(
+                        self.storage.resolve_path(row.file_path)
+                    )
+                except ValueError:
+                    continue
+                expected = str(metadata.get("sha256") or "")
+                if (
+                    path.is_file()
+                    and len(expected) == 64
+                    and sha256_file(path) == expected
+                    and metadata.get("automatic_target_confirmation") is False
+                ):
+                    return row
 
-        source_document = self._load_json(source_path)
-        shots_document = self._load_json(shots_path)
+        source_document = self._load_json(source_access_path)
+        shots_document = self._load_json(shots_access_path)
         input_document = {
             "source_ranking_artifact_id": source.artifact_id,
             "source_ranking_sha256": source_sha,
@@ -133,9 +171,7 @@ class EventCandidateRankingV12BackendAdapter:
         Draft202012Validator(
             self._load_json(self.package_root / "input_schema.json")
         ).validate(input_document)
-        output = EventCandidateRankingV12ShortlistPatch(
-            self.package_root
-        ).run(
+        output = EventCandidateRankingV12ShortlistPatch(self.package_root).run(
             source_ranking=source_document,
             reviewed_shots=shots_document,
             source_ranking_artifact_id=source.artifact_id,
@@ -146,13 +182,15 @@ class EventCandidateRankingV12BackendAdapter:
             self._load_json(self.package_root / "output_schema.json")
         ).validate(output)
         ranking_id = generate_prefixed_id("ecrankv12")
-        output_root = (
-            source_path.parent
-            / "v1_2_shortlist_patches"
+        logical_output_root = (
+            self.storage.storage_root
+            / "event_candidate_rankings_v1_2"
+            / project.project_id
             / ranking_id
         ).resolve()
-        if not output_root.is_relative_to(source_path.parent):
-            raise ValueError("V1.2 output escapes the source ranking root.")
+        if not logical_output_root.is_relative_to(self.storage.storage_root):
+            raise ValueError("V1.2 output escapes immutable storage.")
+        output_root = self._access_path(logical_output_root)
         output_root.mkdir(parents=True, exist_ok=False)
         output_path = output_root / "event_candidate_ranking_v1_2.json"
         output_path.write_text(
@@ -165,15 +203,15 @@ class EventCandidateRankingV12BackendAdapter:
             project_id=project.project_id,
             analysis_job_id=None,
             artifact_type=ARTIFACT_TYPE,
-            file_path=output_path.relative_to(
-                self.storage.project_root
-            ).as_posix(),
+            file_path=(logical_output_root / output_path.name)
+            .relative_to(self.storage.project_root)
+            .as_posix(),
             mime_type="application/json",
             metadata_={
                 "ranking_id": ranking_id,
-                "revision_id": (source.metadata_ or {}).get("revision_id"),
-                "scene_id": (source.metadata_ or {}).get("scene_id"),
-                "event_id": (source.metadata_ or {}).get("event_id"),
+                "revision_id": source_metadata.get("revision_id"),
+                "scene_id": source_metadata.get("scene_id"),
+                "event_id": source_metadata.get("event_id"),
                 "source_ranking_artifact_id": source.artifact_id,
                 "source_ranking_sha256": source_sha,
                 "reviewed_shots_artifact_id": shots.artifact_id,
@@ -187,4 +225,3 @@ class EventCandidateRankingV12BackendAdapter:
         )
         self.db.commit()
         return artifact
-

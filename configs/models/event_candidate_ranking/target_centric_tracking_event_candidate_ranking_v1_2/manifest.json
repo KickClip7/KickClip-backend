@@ -18,7 +18,7 @@
     "app/domains/highlight/event_candidate_ranking_v1_2/__init__.py": "e75cd9a3427aff8865b5e49049330a8be783b559ef47a7cb026c962cd445c23a",
     "app/domains/highlight/event_candidate_ranking_v1_2/contract.py": "32c2bb35fccd2f1351e4d82f58eed1df14aff6ae73fcba4f9d6570f375837259",
     "app/domains/highlight/event_candidate_ranking_v1_2/service.py": "71c110c7723d0fda7a6b58e0200babe0e30fa616115df12aafa1aace8b507f09",
-    "app/domains/highlight/event_candidate_ranking_v1_2/backend_adapter.py": "da801d4505e0ddad70c190804616197fcff9fc692f41e4d953ec0a22118462d6",
+    "app/domains/highlight/event_candidate_ranking_v1_2/backend_adapter.py": "2f032cfea33f5d3b450121f590e4e5ce99049f01fdc3560af254bde68cae4e82",
     "app/domains/highlight/event_candidate_ranking_v1_2/verifier.py": "a008527c0d11e7e325b65c8a5a6f6af2d6ba12b0b4ab917037abaf39c9dccff1",
     "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1_2/shortlist_policy.json": "cd33cc9ce825095b68abc06029112d4ec8d36ab4be6540f74f4884cbd08a5cca",
     "configs/models/event_candidate_ranking/target_centric_tracking_event_candidate_ranking_v1_2/input_schema.json": "f3f1106534e0bd82e68b28133d23972e14839359f612c7e34e4b6f3edc88632c",

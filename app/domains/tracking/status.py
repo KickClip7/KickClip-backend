@@ -8,6 +8,7 @@ class TrackingBackendStatus(str, Enum):
     WAITING_CROSS_SHOT_CONFIRMATION = "WAITING_CROSS_SHOT_CONFIRMATION"
     WAITING_SEGMENT_REVIEW = "WAITING_SEGMENT_REVIEW"
     COMPLETED = "COMPLETED"
+    COMPLETED_WITH_UNRESOLVED_GAPS = "COMPLETED_WITH_UNRESOLVED_GAPS"
     COMPLETED_SAFE_BLOCK = "COMPLETED_SAFE_BLOCK"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -21,6 +22,7 @@ WAITING_STATUSES = {
 
 TERMINAL_STATUSES = {
     TrackingBackendStatus.COMPLETED.value,
+    TrackingBackendStatus.COMPLETED_WITH_UNRESOLVED_GAPS.value,
     TrackingBackendStatus.COMPLETED_SAFE_BLOCK.value,
     TrackingBackendStatus.FAILED.value,
     TrackingBackendStatus.CANCELLED.value,
@@ -32,6 +34,7 @@ def tracking_progress(status: str, current_stage: str | None = None) -> int:
         return 0
     if status in {
         TrackingBackendStatus.COMPLETED.value,
+        TrackingBackendStatus.COMPLETED_WITH_UNRESOLVED_GAPS.value,
         TrackingBackendStatus.COMPLETED_SAFE_BLOCK.value,
     }:
         return 100
@@ -79,6 +82,8 @@ def tracking_outcome(status: str, error_type: str | None) -> str:
         return "TRACKING_NEEDS_CONFIRMATION"
     if status == TrackingBackendStatus.COMPLETED.value:
         return "TRACKING_COMPLETED"
+    if status == TrackingBackendStatus.COMPLETED_WITH_UNRESOLVED_GAPS.value:
+        return "TRACKING_COMPLETED_WITH_UNRESOLVED_GAPS"
     if status == TrackingBackendStatus.COMPLETED_SAFE_BLOCK.value:
         return "TRACKING_COMPLETED_SAFE_BLOCK"
     if status == TrackingBackendStatus.FAILED.value:

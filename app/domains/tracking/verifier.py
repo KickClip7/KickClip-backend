@@ -361,15 +361,9 @@ class SceneTargetTrackingInstallationVerifier:
                 message="Selection-assisted R3 runtime resources are missing.",
                 components=components,
             )
-        if not r3_script.is_relative_to(tracking_root):
-            return TrackingInstallationStatus(
-                enabled=True,
-                available=False,
-                checked_at=now,
-                code="SCENE_TARGET_RUNTIME_CONFIGURATION_INVALID",
-                message="R3 script must be under TRACKING_PROJECT_ROOT.",
-                components=components,
-            )
+        # The R1 adapter is backend-owned and may intentionally live outside the
+        # supplied research root. It is passed an explicit absolute path and hash-
+        # verified through TRACKING_R3_MANIFEST_PATH; no production_r3 tree is assumed.
         for label, (path, expected) in manifests.items():
             expected = expected.strip().lower()
             actual = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -409,9 +403,8 @@ class SceneTargetTrackingInstallationVerifier:
                 str(smoke_verifier),
                 "--project-root",
                 str(tracking_root),
-                "--r3-script",
+                "--adapter-script",
                 str(r3_script),
-                "--synthetic-assisted-smoke",
             ],
             cwd=tracking_root,
         )
@@ -421,15 +414,17 @@ class SceneTargetTrackingInstallationVerifier:
                 available=False,
                 checked_at=now,
                 code="R3_WRAPPER_VERIFICATION_FAILED",
-                message="R3 wrapper synthetic assisted smoke failed.",
+                message="R1 V1/V2 adapter or a required frozen dependency failed verification.",
                 components=components,
             )
         required_claims = {
-            "r3_wrapper_verified",
-            "sports_osnet_strict_loader_verified",
-            "selection_schema_compatible",
-            "reference_schema_compatible",
-            "synthetic_assisted_smoke_verified",
+            "backend_r1_v1_v2_adapter_verified",
+            "research_sources_verified",
+            "strict_dependency_check_verified",
+            "memory_passthrough_contract_verified",
+            "memory_revision_safety_gate_verified",
+            "selection_anchor_adapter_verified",
+            "global_ID_tracking_upgrade_v7_is_not_aliased_to_v6",
         }
         if not all(smoke_result.get(key) is True for key in required_claims):
             return TrackingInstallationStatus(
@@ -441,8 +436,13 @@ class SceneTargetTrackingInstallationVerifier:
                 components=components,
             )
         components["R3_WRAPPER_VERIFIED"] = True
-        components["FULL_TARGET_SELECTION_E2E_VERIFIED"] = True
-        components["FULL_SCENE_SELECTION_TRACKING_E2E_VERIFIED"] = True
+        # Source/dependency verification is not a live cross-shot E2E result.
+        components["FULL_TARGET_SELECTION_E2E_VERIFIED"] = bool(
+            smoke_result.get("live_frozen_runtime_verified") is True
+        )
+        components["FULL_SCENE_SELECTION_TRACKING_E2E_VERIFIED"] = bool(
+            smoke_result.get("live_frozen_runtime_verified") is True
+        )
         event_package_root = (
             get_project_root()
             / "configs/models/event_candidate_ranking/"
@@ -487,7 +487,7 @@ class SceneTargetTrackingInstallationVerifier:
             available=True,
             checked_at=now,
             code="SCENE_TARGET_TRACKING_AVAILABLE",
-            message="Selection-assisted R3 runtime verification passed.",
+            message="Backend R1 adapter and frozen runtime dependencies are verified; live E2E remains a separate acceptance gate.",
             verifier_return_code=0,
             components=components,
         )

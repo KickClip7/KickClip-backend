@@ -202,6 +202,7 @@ class SceneTrackingRead(BaseModel):
     tracking_job_id: str | None
     status: str
     tracking_status: str | None
+    pending_action: str | None = None
     progress: int = Field(default=0, ge=0, le=100)
     current_stage: str | None = None
     retryable: bool = False

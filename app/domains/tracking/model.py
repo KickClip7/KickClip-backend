@@ -15,6 +15,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
 from app.domains.tracking.status import TrackingBackendStatus
+from app.domains.tracking.execution import LEGACY_EXECUTION_KIND
 from app.utils.id_generator import generate_prefixed_id
 
 
@@ -78,6 +79,26 @@ class TrackingJob(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
+    execution_kind: Mapped[str] = mapped_column(
+        String(64), default=LEGACY_EXECUTION_KIND, nullable=False, index=True
+    )
+    pipeline_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    processing_status: Mapped[str] = mapped_column(
+        String(64), default="IDLE", nullable=False
+    )
+    current_shot_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_completed_ambiguity_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    latest_decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    current_memory_revision_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    next_shot_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     pipeline_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
     pipeline_decision: Mapped[str | None] = mapped_column(
         String(255),
@@ -147,4 +168,3 @@ class TrackingJob(Base, TimestampMixin):
     match = relationship("Match")
     project = relationship("Project")
     media_asset = relationship("MediaAsset")
-

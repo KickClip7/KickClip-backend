@@ -9,7 +9,12 @@ from pydantic import BaseModel, ConfigDict
 
 from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
+from app.db.session import SessionLocal
+from app.domains.candidate_handoff_r1.service import (
+    recover_candidate_handoff_state,
+)
 from app.domains.tracking.executor import get_tracking_executor
+from app.domains.tracking.r1_executor import get_r1_tracking_executor
 from app.domains.highlight.scene_ai_task import (
     get_scene_ai_task_executor,
 )
@@ -94,14 +99,22 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        db = SessionLocal()
+        try:
+            recover_candidate_handoff_state(db)
+        finally:
+            db.close()
         executor = get_tracking_executor()
+        r1_executor = get_r1_tracking_executor()
         scene_ai_executor = get_scene_ai_task_executor()
         executor.start()
+        r1_executor.start()
         scene_ai_executor.start()
         try:
             yield
         finally:
             scene_ai_executor.shutdown()
+            r1_executor.shutdown()
             executor.shutdown()
 
     application = FastAPI(

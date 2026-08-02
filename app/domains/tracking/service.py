@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
+import mimetypes
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -20,11 +23,18 @@ from app.domains.tracking.errors import (
 )
 from app.domains.tracking.input_contract import validate_tracking_clip
 from app.domains.tracking.model import TrackingJob
+from app.domains.tracking.execution import LEGACY_EXECUTION_KIND
+from app.domains.candidate_handoff_r1.model import (
+    EventCandidateAmbiguityR1,
+    EventCandidateMemoryRevisionR1,
+    EventCandidateReviewDecisionR1,
+)
 from app.domains.tracking.repository import TrackingJobRepository
 from app.domains.tracking.schema import (
     TrackingAmbiguityConfirmationRequest,
     TrackingArtifactRead,
     TrackingArtifactsResponse,
+    TrackingCandidateRead,
     TrackingErrorRead,
     TrackingJobCreateRequest,
     TrackingJobCreateResponse,
@@ -174,6 +184,7 @@ class TrackingJobService:
                 device=self.settings.TRACKING_DEVICE,
                 reacquisition_mode=self.settings.TRACKING_REACQUISITION_MODE,
                 status=TrackingBackendStatus.QUEUED.value,
+                execution_kind=LEGACY_EXECUTION_KIND,
                 output_directory=str(output_directory),
                 pipeline_state_path=str(output_directory / "pipeline_state.json"),
                 queued_action={"kind": "new"},
@@ -189,15 +200,10 @@ class TrackingJobService:
                     "input_validation": dict(
                         input_validation or metadata.get("validation") or {}
                     ),
+                    "input_artifacts": dict(input_artifacts or {}),
                     **dict(runtime_context or {}),
                 },
             )
-            if input_artifacts:
-                self.artifacts.stage_input_validation_artifacts(
-                    job,
-                    input_artifacts,
-                )
-                job.artifact_index = self.artifacts.collect(job, None)
             self.db.commit()
             self.db.refresh(job)
         except Exception:
@@ -219,7 +225,7 @@ class TrackingJobService:
         key = build_action_key("review", payload.stage.value, payload.decision.value)
         if job.owner_id != user.user_id and not user.developer_mode_enabled:
             raise TrackingConflictError()
-        if job.last_action_key == key:
+        if job.last_action_key == key and job.status not in WAITING_STATUSES:
             self.db.commit()
             return job
 
@@ -321,6 +327,34 @@ class TrackingJobService:
             if job.error_type or job.error_message
             else None
         )
+        latest = (
+            self.db.get(EventCandidateReviewDecisionR1, job.latest_decision_id)
+            if job.latest_decision_id
+            else None
+        )
+        memory = (
+            self.db.get(EventCandidateMemoryRevisionR1, job.current_memory_revision_id)
+            if job.current_memory_revision_id
+            else None
+        )
+        ambiguity = None
+        if job.pending_ambiguity_id:
+            ambiguity = self.db.scalar(
+                select(EventCandidateAmbiguityR1).where(
+                    EventCandidateAmbiguityR1.tracking_job_id == job.tracking_job_id,
+                    EventCandidateAmbiguityR1.ambiguity_id == job.pending_ambiguity_id,
+                )
+            )
+        artifact_readiness = {
+            "pipeline_state": Path(job.pipeline_state_path).is_file(),
+            "timeline": bool(job.timeline_path and Path(job.timeline_path).is_file()),
+            "pending_ambiguity": bool(ambiguity and ambiguity.candidate_ids and ambiguity.candidates),
+            "target_memory": bool(memory and memory.reference_frame_ids and memory.references),
+        }
+        preview_readiness = {
+            "full_frame": bool(job.tracking_preview_path and Path(job.tracking_preview_path).is_file()),
+            "target_centered": bool(job.target_centered_preview_path and Path(job.target_centered_preview_path).is_file()),
+        }
         return TrackingJobResponse(
             job_id=job.tracking_job_id,
             owner_user_id=job.owner_id,
@@ -328,6 +362,9 @@ class TrackingJobService:
             project_id=job.project_id,
             media_asset_id=job.media_asset_id,
             status=TrackingBackendStatus(job.status),
+            execution_kind=job.execution_kind,
+            pipeline_stage=job.pipeline_stage,
+            processing_status=job.processing_status,
             outcome=tracking_outcome(job.status, job.error_type),
             progress=tracking_progress(job.status, job.current_stage),
             retryable=tracking_retryable(job.status, job.error_type),
@@ -335,6 +372,56 @@ class TrackingJobService:
             pipeline_status=job.pipeline_status,
             pipeline_decision=job.pipeline_decision,
             current_stage=job.current_stage,
+            pending_ambiguity_id=job.pending_ambiguity_id,
+            pending_candidates=list(pending.candidates) if pending else [],
+            latest_decision=(
+                {
+                    "decision_id": latest.decision_id,
+                    "ambiguity_id": latest.ambiguity_id,
+                    "candidate_id": latest.candidate_id,
+                    "state": latest.decision_state,
+                    "artifact_sha256": latest.decision_artifact_sha256,
+                }
+                if latest else None
+            ),
+            current_memory_revision=(
+                {
+                    "memory_revision_id": memory.memory_revision_id,
+                    "previous_memory_revision_id": memory.previous_memory_revision_id,
+                    "previous_memory_sha256": memory.previous_memory_sha256,
+                    "new_memory_sha256": memory.new_memory_sha256,
+                    "source_candidate_id": memory.source_candidate_id,
+                    "reference_frame_ids": list(memory.reference_frame_ids),
+                    "references": list(memory.references),
+                    "crop_sha256": (
+                        memory.references[0].get("crop_sha256")
+                        if memory.references else None
+                    ),
+                    "scale_banks": dict(memory.scale_banks),
+                    "artifact_sha256": memory.artifact_sha256,
+                }
+                if memory else None
+            ),
+            next_ambiguity=(
+                {
+                    "ambiguity_id": ambiguity.ambiguity_id,
+                    "shot_id": ambiguity.shot_id,
+                    "status": ambiguity.status,
+                    "candidate_ids": list(ambiguity.candidate_ids),
+                    "candidates": list(ambiguity.candidates),
+                    "artifact_sha256": ambiguity.artifact_sha256,
+                    "full_frame_context_sha256": ambiguity.full_frame_context_sha256,
+                    "shot_clip_sha256": ambiguity.shot_clip_sha256,
+                }
+                if ambiguity else None
+            ),
+            current_shot=job.current_shot_id,
+            next_shot=job.next_shot_id,
+            completed=job.pipeline_stage == "COMPLETED",
+            completed_at=job.completed_at,
+            failure_code=job.failure_code,
+            artifact_readiness=artifact_readiness,
+            preview_readiness=preview_readiness,
             initial_bbox_xyxy=list(job.initial_bbox),
             bbox_format=job.bbox_format,
             device=job.device,
@@ -449,6 +536,12 @@ class TrackingJobService:
             and record.get("kind")
             in {"review_contact_sheet", "review_preview", "ambiguity_contact_sheet"}
         ]
+        candidates = self._public_ambiguity_candidates(
+            job=job,
+            state=state,
+            pending=pending,
+            candidate_ids=candidate_ids,
+        )
         return TrackingPendingActionResponse(
             type=action_type,
             review_stage=(
@@ -463,6 +556,7 @@ class TrackingJobService:
             ),
             shot_id=str(pending["shot_id"]) if pending.get("shot_id") else None,
             candidate_ids=candidate_ids,
+            candidates=candidates,
             recommended_candidate=(
                 str(pending["recommended_candidate"])
                 if pending.get("recommended_candidate")
@@ -471,6 +565,86 @@ class TrackingJobService:
             artifact_keys=sorted(artifact_keys),
             required_action=required,
         )
+
+    def _public_ambiguity_candidates(
+        self,
+        *,
+        job: TrackingJob,
+        state: Mapping[str, Any],
+        pending: Mapping[str, Any],
+        candidate_ids: list[str],
+    ) -> list[TrackingCandidateRead]:
+        if str(pending.get("type") or "") != "CROSS_SHOT_CONFIRMATION":
+            return []
+
+        ambiguity_id = str(pending.get("ambiguity_id") or "")
+        ambiguity = next(
+            (
+                value
+                for value in state.get("ambiguities", [])
+                if isinstance(value, Mapping)
+                and str(value.get("ambiguity_id") or "") == ambiguity_id
+            ),
+            {},
+        )
+        candidate_metadata = {
+            str(value.get("candidate_id")): value
+            for value in ambiguity.get("review_candidates", [])
+            if isinstance(value, Mapping) and value.get("candidate_id")
+        }
+        shot_id = str(pending.get("shot_id") or ambiguity.get("shot_id") or "")
+        safe_shot_id = self.artifacts._safe_component(shot_id)
+        root = self.artifacts.job_root(job)
+
+        rows: list[TrackingCandidateRead] = []
+        for fallback_rank, candidate_id in enumerate(candidate_ids, start=1):
+            safe_candidate_id = self.artifacts._safe_component(candidate_id)
+            metadata = candidate_metadata.get(candidate_id, {})
+            frame_urls: list[str] = []
+            if safe_shot_id and safe_candidate_id:
+                strip = (
+                    root
+                    / "work"
+                    / "shots"
+                    / safe_shot_id
+                    / "candidate_strips"
+                    / f"{safe_candidate_id}.jpg"
+                ).resolve()
+                if strip.is_relative_to(root) and strip.is_file():
+                    mime_type = (
+                        mimetypes.guess_type(strip.name)[0] or "image/jpeg"
+                    )
+                    encoded = base64.b64encode(strip.read_bytes()).decode("ascii")
+                    frame_urls.append(f"data:{mime_type};base64,{encoded}")
+
+            rank_value = metadata.get("retrieval_rank")
+            score_value = metadata.get("retrieval_score")
+            rows.append(
+                TrackingCandidateRead(
+                    candidate_id=candidate_id,
+                    rank=(
+                        int(rank_value)
+                        if rank_value is not None
+                        else fallback_rank
+                    ),
+                    score=(
+                        float(score_value)
+                        if score_value is not None
+                        else None
+                    ),
+                    frame_image_urls=frame_urls,
+                    shot_id=str(metadata.get("shot_id") or "") or None,
+                    tracklet_id=str(metadata.get("tracklet_id") or "") or None,
+                    reviewability=str(metadata.get("reviewability") or "") or None,
+                    best_frame=(int(metadata["best_frame"]) if metadata.get("best_frame") is not None else None),
+                    review_bundle={
+                        key: value
+                        for key, value in metadata.items()
+                        if key.endswith("_path") or key.endswith("_sha256")
+                    },
+                )
+            )
+        return rows
 
     def _load_current_state(self, job: TrackingJob) -> dict[str, Any]:
         state = read_pipeline_state(Path(job.pipeline_state_path))

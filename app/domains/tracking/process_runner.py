@@ -112,59 +112,7 @@ class TrackingProcessRunner:
             "--output-root",
             str(self._output_root()),
         ]
-        scene_context = self._scene_target_context(job)
-        if scene_context is not None:
-            selection_root_value = scene_context.get(
-                "selection_artifact_root"
-            )
-            if not selection_root_value:
-                raise TrackingValidationError(
-                    "Scene target selection artifact root is missing."
-                )
-            selection_root = Path(str(selection_root_value)).resolve()
-            required_paths = {
-                "--tracking-launch-manifest": "tracking_launch_manifest_path",
-                "--shot-boundaries": "shot_boundaries_path",
-                "--target-selection": "target_selection_path",
-                "--target-reference-set": "target_reference_set_path",
-                "--earlier-anchor-decision": "earlier_anchor_decision_path",
-            }
-            for flag, key in required_paths.items():
-                value = scene_context.get(key)
-                if not value:
-                    raise TrackingValidationError(
-                        f"Scene target selection is missing {key}."
-                    )
-                resolved = Path(str(value)).resolve()
-                if not resolved.is_file():
-                    raise TrackingValidationError(
-                        f"Scene target selection file is missing: {key}."
-                    )
-                if key in {
-                    "target_selection_path",
-                    "target_reference_set_path",
-                    "earlier_anchor_decision_path",
-                }:
-                    if not resolved.is_relative_to(selection_root):
-                        raise TrackingValidationError(
-                            "Scene target artifact escapes immutable root."
-                        )
-                    sha_key = {
-                        "target_selection_path": "target_selection_sha256",
-                        "target_reference_set_path": (
-                            "target_reference_set_sha256"
-                        ),
-                        "earlier_anchor_decision_path": (
-                            "earlier_anchor_decision_sha256"
-                        ),
-                    }[key]
-                    expected = str(scene_context.get(sha_key) or "")
-                    actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
-                    if len(expected) != 64 or actual != expected:
-                        raise TrackingValidationError(
-                            "Scene target artifact hash mismatch."
-                        )
-                command.extend([flag, str(resolved)])
+        self._append_scene_target_arguments(command, job)
         if overwrite:
             command.append("--overwrite")
         if not self.settings.TRACKING_PREVIEW_ENABLED:
@@ -191,6 +139,7 @@ class TrackingProcessRunner:
             "--output-root",
             str(self._output_root()),
         ]
+        self._append_scene_target_arguments(command, job)
         kind = str(action.get("kind") or "")
         if kind == "review":
             stage = str(action["stage"])
@@ -205,6 +154,24 @@ class TrackingProcessRunner:
                 command.extend(
                     ["--confirmed-candidate", str(action["candidate_id"])]
                 )
+        elif kind == "candidate_rejected":
+            command.extend(
+                [
+                    "--ambiguity-id",
+                    str(action["ambiguity_id"]),
+                    "--rejected-candidate",
+                    str(action["candidate_id"]),
+                ]
+            )
+        elif kind == "candidate_unreviewable":
+            command.extend(
+                [
+                    "--ambiguity-id",
+                    str(action["ambiguity_id"]),
+                    "--unreviewable-candidate",
+                    str(action["candidate_id"]),
+                ]
+            )
         elif kind != "recovery_resume":
             raise TrackingValidationError("Unsupported tracking resume action.")
 
@@ -330,16 +297,90 @@ class TrackingProcessRunner:
         value = (job.runtime_metadata or {}).get("scene_target_selection")
         return value if isinstance(value, Mapping) else None
 
+    def _append_scene_target_arguments(
+        self,
+        command: list[str],
+        job: TrackingJob,
+    ) -> None:
+        scene_context = self._scene_target_context(job)
+        if scene_context is None:
+            return
+        selection_root_value = scene_context.get("selection_artifact_root")
+        if not selection_root_value:
+            raise TrackingValidationError(
+                "Scene target selection artifact root is missing."
+            )
+        selection_root = Path(str(selection_root_value)).resolve()
+        required_paths = {
+            "--tracking-launch-manifest": "tracking_launch_manifest_path",
+            "--shot-boundaries": "shot_boundaries_path",
+            "--target-selection": "target_selection_path",
+            "--target-reference-set": "target_reference_set_path",
+            "--earlier-anchor-decision": "earlier_anchor_decision_path",
+        }
+        for flag, key in required_paths.items():
+            value = scene_context.get(key)
+            if not value:
+                raise TrackingValidationError(
+                    f"Scene target selection is missing {key}."
+                )
+            resolved = Path(str(value)).resolve()
+            if not resolved.is_file():
+                raise TrackingValidationError(
+                    f"Scene target selection file is missing: {key}."
+                )
+            sha_key = {
+                "tracking_launch_manifest_path": "tracking_launch_manifest_sha256",
+                "shot_boundaries_path": "shot_boundaries_sha256",
+                "target_selection_path": "target_selection_sha256",
+                "target_reference_set_path": "target_reference_set_sha256",
+                "earlier_anchor_decision_path": "earlier_anchor_decision_sha256",
+            }[key]
+            if key != "shot_boundaries_path" and not resolved.is_relative_to(selection_root):
+                raise TrackingValidationError(
+                    "Scene target artifact escapes immutable root."
+                )
+            expected = str(scene_context.get(sha_key) or "")
+            actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            if len(expected) != 64 or actual != expected:
+                raise TrackingValidationError(
+                    f"Scene target artifact hash mismatch: {key}."
+                )
+            command.extend([flag, str(resolved)])
+        memory_value = scene_context.get("current_target_memory_path")
+        if memory_value:
+            memory = Path(str(memory_value)).resolve()
+            expected = str(
+                scene_context.get("current_target_memory_sha256") or ""
+            )
+            actual = hashlib.sha256(memory.read_bytes()).hexdigest() if memory.is_file() else ""
+            if len(expected) != 64 or actual != expected:
+                raise TrackingValidationError(
+                    "Current target memory artifact hash mismatch."
+                )
+            command.extend(
+                [
+                    "--target-memory-revision",
+                    str(memory),
+                    "--target-memory-sha256",
+                    expected,
+                ]
+            )
+        command.extend(
+            [
+                "--candidate-scoring-generation",
+                str(int(scene_context.get("candidate_scoring_generation") or 1)),
+            ]
+        )
+
     def _runner_script(self, job: TrackingJob) -> Path:
         if self._scene_target_context(job) is not None:
-            configured = (
-                self.settings.TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH
-            )
+            configured = self.settings.TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH
             if not configured:
-                configured = str(
-                    self._project_root()
-                    / "target_centric_tracking_v2_production_r3"
-                    / "run_v2_production_r3.py"
+                raise TrackingValidationError(
+                    "TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH must explicitly point "
+                    "to the backend-owned R1 V1/V2 adapter; no production_r3 "
+                    "directory is assumed."
                 )
             return configured_absolute_path(
                 configured,

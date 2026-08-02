@@ -908,6 +908,11 @@ class HighlightWorkflowService:
                         if binding.tracking_job
                         else None
                     ),
+                    pending_action=(
+                        binding.tracking_job.pending_action_type
+                        if binding.tracking_job
+                        else None
+                    ),
                     progress=(
                         tracking_progress(
                             binding.tracking_job.status,

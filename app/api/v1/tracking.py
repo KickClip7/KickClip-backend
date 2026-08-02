@@ -15,6 +15,8 @@ from app.domains.auth.model import User
 from app.domains.tracking.artifacts import TrackingArtifactService
 from app.domains.tracking.errors import TrackingError, TrackingValidationError
 from app.domains.tracking.executor import get_tracking_executor
+from app.domains.tracking.execution import R1_EXECUTION_KIND
+from app.domains.tracking.r1_executor import get_r1_tracking_executor
 from app.domains.tracking.schema import (
     TrackingAmbiguityConfirmationRequest,
     TrackingArtifactsResponse,
@@ -35,6 +37,12 @@ from app.domains.tracking.verifier import (
 
 
 router = APIRouter()
+
+
+def _submit_tracking_job(job) -> bool:
+    if job.execution_kind == R1_EXECUTION_KIND:
+        return get_r1_tracking_executor().submit(job.tracking_job_id)
+    return get_tracking_executor().submit(job.tracking_job_id)
 
 
 @router.get(
@@ -165,7 +173,7 @@ def review_tracking_job(
     except TrackingError as exc:
         _raise_tracking_http_error(exc)
     if job.status == TrackingBackendStatus.QUEUED.value:
-        get_tracking_executor().submit(job_id)
+        _submit_tracking_job(job)
     return service.to_response(job)
 
 
@@ -198,7 +206,7 @@ def confirm_tracking_ambiguity(
     except TrackingError as exc:
         _raise_tracking_http_error(exc)
     if job.status == TrackingBackendStatus.QUEUED.value:
-        get_tracking_executor().submit(job_id)
+        _submit_tracking_job(job)
     return service.to_response(job)
 
 

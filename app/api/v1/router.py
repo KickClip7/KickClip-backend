@@ -7,6 +7,7 @@ from app.api.v1 import (
     artifacts,
     auth,
     clip_plans,
+    event_candidate_handoff_r1,
     event_candidate_ranking_v1_1_2a,
     health,
     highlights,
@@ -37,6 +38,11 @@ api_router.include_router(
     artifacts.router,
     prefix="/artifacts",
     tags=["artifacts"],
+)
+api_router.include_router(
+    event_candidate_handoff_r1.router,
+    tags=["event-candidate-handoff-r1"],
+    dependencies=authenticated,
 )
 api_router.include_router(
     highlights.router,
