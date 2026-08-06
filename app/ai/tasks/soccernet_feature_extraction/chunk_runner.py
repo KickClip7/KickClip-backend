@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import math
+import shutil
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -225,7 +225,7 @@ class SoccerNetChunkRunner:
         spec: FeatureChunkSpec,
     ) -> list[str]:
         command = [
-            sys.executable,
+            self._resolve_python_executable(),
             str(self.config.video_feature_extractor),
             "--path_video",
             str(Path(video_path)),
@@ -239,6 +239,8 @@ class SoccerNetChunkRunner:
             str(self.config.pca_path),
             "--PCA_scaler",
             str(self.config.pca_scaler_path),
+            "--batch_size",
+            str(self.config.batch_size),
             "--overwrite",
         ]
 
@@ -274,6 +276,52 @@ class SoccerNetChunkRunner:
                 "video_feature_extractor is not a file: "
                 f"{self.config.video_feature_extractor.as_posix()}"
             )
+
+        python_executable = self._resolve_python_executable()
+        probe_code = (
+            "import tensorflow; import SoccerNet; import cv2; import sklearn; "
+            "import skvideo.io; import imutils; import numpy; "
+            "print('feature-runtime-ok')"
+        )
+        try:
+            completed = subprocess.run(
+                [python_executable, "-c", probe_code],
+                cwd=str(self._subprocess_cwd()),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.config.runtime_probe_timeout_sec,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise FeatureChunkExtractionError(
+                "SoccerNet feature extraction runtime probe timed out. "
+                f"python={python_executable}"
+            ) from exc
+
+        if completed.returncode != 0:
+            raise FeatureChunkExtractionError(
+                "SoccerNet feature extraction Python runtime is not ready. "
+                "Install the feature-extraction dependencies in the Python used by "
+                "ACTION_SPOTTING_PYTHON_EXECUTABLE (or the backend Python when unset). "
+                f"python={python_executable} | "
+                f"stdout_tail={_tail(completed.stdout or '')} | "
+                f"stderr_tail={_tail(completed.stderr or '')}"
+            )
+
+    def _resolve_python_executable(self) -> str:
+        configured = self.config.python_executable.strip()
+        candidate = Path(configured)
+        if candidate.is_file():
+            return str(candidate)
+
+        discovered = shutil.which(configured)
+        if discovered:
+            return discovered
+
+        raise FeatureChunkExtractionError(
+            "Configured SoccerNet feature extraction Python executable was not found: "
+            f"{configured}"
+        )
 
     def _subprocess_cwd(self) -> Path:
         if self.config.sn_spotting_root.exists() and self.config.sn_spotting_root.is_dir():

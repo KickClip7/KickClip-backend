@@ -6,16 +6,6 @@ import logging
 
 import configparser
 import math
-try:
-    # pip install tensorflow (==2.3.0)
-    from tensorflow.keras.models import Model
-    from tensorflow.keras.applications.resnet import preprocess_input
-    # from tensorflow.keras.preprocessing.image import img_to_array
-    # from tensorflow.keras.preprocessing.image import load_img
-    from tensorflow import keras
-except:
-    print("issue loading TF2")
-    pass
 import os
 # import argparse
 import numpy as np
@@ -43,7 +33,8 @@ class VideoFeatureExtractor():
                  transform="crop",
                  grabber="opencv",
                  FPS=2.0,
-                 split="all"):
+                 split="all",
+                 batch_size=16):
 
         self.feature = feature
         self.back_end = back_end
@@ -53,9 +44,27 @@ class VideoFeatureExtractor():
         self.grabber = grabber
         self.FPS = FPS
         self.split = split
+        self.batch_size = int(batch_size)
+
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be greater than 0")
 
 
         if "TF2" in self.back_end:
+            try:
+                # Import TensorFlow lazily so CUDA_VISIBLE_DEVICES can be set in
+                # __main__ before the runtime is initialized.
+                from tensorflow.keras.models import Model
+                from tensorflow.keras.applications.resnet import preprocess_input
+                from tensorflow import keras
+            except Exception as exc:
+                raise RuntimeError(
+                    "TensorFlow/Keras runtime is unavailable for SoccerNet feature "
+                    "extraction. Install tensorflow in the Python environment used "
+                    "to run VideoFeatureExtractor.py."
+                ) from exc
+
+            self.preprocess_input = preprocess_input
 
             # create pretrained encoder (here ResNet152, pre-trained on ImageNet)
             base_model = keras.applications.resnet.ResNet152(include_top=True,
@@ -86,7 +95,7 @@ class VideoFeatureExtractor():
                 videoLoader = FrameCV(
                     path_video_input, FPS=self.FPS, transform=self.transform, start=start, duration=duration)
 
-            frames = preprocess_input(videoLoader.frames)
+            frames = self.preprocess_input(videoLoader.frames)
 
             if duration is None:
                 duration = videoLoader.time_second
@@ -94,7 +103,11 @@ class VideoFeatureExtractor():
             logging.info(f"frames {frames.shape}, fps={frames.shape[0]/duration}")
 
             # predict the features from the frames (adjust batch size for smaller GPU)
-            features = self.model.predict(frames, batch_size=64, verbose=1)
+            features = self.model.predict(
+                frames,
+                batch_size=self.batch_size,
+                verbose=1,
+            )
 
             logging.info(f"features {features.shape}, fps={features.shape[0]/duration}")
 
@@ -171,6 +184,8 @@ if __name__ == "__main__":
                         help="skvideo or opencv? [default:opencv]")
     parser.add_argument('--FPS', type=float, default=2.0,
                         help="FPS for the features [default:2.0]")
+    parser.add_argument('--batch_size', type=int, default=16,
+                        help="TensorFlow inference batch size [default:16]")
 
     # PCA reduction
     parser.add_argument('--PCA', type=str, default="pca_512_TF2.pkl",
@@ -197,7 +212,8 @@ if __name__ == "__main__":
         back_end=args.back_end,
         transform=args.transform,
         grabber=args.grabber,
-        FPS=args.FPS)
+        FPS=args.FPS,
+        batch_size=args.batch_size)
 
     myFeatureExtractor.extractFeatures(path_video_input=args.path_video,
                                        path_features_output=args.path_features,

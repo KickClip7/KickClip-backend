@@ -72,6 +72,8 @@ class TrackingReviewRequest(BaseModel):
 class AmbiguityDecision(str, Enum):
     CANDIDATE = "candidate"
     ABSENT = "absent"
+    NONE_OF_THESE = "none_of_these"
+    NON_PLAYER_ROLE = "non_player_role"
 
 
 class TrackingAmbiguityConfirmationRequest(BaseModel):
@@ -88,8 +90,12 @@ class TrackingAmbiguityConfirmationRequest(BaseModel):
             return value
         normalized = dict(value)
         candidate_id = str(normalized.get("candidate_id") or "").strip()
-        if candidate_id.lower() == AmbiguityDecision.ABSENT.value:
-            normalized["decision"] = AmbiguityDecision.ABSENT.value
+        if candidate_id.lower() in {
+            AmbiguityDecision.ABSENT.value,
+            AmbiguityDecision.NONE_OF_THESE.value,
+            AmbiguityDecision.NON_PLAYER_ROLE.value,
+        }:
+            normalized["decision"] = candidate_id.lower()
             normalized["candidate_id"] = None
         elif candidate_id:
             normalized["decision"] = AmbiguityDecision.CANDIDATE.value
@@ -136,6 +142,7 @@ class TrackingCandidateRead(BaseModel):
     tracklet_id: str | None = None
     reviewability: str | None = None
     best_frame: int | None = None
+    status: str = "PENDING"
     review_bundle: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -180,6 +187,7 @@ class TrackingJobResponse(BaseModel):
     latest_decision: dict[str, Any] | None = None
     current_memory_revision: dict[str, Any] | None = None
     next_ambiguity: dict[str, Any] | None = None
+    review_progress: dict[str, Any] = Field(default_factory=dict)
     current_shot: str | None = None
     next_shot: str | None = None
     completed: bool

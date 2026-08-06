@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,13 +30,10 @@ def collect_action_spotting_diagnostics(db: Session | None = None) -> dict[str, 
 
     settings = get_settings()
     project_root = get_project_root()
-    ai_project_root = Path(
-        settings.ACTION_SPOTTING_AI_PROJECT_ROOT
-        or project_root.parent / "KickClip"
-    )
-    python_executable = Path(
-        settings.ACTION_SPOTTING_PYTHON_EXECUTABLE or sys.executable
-    )
+    configured_ai_project_root = settings.ACTION_SPOTTING_AI_PROJECT_ROOT.strip()
+    ai_project_root = Path(configured_ai_project_root) if configured_ai_project_root else project_root
+    configured_python = settings.ACTION_SPOTTING_PYTHON_EXECUTABLE.strip() or sys.executable
+    python_executable = _resolve_executable(configured_python)
     paths = resolve_v9_artifact_paths(DEFAULT_CHAMPION_MODEL_DIR)
     checkpoint_sha256 = (
         sha256_file(paths.checkpoint_path)
@@ -44,8 +42,9 @@ def collect_action_spotting_diagnostics(db: Session | None = None) -> dict[str, 
     )
     result: dict[str, Any] = {
         "champion_identifier": CHAMPION_IDENTIFIER,
+        "ai_project_root_configured": bool(configured_ai_project_root),
         "ai_project_root_exists": ai_project_root.is_dir(),
-        "python_executable_exists": python_executable.is_file(),
+        "python_executable_exists": python_executable is not None,
         "checkpoint_exists": paths.checkpoint_path.is_file(),
         "checkpoint_sha256": checkpoint_sha256,
         "checkpoint_sha256_matches": checkpoint_sha256
@@ -58,11 +57,13 @@ def collect_action_spotting_diagnostics(db: Session | None = None) -> dict[str, 
         "temporal_stem_import_success": False,
         "strict_checkpoint_load_success": False,
         "feature_extractor_available": False,
+        "feature_runtime_import_success": False,
         "sample_feature_contract_valid": False,
         "cuda_available": False,
         "mps_available": False,
         "selected_device": None,
         "ffmpeg_available": shutil.which("ffmpeg") is not None,
+        "ffprobe_available": shutil.which("ffprobe") is not None,
         "postgresql_connectivity": False,
         "errors": [],
     }
@@ -122,6 +123,34 @@ def collect_action_spotting_diagnostics(db: Session | None = None) -> dict[str, 
                 feature_config.output_dim == 512,
             )
         )
+        feature_python = _resolve_executable(feature_config.python_executable)
+        result["python_executable_exists"] = feature_python is not None
+        if feature_python is not None:
+            completed = subprocess.run(
+                [
+                    feature_python,
+                    "-c",
+                    (
+                        "import tensorflow; import SoccerNet; import cv2; import sklearn; "
+                        "import skvideo.io; import imutils; import numpy; "
+                        "print('feature-runtime-ok')"
+                    ),
+                ],
+                cwd=str(feature_config.sn_spotting_root),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=feature_config.runtime_probe_timeout_sec,
+            )
+            result["feature_runtime_import_success"] = completed.returncode == 0
+            if completed.returncode != 0:
+                result["errors"].append(
+                    {
+                        "component": "feature_runtime",
+                        "type": "ImportError",
+                        "message": "feature extraction Python dependencies are unavailable",
+                    }
+                )
     except Exception as exc:
         result["errors"].append(_safe_error("feature_extractor", exc))
 
@@ -145,9 +174,11 @@ def collect_action_spotting_diagnostics(db: Session | None = None) -> dict[str, 
             result["temporal_stem_import_success"],
             result["strict_checkpoint_load_success"],
             result["feature_extractor_available"],
+            result["feature_runtime_import_success"],
             result["sample_feature_contract_valid"],
             result["ffmpeg_available"],
-            result["postgresql_connectivity"],
+            result["ffprobe_available"],
+            result["postgresql_connectivity"] if db is not None else True,
         )
     )
     return result
@@ -159,3 +190,10 @@ def _safe_error(component: str, exc: Exception) -> dict[str, str]:
         "type": type(exc).__name__,
         "message": "runtime check failed; inspect the authenticated job diagnostics artifact",
     }
+
+
+def _resolve_executable(value: str) -> str | None:
+    candidate = Path(value)
+    if candidate.is_file():
+        return str(candidate)
+    return shutil.which(value)

@@ -292,6 +292,64 @@ def test_resume_commands_cover_confirm_absent_reject_and_unreviewable(tmp_path: 
     assert "--candidate-scoring-generation" in confirmed
 
 
+def test_rejected_candidate_decision_artifact_resolves_from_backend_storage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    script = tmp_path / "adapter.py"
+    script.write_text("print('adapter')\n")
+    immutable = tmp_path / "immutable"
+    immutable.mkdir()
+    paths = {}
+    for key in (
+        "tracking_launch_manifest_path",
+        "shot_boundaries_path",
+        "target_selection_path",
+        "target_reference_set_path",
+        "earlier_anchor_decision_path",
+    ):
+        path = immutable / f"{key}.json"
+        path.write_text("{}\n")
+        paths[key] = str(path)
+    scene = {
+        "selection_artifact_root": str(immutable),
+        **paths,
+        **{
+            key.replace("_path", "_sha256"): digest(Path(value))
+            for key, value in paths.items()
+        },
+        "candidate_scoring_generation": 2,
+    }
+    decision = tmp_path / "review-decision.json"
+    decision.write_text('{"state":"DIFFERENT_PLAYER"}\n')
+    monkeypatch.setattr(
+        "app.domains.tracking.process_runner.LocalStorage",
+        lambda: type(
+            "Storage",
+            (),
+            {"resolve_path": lambda self, value: decision},
+        )(),
+    )
+    job = SimpleNamespace(
+        runtime_metadata={"scene_target_selection": scene},
+        test_name="rejection_resume",
+        device="cpu",
+        reacquisition_mode="assisted",
+    )
+    command = TrackingProcessRunner(_runner_settings(tmp_path, script)).build_resume_command(
+        job,
+        {
+            "kind": "candidate_rejected",
+            "ambiguity_id": "amb",
+            "candidate_id": "candidate-final",
+            "decision_artifact_path": "storage/review-decision.json",
+            "decision_artifact_sha256": digest(decision),
+        },
+    )
+    assert command[command.index("--review-decision-artifact") + 1] == str(
+        decision.resolve()
+    )
+
+
 def test_empty_dynamic_ambiguity_is_forbidden() -> None:
     with pytest.raises(R1RuntimeSyncError, match="EMPTY_PENDING_AMBIGUITY_FORBIDDEN"):
         extract_pending_ambiguity(

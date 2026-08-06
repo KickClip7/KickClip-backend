@@ -20,6 +20,7 @@ from app.domains.tracking.verifier import (
     configured_absolute_executable_path,
     configured_absolute_path,
 )
+from app.storage.local_storage import LocalStorage
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,22 @@ class TrackingProcessRunner:
                 command.extend(
                     ["--confirmed-candidate", str(action["candidate_id"])]
                 )
+        elif kind == "none_of_these":
+            command.extend(
+                [
+                    "--ambiguity-id",
+                    str(action["ambiguity_id"]),
+                    "--reject-all-candidates",
+                ]
+            )
+        elif kind == "non_player_role":
+            command.extend(
+                [
+                    "--ambiguity-id",
+                    str(action["ambiguity_id"]),
+                    "--reject-all-candidates-as-non-player-role",
+                ]
+            )
         elif kind == "candidate_rejected":
             command.extend(
                 [
@@ -177,6 +194,30 @@ class TrackingProcessRunner:
 
         reviewer = str(action.get("reviewer") or "")
         note = str(action.get("note") or "")
+        decision_artifact = str(action.get("decision_artifact_path") or "")
+        decision_sha = str(action.get("decision_artifact_sha256") or "")
+        if decision_artifact:
+            decision_path = Path(decision_artifact)
+            if not decision_path.is_absolute():
+                decision_path = LocalStorage().resolve_path(decision_artifact)
+            decision_path = decision_path.resolve()
+            if not decision_path.is_file():
+                raise TrackingValidationError(
+                    "Candidate review decision artifact is missing."
+                )
+            actual_decision_sha = hashlib.sha256(decision_path.read_bytes()).hexdigest()
+            if len(decision_sha) != 64 or actual_decision_sha != decision_sha:
+                raise TrackingValidationError(
+                    "Candidate review decision artifact hash mismatch."
+                )
+            command.extend(
+                [
+                    "--review-decision-artifact",
+                    str(decision_path),
+                    "--review-decision-sha256",
+                    decision_sha,
+                ]
+            )
         if reviewer:
             command.extend(["--reviewer", reviewer])
         if note:

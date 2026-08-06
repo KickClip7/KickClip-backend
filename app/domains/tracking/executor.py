@@ -325,7 +325,11 @@ class TrackingJobExecutor:
                 execution_kind=self.execution_kind
             ):
                 state = read_pipeline_state(Path(job.pipeline_state_path))
-                if state is not None:
+                # A queued human decision intentionally precedes its runtime
+                # acknowledgement. Do not let the stale pre-decision JSON state
+                # overwrite the authoritative queued action during recovery.
+                has_queued_action = bool(job.queued_action)
+                if state is not None and not has_queued_action:
                     mapping = map_pipeline_state(
                         state,
                         process_return_code=job.process_return_code,

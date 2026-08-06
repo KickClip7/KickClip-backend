@@ -106,6 +106,206 @@ class CandidateHandoffR1Service:
             raise ValueError(f"Artifact SHA-256 mismatch: {artifact.artifact_id}")
         return path
 
+    @staticmethod
+    def _catalog_candidate_is_safe(candidate: Mapping[str, Any]) -> bool:
+        status = str(candidate.get("status") or "PENDING").upper()
+        if status in {
+            "EXCLUDED",
+            "CONFIRMED",
+            "UNREVIEWABLE_LOW_RESOLUTION",
+            "EXCLUDED_BY_USER_NONE_OF_THESE",
+            "EXCLUDED_BY_USER_NON_PLAYER_ROLE",
+        }:
+            return False
+        for key in (
+            "safety_gate_passed",
+            "identity_pure",
+            "identity_observability_gate_passed",
+        ):
+            if candidate.get(key) is False:
+                return False
+        for key in (
+            "identity_purity",
+            "identity_observability",
+            "negative_review_gate",
+            "role_confusion",
+        ):
+            gate = candidate.get(key)
+            if isinstance(gate, Mapping) and gate.get("passed") is False:
+                return False
+        purity = str(
+            candidate.get("purity_status")
+            or candidate.get("identity_purity_status")
+            or ""
+        ).upper()
+        return "MIXED" not in purity and "IMPURE" not in purity
+
+    def _normalize_catalog_candidate(
+        self,
+        candidate: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        row = dict(candidate)
+        candidate_id = str(row.get("candidate_id") or "")
+        if not candidate_id or not self._catalog_candidate_is_safe(row):
+            return None
+        required_paths = (
+            "manifest_path",
+            "full_frame_context_path",
+            "shot_clip_path",
+            "reference_gallery_path",
+        )
+        for key in required_paths:
+            value = row.get(key)
+            if not value:
+                return None
+            path = Path(str(value))
+            if not path.is_absolute():
+                path = self.storage.resolve_path(str(value))
+            path = path.resolve()
+            if not path.is_file():
+                return None
+            sha_key = key.replace("_path", "_sha256")
+            expected = str(row.get(sha_key) or "")
+            actual = sha256_file(path)
+            if expected and expected != actual:
+                raise ValueError(f"Review catalog artifact SHA mismatch: {candidate_id}/{key}")
+            row[key] = path.relative_to(self.storage.project_root).as_posix()
+            row[sha_key] = actual
+        row["candidate_id"] = candidate_id
+        row["status"] = "PENDING"
+        row["automatic_target_confirmation"] = False
+        return row
+
+    def _next_review_catalog_batch(
+        self,
+        *,
+        job: TrackingJob,
+        pipeline: EventCandidatePipelineR1,
+        ambiguity: EventCandidateAmbiguityR1,
+    ) -> EventCandidateAmbiguityR1 | None:
+        state_path = Path(job.pipeline_state_path).resolve()
+        if not state_path.is_file():
+            return None
+        state = self._load_json(state_path)
+        result = dict((state.get("shot_search_results") or {}).get(ambiguity.shot_id) or {})
+        catalog = [
+            dict(item)
+            for item in result.get("review_catalog_candidates") or []
+            if isinstance(item, Mapping)
+        ]
+        if not catalog:
+            runtime = dict(state.get("runtime") or {})
+            catalog = [
+                dict(item)
+                for item in runtime.get("phase4b_review_catalog_candidates") or []
+                if isinstance(item, Mapping)
+            ]
+
+        reviewed_ids = {
+            str(value)
+            for value in self.db.scalars(
+                select(EventCandidateReviewDecisionR1.candidate_id).where(
+                    EventCandidateReviewDecisionR1.tracking_job_id
+                    == job.tracking_job_id,
+                    EventCandidateReviewDecisionR1.candidate_id.is_not(None),
+                )
+            ).all()
+            if value
+        }
+        exposed_ids: set[str] = set()
+        for row in self.db.scalars(
+                select(EventCandidateAmbiguityR1).where(
+                    EventCandidateAmbiguityR1.tracking_job_id
+                    == job.tracking_job_id,
+                    EventCandidateAmbiguityR1.shot_id == ambiguity.shot_id,
+                )
+            ).all():
+            # candidate_ids is intentionally only the active pointer set.  The
+            # immutable candidates payload is the exposure history and must be
+            # used to prevent a just-rejected (or earlier-generation) candidate
+            # from being offered again.
+            exposed_ids.update(
+                str(candidate.get("candidate_id"))
+                for candidate in (row.candidates or [])
+                if candidate.get("candidate_id")
+            )
+            exposed_ids.update(
+                str(candidate_id)
+                for candidate_id in (row.candidate_ids or [])
+                if candidate_id
+            )
+        excluded_ids = reviewed_ids | exposed_ids
+        batch: list[dict[str, Any]] = []
+        for candidate in catalog:
+            candidate_id = str(candidate.get("candidate_id") or "")
+            if not candidate_id or candidate_id in excluded_ids:
+                continue
+            normalized = self._normalize_catalog_candidate(candidate)
+            if normalized is None:
+                continue
+            batch.append(normalized)
+            if len(batch) == 3:
+                break
+        if not batch:
+            return None
+
+        previous_rows = self.db.scalars(
+            select(EventCandidateAmbiguityR1).where(
+                EventCandidateAmbiguityR1.tracking_job_id == job.tracking_job_id,
+                EventCandidateAmbiguityR1.shot_id == ambiguity.shot_id,
+            )
+        ).all()
+        generation = max([int(row.generation or 0) for row in previous_rows] or [0]) + 1
+        safe_shot_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", ambiguity.shot_id)
+        base_id = f"ambiguity_phase4b_{safe_shot_id}_g{generation:03d}"
+        next_id = base_id
+        suffix = 1
+        existing_ids = {row.ambiguity_id for row in previous_rows}
+        while next_id in existing_ids:
+            suffix += 1
+            next_id = f"{base_id}_{suffix}"
+
+        artifact = Path(job.output_directory) / "ambiguities" / f"{next_id}.json"
+        artifact_doc = {
+            "schema_version": "kickclip.runtime_cross_shot_ambiguity.r1_4",
+            "ambiguity_id": next_id,
+            "tracking_job_id": job.tracking_job_id,
+            "shot_id": ambiguity.shot_id,
+            "status": "WAITING",
+            "generation": generation,
+            "candidate_ids": [item["candidate_id"] for item in batch],
+            "candidates": batch,
+            "source_review_catalog_reused": True,
+            "automatic_target_confirmation": False,
+        }
+        artifact_sha = write_json_atomic(artifact, artifact_doc)
+        first = batch[0]
+        next_ambiguity = EventCandidateAmbiguityR1(
+            tracking_job_id=job.tracking_job_id,
+            ambiguity_id=next_id,
+            shot_id=ambiguity.shot_id,
+            status="WAITING",
+            candidate_ids=artifact_doc["candidate_ids"],
+            candidates=batch,
+            full_frame_context_path=str(first["full_frame_context_path"]),
+            full_frame_context_sha256=str(first["full_frame_context_sha256"]),
+            shot_clip_path=str(first["shot_clip_path"]),
+            shot_clip_sha256=str(first["shot_clip_sha256"]),
+            artifact_path=artifact.relative_to(self.storage.project_root).as_posix(),
+            artifact_sha256=artifact_sha,
+            generation=generation,
+        )
+        self.db.add(next_ambiguity)
+        self.db.flush()
+        # The exhausted generation remains an immutable human-review result.
+        # Only the newly-created generation may be WAITING.
+        if ambiguity.status == "WAITING":
+            ambiguity.status = "ALL_CANDIDATES_REJECTED"
+        pipeline.pending_ambiguity_id = next_id
+        pipeline.current_shot_id = ambiguity.shot_id
+        pipeline.next_shot_id = ambiguity.shot_id
+        return next_ambiguity
+
     def _prepared_artifact_path(
         self,
         artifact: Artifact,
@@ -1316,6 +1516,17 @@ class CandidateHandoffR1Service:
                     "sha256": provenance_sha,
                 },
             )
+            # Register the immutable R1 selection as a pending highlight
+            # candidate in the same transaction as the tracking handoff. This
+            # keeps the server authoritative even if the browser closes before
+            # the tracking job reaches a terminal state.
+            from app.domains.highlight.service import HighlightWorkflowService
+
+            HighlightWorkflowService(self.db).include_tracking_job_candidate(
+                project=project,
+                job=job,
+                commit=False,
+            )
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -1388,31 +1599,64 @@ class CandidateHandoffR1Service:
         ):
             raise ValueError("Tracking job is not waiting for this ambiguity.")
         candidate_ids = list(ambiguity.candidate_ids or [])
-        if request.state != CandidateReviewState.TARGET_ABSENT:
+        full_shot_states = {
+            CandidateReviewState.TARGET_ABSENT,
+            CandidateReviewState.NONE_OF_THESE,
+            CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE,
+        }
+        if request.state not in full_shot_states:
             if request.candidate_id not in candidate_ids:
                 raise ValueError("Candidate is not in the pending ambiguity.")
-        if request.state == CandidateReviewState.TARGET_ABSENT and (
+        if request.state in full_shot_states and (
             request.full_frame_context_sha256 != ambiguity.full_frame_context_sha256
             or request.shot_clip_sha256 != ambiguity.shot_clip_sha256
         ):
             raise ValueError(
-                "TARGET_ABSENT requires the exact full-frame and full-shot evidence."
+                f"{request.state.value} requires the exact full-frame and full-shot evidence."
             )
 
         decision_id = generate_prefixed_id("ecdecr1")
         result_state = (
             "UNRESOLVED_LOW_RESOLUTION"
             if request.state == CandidateReviewState.UNREVIEWABLE_LOW_RESOLUTION
-            else request.state.value
+            else (
+                (
+                    "SEARCH_EXHAUSTED_NONE_OF_THESE"
+                    if request.state == CandidateReviewState.NONE_OF_THESE
+                    else "SEARCH_EXHAUSTED_NON_PLAYER_ROLE"
+                )
+                if request.state in {
+                    CandidateReviewState.NONE_OF_THESE,
+                    CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE,
+                }
+                else request.state.value
+            )
         )
         document = {
-            "schema_version": "kickclip.candidate_review_decision.r1_2",
+            "schema_version": "kickclip.candidate_review_decision.r1_4",
             "decision_id": decision_id,
             "tracking_job_id": job.tracking_job_id,
             "ambiguity_id": ambiguity_id,
             "state": request.state.value,
             "resulting_tracking_state": result_state,
             "candidate_id": request.candidate_id,
+            "rejected_candidate_ids": (
+                candidate_ids
+                if request.state in {
+                    CandidateReviewState.NONE_OF_THESE,
+                    CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE,
+                }
+                else (
+                    [request.candidate_id]
+                    if request.state
+                    in {
+                        CandidateReviewState.DIFFERENT_PLAYER,
+                        CandidateReviewState.UNREVIEWABLE_LOW_RESOLUTION,
+                    }
+                    and request.candidate_id
+                    else []
+                )
+            ),
             "reviewer": user.user_id,
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
             "full_frame_context_sha256": request.full_frame_context_sha256,
@@ -1436,7 +1680,26 @@ class CandidateHandoffR1Service:
             decision_artifact_sha256=sha,
             note=request.note,
             idempotency_key=idempotency_key,
-            metadata_={"resulting_tracking_state": result_state},
+            metadata_={
+                "resulting_tracking_state": result_state,
+                "rejected_candidate_ids": (
+                    candidate_ids
+                    if request.state in {
+                        CandidateReviewState.NONE_OF_THESE,
+                        CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE,
+                    }
+                    else (
+                        [request.candidate_id]
+                        if request.state
+                        in {
+                            CandidateReviewState.DIFFERENT_PLAYER,
+                            CandidateReviewState.UNREVIEWABLE_LOW_RESOLUTION,
+                        }
+                        and request.candidate_id
+                        else []
+                    )
+                ),
+            },
         )
         outbox = EventCandidateOutboxR1(
             tracking_job_id=job.tracking_job_id,
@@ -1454,22 +1717,53 @@ class CandidateHandoffR1Service:
         updated: list[dict[str, Any]] = []
         for raw in ambiguity.candidates or []:
             candidate = dict(raw)
-            if candidate.get("candidate_id") == request.candidate_id:
+            if request.state in {
+                CandidateReviewState.NONE_OF_THESE,
+                CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE,
+            }:
+                candidate["status"] = (
+                    "EXCLUDED_BY_USER_NONE_OF_THESE"
+                    if request.state == CandidateReviewState.NONE_OF_THESE
+                    else "EXCLUDED_BY_USER_NON_PLAYER_ROLE"
+                )
+            elif candidate.get("candidate_id") == request.candidate_id:
                 candidate["status"] = {
                     CandidateReviewState.SAME_PLAYER: "CONFIRMED",
                     CandidateReviewState.DIFFERENT_PLAYER: "EXCLUDED",
                     CandidateReviewState.UNREVIEWABLE_LOW_RESOLUTION: "UNREVIEWABLE_LOW_RESOLUTION",
                     CandidateReviewState.TARGET_ABSENT: candidate.get("status", "PENDING"),
+                    CandidateReviewState.NONE_OF_THESE: "EXCLUDED_BY_USER_NONE_OF_THESE",
+                    CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE: "EXCLUDED_BY_USER_NON_PLAYER_ROLE",
                 }[request.state]
             updated.append(candidate)
         ambiguity.candidates = updated
-        remaining = [item for item in updated if item.get("status") == "PENDING"]
+        remaining = [
+            item
+            for item in updated
+            if str(item.get("status") or "").upper() == "PENDING"
+        ]
+        # candidate_ids is the ordered active-candidate pointer, never an audit
+        # history. Persist it before selecting the continuation branch so a
+        # rejected final candidate cannot remain addressable after this commit.
+        ambiguity.candidate_ids = [str(item["candidate_id"]) for item in remaining]
         pipeline.latest_decision_id = decision_id
         job.latest_decision_id = decision_id
         pipeline.current_shot_id = ambiguity.shot_id
         summary = dict(pipeline.summary or {})
         summary["confirmation_count"] = int(summary.get("confirmation_count") or 0) + 1
+        if request.candidate_id:
+            reviewed_candidate_ids = list(summary.get("reviewed_candidate_ids") or [])
+            if request.candidate_id not in reviewed_candidate_ids:
+                reviewed_candidate_ids.append(request.candidate_id)
+            summary["reviewed_candidate_ids"] = reviewed_candidate_ids
+        summary["reviewed_candidate_count"] = len(
+            summary.get("reviewed_candidate_ids") or []
+        )
         submit_runtime = False
+        continuation = "TRACKING_RESUMED"
+        next_candidate_id: str | None = None
+        next_ambiguity_id: str | None = None
+        remaining_candidate_count = 0
 
         if request.state == CandidateReviewState.SAME_PLAYER:
             memory_row, memory_document = orchestrator.build_memory(
@@ -1512,6 +1806,62 @@ class CandidateHandoffR1Service:
             summary["last_memory_sha256"] = memory_row.artifact_sha256
             summary["last_memory_reference_count"] = len(memory_row.reference_frame_ids)
             submit_runtime = True
+        elif request.state == CandidateReviewState.NONE_OF_THESE:
+            rejected_candidate_ids = [
+                str(candidate_id) for candidate_id in candidate_ids if candidate_id
+            ]
+            if not rejected_candidate_ids:
+                raise ValueError("NONE_OF_THESE requires a non-empty pending candidate set.")
+            job.queued_action = {
+                "kind": "none_of_these",
+                "ambiguity_id": ambiguity_id,
+                "candidate_ids": rejected_candidate_ids,
+                "decision": "none_of_these",
+                "reviewer": user.user_id,
+                "note": request.note,
+            }
+            ambiguity.status = "ALL_CANDIDATES_REJECTED"
+            pipeline.pending_ambiguity_id = None
+            pipeline.last_completed_ambiguity_id = ambiguity_id
+            excluded = list(summary.get("excluded_candidate_ids") or [])
+            for candidate_id in rejected_candidate_ids:
+                if candidate_id not in excluded:
+                    excluded.append(candidate_id)
+            summary["excluded_candidate_ids"] = excluded
+            none_shots = list(summary.get("none_of_these_shot_ids") or [])
+            if ambiguity.shot_id not in none_shots:
+                none_shots.append(ambiguity.shot_id)
+            summary["none_of_these_shot_ids"] = none_shots
+            submit_runtime = True
+        elif request.state == CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE:
+            rejected_candidate_ids = [
+                str(candidate_id) for candidate_id in candidate_ids if candidate_id
+            ]
+            if not rejected_candidate_ids:
+                raise ValueError(
+                    "NONE_OF_THESE_NON_PLAYER_ROLE requires a non-empty pending candidate set."
+                )
+            job.queued_action = {
+                "kind": "non_player_role",
+                "ambiguity_id": ambiguity_id,
+                "candidate_ids": rejected_candidate_ids,
+                "decision": "non_player_role",
+                "reviewer": user.user_id,
+                "note": request.note,
+            }
+            ambiguity.status = "ALL_CANDIDATES_NON_PLAYER_ROLE"
+            pipeline.pending_ambiguity_id = None
+            pipeline.last_completed_ambiguity_id = ambiguity_id
+            role_excluded = list(summary.get("non_player_role_candidate_ids") or [])
+            for candidate_id in rejected_candidate_ids:
+                if candidate_id not in role_excluded:
+                    role_excluded.append(candidate_id)
+            summary["non_player_role_candidate_ids"] = role_excluded
+            role_shots = list(summary.get("non_player_role_shot_ids") or [])
+            if ambiguity.shot_id not in role_shots:
+                role_shots.append(ambiguity.shot_id)
+            summary["non_player_role_shot_ids"] = role_shots
+            submit_runtime = True
         elif request.state == CandidateReviewState.TARGET_ABSENT:
             job.queued_action = {
                 "kind": "ambiguity",
@@ -1527,6 +1877,7 @@ class CandidateHandoffR1Service:
             submit_runtime = True
         elif remaining:
             # Candidate-local rejection/unreviewable: keep the same dynamic ambiguity.
+            ambiguity.candidates = remaining
             ambiguity.status = "WAITING"
             pipeline.pending_ambiguity_id = ambiguity_id
             pipeline.pipeline_stage = R1PipelineStage.WAITING_CROSS_SHOT_CONFIRMATION.value
@@ -1539,36 +1890,83 @@ class CandidateHandoffR1Service:
             outbox.completed_at = datetime.now(timezone.utc)
             outbox.artifact_path = row.confirmation_artifact_path
             outbox.artifact_sha256 = sha
+            continuation = "REVIEW_NEXT_CANDIDATE"
+            remaining_candidate_count = len(remaining)
+            next_candidate_id = str(remaining[0]["candidate_id"])
+            next_ambiguity_id = ambiguity_id
         else:
-            kind = (
-                "candidate_rejected"
-                if request.state == CandidateReviewState.DIFFERENT_PLAYER
-                else "candidate_unreviewable"
-            )
-            job.queued_action = {
-                "kind": kind,
-                "ambiguity_id": ambiguity_id,
-                "candidate_id": request.candidate_id,
-                "reviewer": user.user_id,
-                "note": request.note,
-            }
             ambiguity.status = (
                 "ALL_CANDIDATES_REJECTED"
-                if kind == "candidate_rejected"
+                if request.state == CandidateReviewState.DIFFERENT_PLAYER
                 else "UNRESOLVED_LOW_RESOLUTION"
             )
-            pipeline.pending_ambiguity_id = None
-            pipeline.last_completed_ambiguity_id = ambiguity_id
-            if kind == "candidate_rejected":
-                summary.setdefault("excluded_candidate_ids", []).append(
-                    request.candidate_id
-                )
+            next_batch = self._next_review_catalog_batch(
+                job=job,
+                pipeline=pipeline,
+                ambiguity=ambiguity,
+            )
+            if next_batch is not None:
+                job.queued_action = None
+                job.status = TrackingBackendStatus.WAITING_CROSS_SHOT_CONFIRMATION.value
+                job.pipeline_status = "NEEDS_CONFIRMATION"
+                job.pending_action_type = "CROSS_SHOT_CONFIRMATION"
+                job.pending_ambiguity_id = next_batch.ambiguity_id
+                pipeline.pending_ambiguity_id = next_batch.ambiguity_id
+                pipeline.pipeline_stage = R1PipelineStage.WAITING_CROSS_SHOT_CONFIRMATION.value
+                pipeline.processing_status = R1ProcessingStatus.WAITING.value
+                outbox.status = "COMPLETED"
+                outbox.completed_at = datetime.now(timezone.utc)
+                outbox.artifact_path = row.confirmation_artifact_path
+                outbox.artifact_sha256 = sha
+                continuation = "REVIEW_NEXT_BATCH"
+                # This response describes the exhausted generation. The new
+                # generation is loaded from next_ambiguity_id as server truth.
+                remaining_candidate_count = 0
+                next_candidate_id = None
+                next_ambiguity_id = next_batch.ambiguity_id
+                summary["candidate_batch_generation"] = int(next_batch.generation)
+                summary["remaining_candidate_count"] = remaining_candidate_count
             else:
-                summary.setdefault("unresolved_low_resolution_shot_ids", []).append(
-                    ambiguity.shot_id
+                kind = (
+                    "candidate_rejected"
+                    if request.state == CandidateReviewState.DIFFERENT_PLAYER
+                    else "candidate_unreviewable"
                 )
-            submit_runtime = True
+                job.queued_action = {
+                    "kind": kind,
+                    "ambiguity_id": ambiguity_id,
+                    "candidate_id": request.candidate_id,
+                    "decision_artifact_path": row.confirmation_artifact_path,
+                    "decision_artifact_sha256": sha,
+                    "reviewer": user.user_id,
+                    "note": request.note,
+                }
+                pipeline.pending_ambiguity_id = None
+                pipeline.last_completed_ambiguity_id = ambiguity_id
+                if kind == "candidate_rejected":
+                    excluded = list(summary.get("excluded_candidate_ids") or [])
+                    if request.candidate_id not in excluded:
+                        excluded.append(request.candidate_id)
+                    summary["excluded_candidate_ids"] = excluded
+                else:
+                    unresolved = list(
+                        summary.get("unresolved_low_resolution_shot_ids") or []
+                    )
+                    if ambiguity.shot_id not in unresolved:
+                        unresolved.append(ambiguity.shot_id)
+                    summary["unresolved_low_resolution_shot_ids"] = unresolved
+                submit_runtime = True
+                continuation = "SEARCH_NEXT_SHOT"
 
+        summary["remaining_candidate_count"] = remaining_candidate_count
+        row.metadata_ = {
+            **dict(row.metadata_ or {}),
+            "continuation": continuation,
+            "remaining_candidate_count": remaining_candidate_count,
+            "next_candidate_id": next_candidate_id,
+            "next_ambiguity_id": next_ambiguity_id,
+            "automatic_target_confirmation": False,
+        }
         pipeline.summary = summary
         if submit_runtime:
             pipeline.pipeline_stage = R1PipelineStage.APPLYING_HUMAN_DECISION.value
@@ -1595,6 +1993,157 @@ class CandidateHandoffR1Service:
         if submit_runtime:
             get_r1_tracking_executor().submit(job.tracking_job_id)
         return row
+
+    def recover_rejected_candidate_resume(
+        self,
+        *,
+        tracking_job_id: str,
+        submit_runtime: bool = True,
+    ) -> TrackingJob:
+        """Requeue one provenance-complete DIFFERENT_PLAYER decision without recreating it."""
+        job = self.db.scalar(
+            select(TrackingJob)
+            .where(TrackingJob.tracking_job_id == tracking_job_id)
+            .with_for_update()
+        )
+        pipeline = self.db.scalar(
+            select(EventCandidatePipelineR1)
+            .where(EventCandidatePipelineR1.tracking_job_id == tracking_job_id)
+            .with_for_update()
+        )
+        if job is None or pipeline is None or not job.latest_decision_id:
+            raise ValueError("R14 recovery requires an R1 job, pipeline, and latest decision.")
+        decision = self.db.get(EventCandidateReviewDecisionR1, job.latest_decision_id)
+        if decision is None or decision.decision_state != CandidateReviewState.DIFFERENT_PLAYER.value:
+            raise ValueError("R14 recovery requires a durable DIFFERENT_PLAYER decision.")
+        ambiguity = self.db.scalar(
+            select(EventCandidateAmbiguityR1)
+            .where(
+                EventCandidateAmbiguityR1.tracking_job_id == tracking_job_id,
+                EventCandidateAmbiguityR1.ambiguity_id == decision.ambiguity_id,
+            )
+            .with_for_update()
+        )
+        if ambiguity is None or not decision.candidate_id:
+            raise ValueError("R14 recovery ambiguity provenance is missing.")
+        candidates = [dict(item) for item in (ambiguity.candidates or [])]
+        rejected = next(
+            (
+                item
+                for item in candidates
+                if str(item.get("candidate_id") or "") == decision.candidate_id
+            ),
+            None,
+        )
+        if rejected is None or str(rejected.get("status") or "").upper() != "EXCLUDED":
+            raise ValueError("R14 recovery candidate is not durably EXCLUDED.")
+        active = [
+            item
+            for item in candidates
+            if str(item.get("status") or "").upper() == "PENDING"
+        ]
+        if active:
+            raise ValueError("R14 recovery is only valid after the active batch is exhausted.")
+        artifact = self.storage.resolve_path(decision.confirmation_artifact_path)
+        if (
+            not artifact.is_file()
+            or sha256_file(artifact) != decision.decision_artifact_sha256
+        ):
+            raise ValueError("R14 recovery decision artifact is missing or changed.")
+        outbox = self.db.scalar(
+            select(EventCandidateOutboxR1)
+            .where(
+                EventCandidateOutboxR1.tracking_job_id == tracking_job_id,
+                EventCandidateOutboxR1.idempotency_key == decision.idempotency_key,
+            )
+            .with_for_update()
+        )
+        if outbox is None:
+            raise ValueError("R14 recovery requires the original decision outbox row.")
+
+        runtime_state = (
+            self._load_json(Path(job.pipeline_state_path))
+            if Path(job.pipeline_state_path).is_file()
+            else {}
+        )
+        runtime = dict(runtime_state.get("runtime") or {})
+        negative_ids = {
+            str(value)
+            for value in dict(
+                runtime.get("phase4b_identity_negative_memory") or {}
+            ).get("rejected_candidate_ids")
+            or []
+            if value
+        }
+        rejection_already_applied = (
+            decision.candidate_id in negative_ids
+            and runtime_state.get("pending_action") is None
+            and runtime.get("phase4a_initial_memory_review_status") == "PASS"
+            and runtime.get("phase4b_cross_shot_scoring_authorized") is True
+            and str(runtime_state.get("status") or "").upper()
+            in {"RUNNING", "COMPLETE_WITH_UNRESOLVED_GAPS", "COMPLETED_WITH_UNRESOLVED_GAPS"}
+        )
+
+        ambiguity.candidate_ids = []
+        ambiguity.status = "ALL_CANDIDATES_REJECTED"
+        pipeline.pending_ambiguity_id = None
+        pipeline.last_completed_ambiguity_id = ambiguity.ambiguity_id
+        pipeline.latest_decision_id = decision.decision_id
+        pipeline.pipeline_stage = (
+            R1PipelineStage.SEARCHING_NEXT_SHOT.value
+            if rejection_already_applied
+            else R1PipelineStage.APPLYING_HUMAN_DECISION.value
+        )
+        pipeline.processing_status = R1ProcessingStatus.READY.value
+        pipeline.completed_at = None
+        pipeline.failure_code = None
+        job.queued_action = (
+            {"kind": "recovery_resume"}
+            if rejection_already_applied
+            else {
+                "kind": "candidate_rejected",
+                "ambiguity_id": ambiguity.ambiguity_id,
+                "candidate_id": decision.candidate_id,
+                "decision_artifact_path": decision.confirmation_artifact_path,
+                "decision_artifact_sha256": decision.decision_artifact_sha256,
+                "reviewer": decision.reviewer_id,
+                "note": decision.note,
+            }
+        )
+        job.status = TrackingBackendStatus.QUEUED.value
+        job.pipeline_status = "RUNNING"
+        job.pipeline_decision = (
+            "R1_RECOVER_NEXT_SHOT"
+            if rejection_already_applied
+            else "R1_RECOVER_DIFFERENT_PLAYER"
+        )
+        job.pending_action_type = None
+        job.pending_ambiguity_id = None
+        job.process_pid = None
+        job.process_return_code = None
+        job.error_type = None
+        job.error_message = None
+        job.completed_at = None
+        job.finished_at = None
+        outbox.status = "COMPLETED" if rejection_already_applied else "PENDING"
+        if not rejection_already_applied:
+            outbox.completed_at = None
+        outbox.error_message = None
+
+        selection = self.db.get(EventCandidateSelectionR1, pipeline.selection_id)
+        if selection is None:
+            raise ValueError("R14 recovery selection provenance is missing.")
+        R1PipelineOrchestrator(self.db).synchronize(
+            job=job,
+            selection=selection,
+            pipeline=pipeline,
+            ambiguity=None,
+        )
+        self.db.commit()
+        self.db.refresh(job)
+        if submit_runtime:
+            get_r1_tracking_executor().submit(tracking_job_id)
+        return job
 
 def recover_candidate_handoff_state(db: Session) -> dict[str, Any]:
     """Recover from authoritative R1 DB state; never scan legacy pointers."""

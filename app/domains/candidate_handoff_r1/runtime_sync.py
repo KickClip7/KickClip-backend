@@ -14,6 +14,7 @@ from app.domains.candidate_handoff_r1.model import (
     EventCandidateMemoryRevisionR1,
     EventCandidateOutboxR1,
     EventCandidatePipelineR1,
+    EventCandidateReviewDecisionR1,
     EventCandidateSelectionR1,
 )
 from app.domains.candidate_handoff_r1.orchestrator import R1PipelineOrchestrator
@@ -33,6 +34,10 @@ VISIBLE_TERMINAL_SHOT_STATES = {
     "REACQUIRED",
     "ABSENT_CONFIRMED",
     "TARGET_ABSENT",
+    "SEARCH_EXHAUSTED_NO_REVIEWABLE_CANDIDATE",
+    "SEARCH_EXHAUSTED_NONE_OF_THESE",
+    "SEARCH_EXHAUSTED_NON_PLAYER_ROLE",
+    "SEARCH_EXHAUSTED_UNREVIEWABLE_GROUP_OCCLUSION",
 }
 UNRESOLVED_SHOT_MARKERS = {
     "UNRESOLVED_LOW_RESOLUTION",
@@ -131,16 +136,19 @@ def completion_state_from_runtime(
         return TrackingBackendStatus.FAILED
     if status in {"COMPLETE_WITH_SAFE_BLOCK", "BLOCKED"}:
         return TrackingBackendStatus.COMPLETED_SAFE_BLOCK
+    # A durable review request takes precedence over unresolved-shot summary
+    # markers. Otherwise a valid pending ambiguity can be misclassified as a
+    # terminal COMPLETED_WITH_UNRESOLVED_GAPS job.
+    if status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
+        if isinstance(pending, Mapping) and pending.get("type") == "MEMORY_REVIEW":
+            return TrackingBackendStatus.WAITING_MEMORY_REVIEW
+        return TrackingBackendStatus.WAITING_CROSS_SHOT_CONFIRMATION
     if status == "COMPLETE_WITH_UNRESOLVED_GAPS" or unresolved:
         return TrackingBackendStatus.COMPLETED_WITH_UNRESOLVED_GAPS
     if status == "COMPLETE":
         if pending or processing_outbox_count or nonterminal or not timeline_valid or not preview_generated:
             return TrackingBackendStatus.COMPLETED_SAFE_BLOCK
         return TrackingBackendStatus.COMPLETED
-    if status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
-        if isinstance(pending, Mapping) and pending.get("type") == "MEMORY_REVIEW":
-            return TrackingBackendStatus.WAITING_MEMORY_REVIEW
-        return TrackingBackendStatus.WAITING_CROSS_SHOT_CONFIRMATION
     return TrackingBackendStatus.RUNNING
 
 
@@ -243,8 +251,149 @@ class R1RuntimeStateSynchronizer:
                     },
                 }
             )
+        reviewed_candidate_ids = {
+            str(value)
+            for value in self.db.scalars(
+                select(EventCandidateReviewDecisionR1.candidate_id).where(
+                    EventCandidateReviewDecisionR1.tracking_job_id
+                    == job.tracking_job_id,
+                    EventCandidateReviewDecisionR1.ambiguity_id == ambiguity_id,
+                    EventCandidateReviewDecisionR1.candidate_id.is_not(None),
+                )
+            ).all()
+            if value
+        }
+        if reviewed_candidate_ids:
+            candidates = [
+                item
+                for item in candidates
+                if str(item.get("candidate_id") or "") not in reviewed_candidate_ids
+            ]
         if not candidates:
             raise R1RuntimeSyncError("EMPTY_PENDING_AMBIGUITY_FORBIDDEN")
+
+        phase4b_evidence = [
+            _object(item.get("score_evidence"))
+            for item in candidates
+            if _object(item.get("score_evidence")).get("phase4b_policy")
+        ]
+        if phase4b_evidence:
+            if len(phase4b_evidence) != len(candidates):
+                raise R1RuntimeSyncError(
+                    "Phase 4-B ambiguity mixes incompatible score evidence."
+                )
+            memory_ids = {
+                str(item.get("memory_revision_id") or "")
+                for item in phase4b_evidence
+            }
+            memory_shas = {
+                str(item.get("memory_revision_sha256") or "")
+                for item in phase4b_evidence
+            }
+            generations = {
+                int(item.get("candidate_scoring_generation") or 0)
+                for item in phase4b_evidence
+            }
+            if (
+                len(memory_ids) != 1
+                or "" in memory_ids
+                or len(memory_shas) != 1
+                or "" in memory_shas
+                or len(generations) != 1
+                or min(generations) < 2
+                or any(
+                    item.get("backend_memory_used_by_phase4b_scoring") is not True
+                    or item.get("automatic_target_confirmation") is not False
+                    for item in phase4b_evidence
+                )
+            ):
+                raise R1RuntimeSyncError(
+                    "Phase 4-B score evidence is incomplete or inconsistent."
+                )
+            memory_id = next(iter(memory_ids))
+            memory_sha = next(iter(memory_shas))
+            generation = next(iter(generations))
+            if pipeline.current_memory_revision_id != memory_id:
+                raise R1RuntimeSyncError(
+                    "Phase 4-B scoring did not use the current target memory revision."
+                )
+            memory_row = self.db.get(EventCandidateMemoryRevisionR1, memory_id)
+            if memory_row is None or memory_row.artifact_sha256 != memory_sha:
+                raise R1RuntimeSyncError(
+                    "Phase 4-B target memory SHA provenance mismatch."
+                )
+            metadata = dict(job.runtime_metadata or {})
+            scene = dict(metadata.get("scene_target_selection") or {})
+            scene["candidate_scoring_generation"] = generation
+            scene["current_target_memory_path"] = str(
+                self.storage.resolve_path(memory_row.artifact_path)
+            )
+            scene["current_target_memory_sha256"] = memory_sha
+
+            identity_rows = [
+                _object(item.get("identity_negative_memory"))
+                for item in phase4b_evidence
+            ]
+            identity_rows = [
+                item for item in identity_rows if item.get("revision_id")
+            ]
+            if identity_rows:
+                revision_ids = {str(item.get("revision_id") or "") for item in identity_rows}
+                manifest_shas = {
+                    str(item.get("manifest_sha256") or "") for item in identity_rows
+                }
+                embedding_shas = {
+                    str(item.get("embeddings_sha256") or "") for item in identity_rows
+                }
+                if (
+                    len(identity_rows) != len(phase4b_evidence)
+                    or len(revision_ids) != 1
+                    or "" in revision_ids
+                    or len(manifest_shas) != 1
+                    or "" in manifest_shas
+                    or len(embedding_shas) != 1
+                    or "" in embedding_shas
+                    or any(
+                        item.get("user_confirmed_only") is not True
+                        or item.get("automatic_target_confirmation") is not False
+                        for item in identity_rows
+                    )
+                ):
+                    raise R1RuntimeSyncError(
+                        "Phase 4-B identity-negative memory provenance is inconsistent."
+                    )
+                identity = identity_rows[0]
+                manifest_path = Path(str(identity.get("manifest_path") or "")).resolve()
+                embeddings_path = Path(str(identity.get("embeddings_path") or "")).resolve()
+                if (
+                    not manifest_path.is_file()
+                    or sha256_file(manifest_path) != next(iter(manifest_shas))
+                    or not embeddings_path.is_file()
+                    or sha256_file(embeddings_path) != next(iter(embedding_shas))
+                ):
+                    raise R1RuntimeSyncError(
+                        "Phase 4-B identity-negative memory artifact changed or is missing."
+                    )
+                scene["current_identity_negative_memory_revision_id"] = next(
+                    iter(revision_ids)
+                )
+                scene["current_identity_negative_memory_path"] = str(manifest_path)
+                scene["current_identity_negative_memory_sha256"] = next(
+                    iter(manifest_shas)
+                )
+                scene["current_identity_negative_embeddings_path"] = str(
+                    embeddings_path
+                )
+                scene["current_identity_negative_embeddings_sha256"] = next(
+                    iter(embedding_shas)
+                )
+                scene["current_identity_negative_embedding_count"] = int(
+                    identity.get("embedding_count") or 0
+                )
+
+            metadata["scene_target_selection"] = scene
+            job.runtime_metadata = metadata
+
         first = candidates[0]
         artifact = Path(job.output_directory) / "ambiguities" / f"{ambiguity_id}.json"
         artifact_doc = {
@@ -384,12 +533,35 @@ class R1RuntimeStateSynchronizer:
         pending = extract_pending_ambiguity(state)
         ambiguity = None
         if pending is not None:
-            ambiguity = self._sync_ambiguity(job=job, pipeline=pipeline, payload=pending)
+            incoming_id = str(pending.get("ambiguity_id") or "")
+            current_pending = None
+            if pipeline.pending_ambiguity_id and pipeline.pending_ambiguity_id != incoming_id:
+                current_pending = self.db.scalar(
+                    select(EventCandidateAmbiguityR1).where(
+                        EventCandidateAmbiguityR1.tracking_job_id
+                        == job.tracking_job_id,
+                        EventCandidateAmbiguityR1.ambiguity_id
+                        == pipeline.pending_ambiguity_id,
+                        EventCandidateAmbiguityR1.status == "WAITING",
+                    )
+                )
+            # A DB-created R14 catalog generation is newer than the stale runtime
+            # pending action. Human decisions must not be rolled back to WAITING.
+            ambiguity = current_pending or self._sync_ambiguity(
+                job=job,
+                pipeline=pipeline,
+                payload=pending,
+            )
             pipeline.pending_ambiguity_id = ambiguity.ambiguity_id
             pipeline.next_shot_id = ambiguity.shot_id
             pipeline.current_shot_id = ambiguity.shot_id
             pipeline.pipeline_stage = R1PipelineStage.WAITING_CROSS_SHOT_CONFIRMATION.value
             pipeline.processing_status = R1ProcessingStatus.WAITING.value
+            pipeline.completed_at = None
+            pipeline.failure_code = None
+            job.completed_at = None
+            job.finished_at = None
+            job.failure_code = None
         else:
             pipeline.pending_ambiguity_id = None
             pipeline.next_shot_id = None
@@ -450,6 +622,14 @@ class R1RuntimeStateSynchronizer:
                 "runtime_status": state.get("status"),
                 "runtime_decision": state.get("decision"),
                 "automatic_target_confirmation": False,
+                "phase4b_identity_negative_memory": _object(
+                    _object(state.get("runtime")).get("phase4b_identity_negative_memory")
+                ),
+                "phase4b_persistent_role_negative_memory": _object(
+                    _object(state.get("runtime")).get(
+                        "phase4b_persistent_role_negative_memory"
+                    )
+                ),
             }
         )
         pipeline.summary = summary
@@ -477,6 +657,11 @@ class R1RuntimeStateSynchronizer:
         elif completion == TrackingBackendStatus.WAITING_MEMORY_REVIEW:
             pipeline.pipeline_stage = R1PipelineStage.WAITING_MEMORY_REVIEW.value
             pipeline.processing_status = R1ProcessingStatus.WAITING.value
+            pipeline.completed_at = None
+            pipeline.failure_code = None
+            job.completed_at = None
+            job.finished_at = None
+            job.failure_code = None
         elif ambiguity is None:
             pipeline.pipeline_stage = R1PipelineStage.SEARCHING_NEXT_SHOT.value
             pipeline.processing_status = R1ProcessingStatus.PROCESSING.value

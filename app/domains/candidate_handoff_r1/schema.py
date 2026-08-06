@@ -26,6 +26,16 @@ class CandidateReviewState(str, Enum):
     DIFFERENT_PLAYER = "DIFFERENT_PLAYER"
     UNREVIEWABLE_LOW_RESOLUTION = "UNREVIEWABLE_LOW_RESOLUTION"
     TARGET_ABSENT = "TARGET_ABSENT"
+    NONE_OF_THESE = "NONE_OF_THESE"
+    NONE_OF_THESE_NON_PLAYER_ROLE = "NONE_OF_THESE_NON_PLAYER_ROLE"
+
+
+class CandidateReviewContinuation(str, Enum):
+    REVIEW_NEXT_CANDIDATE = "REVIEW_NEXT_CANDIDATE"
+    REVIEW_NEXT_BATCH = "REVIEW_NEXT_BATCH"
+    SEARCH_NEXT_SHOT = "SEARCH_NEXT_SHOT"
+    TRACKING_RESUMED = "TRACKING_RESUMED"
+    COMPLETED = "COMPLETED"
 
 
 class CandidateMediaRead(BaseModel):
@@ -142,18 +152,35 @@ class CandidateReviewDecisionRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_evidence(self):
-        if self.state == CandidateReviewState.TARGET_ABSENT:
+        full_shot_states = {
+            CandidateReviewState.TARGET_ABSENT,
+            CandidateReviewState.NONE_OF_THESE,
+            CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE,
+        }
+        if self.state in full_shot_states:
             if self.candidate_id is not None:
                 raise ValueError(
-                    "TARGET_ABSENT is a full-shot decision and has no candidate_id."
+                    f"{self.state.value} is a full-shot decision and has no candidate_id."
                 )
             if not self.full_frame_context_sha256 or not self.shot_clip_sha256:
                 raise ValueError(
-                    "TARGET_ABSENT requires full-frame context and shot clip evidence."
+                    f"{self.state.value} requires exact full-frame context and shot clip evidence."
                 )
         elif not self.candidate_id:
             raise ValueError(f"{self.state.value} requires candidate_id.")
         return self
+
+
+class CandidateReviewResponse(BaseModel):
+    decision_id: str
+    state: str
+    candidate_id: str | None = None
+    artifact_sha256: str
+    continuation: CandidateReviewContinuation
+    remaining_candidate_count: int = Field(ge=0)
+    next_candidate_id: str | None = None
+    next_ambiguity_id: str | None = None
+    automatic_target_confirmation: Literal[False] = False
 
 
 class CandidateQuality(BaseModel):

@@ -233,6 +233,20 @@ class HighlightClipPlanResponse(BaseModel):
     item_count: int
 
 
+class TrackingHighlightCandidateResponse(BaseModel):
+    tracking_job_id: str
+    revision_id: str
+    scene_id: str
+    candidate_id: str
+    binding_id: str
+    binding_status: str
+    tracking_status: str
+    eligible_for_clip_plan: bool
+    clip_plan_id: str | None = None
+    unresolved_gaps: bool = False
+    automatic_target_confirmation: bool = False
+
+
 class HighlightRenderRequest(BaseModel):
     revision_id: str | None = None
     options: dict[str, Any] = Field(default_factory=dict)

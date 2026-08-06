@@ -25,6 +25,7 @@ from app.domains.candidate_handoff_r1.model import EventCandidateAmbiguityR1
 from app.storage.local_storage import LocalStorage
 from sqlalchemy import select
 from app.domains.candidate_handoff_r1.schema import (
+    CandidateReviewResponse,
     CandidateReviewDecisionRequest,
     CandidateRecommendationPrepareRequest,
     EventCandidateRecommendationResponse,
@@ -401,6 +402,7 @@ def create_selected_candidate_tracking(
 @router.post(
     "/tracking/jobs/{job_id}/ambiguities/{ambiguity_id}/candidate-review",
     status_code=status.HTTP_201_CREATED,
+    response_model=CandidateReviewResponse,
 )
 def record_candidate_review_state(
     job_id: str,
@@ -424,6 +426,12 @@ def record_candidate_review_state(
         "state": row.decision_state,
         "candidate_id": row.candidate_id,
         "artifact_sha256": row.decision_artifact_sha256,
+        "continuation": (row.metadata_ or {}).get("continuation", "TRACKING_RESUMED"),
+        "remaining_candidate_count": int(
+            (row.metadata_ or {}).get("remaining_candidate_count") or 0
+        ),
+        "next_candidate_id": (row.metadata_ or {}).get("next_candidate_id"),
+        "next_ambiguity_id": (row.metadata_ or {}).get("next_ambiguity_id"),
         "automatic_target_confirmation": False,
     }
 
@@ -460,3 +468,48 @@ def get_ambiguity_evidence(
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Evidence artifact is missing.")
     return FileResponse(path, media_type=mime, filename=path.name)
+
+
+@router.get(
+    "/tracking/jobs/{job_id}/ambiguities/{ambiguity_id}"
+    "/candidates/{candidate_id}/media/{media_name}",
+    summary="Download authenticated immutable R1 candidate review media",
+)
+def get_ambiguity_candidate_media(
+    job_id: str,
+    ambiguity_id: str,
+    candidate_id: str,
+    media_name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> FileResponse:
+    require_tracking_job_access(db, job_id, current_user)
+    ambiguity = db.scalar(
+        select(EventCandidateAmbiguityR1).where(
+            EventCandidateAmbiguityR1.tracking_job_id == job_id,
+            EventCandidateAmbiguityR1.ambiguity_id == ambiguity_id,
+        )
+    )
+    if ambiguity is None:
+        raise HTTPException(status_code=404, detail="Ambiguity not found.")
+    candidate = next(
+        (
+            dict(row)
+            for row in ambiguity.candidates or []
+            if str(row.get("candidate_id") or "") == candidate_id
+        ),
+        None,
+    )
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Candidate not found.")
+    media_fields = {
+        "reference-gallery": ("reference_gallery_path", "image/jpeg"),
+        "full-frame-context": ("full_frame_context_path", "image/jpeg"),
+    }
+    field = media_fields.get(media_name)
+    if field is None:
+        raise HTTPException(status_code=404, detail="Candidate media not found.")
+    path = LocalStorage().resolve_path(str(candidate.get(field[0]) or ""))
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Candidate media artifact is missing.")
+    return FileResponse(path, media_type=field[1], filename=path.name)

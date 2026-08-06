@@ -17,6 +17,7 @@ from app.domains.auth.access import (
     require_artifact_access,
     require_media_access,
     require_project_access,
+    require_tracking_job_access,
 )
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
@@ -99,10 +100,33 @@ from app.domains.highlight.schema import (
     SceneWideCandidateRead,
     SceneWideCandidateDiscoveryRequest,
     SceneWideCandidateGalleryResponse,
+    TrackingHighlightCandidateResponse,
 )
 from app.domains.highlight.service import HighlightWorkflowService
 from app.domains.render.service import RenderJobService
 router = APIRouter()
+
+
+@router.post(
+    "/projects/{project_id}/highlight/tracking-jobs/{job_id}/candidate",
+    response_model=TrackingHighlightCandidateResponse,
+    summary="Include a trusted tracking result as a highlight candidate",
+)
+def include_tracking_highlight_candidate(
+    project_id: str,
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> TrackingHighlightCandidateResponse:
+    project = require_project_access(db, project_id, current_user)
+    job = require_tracking_job_access(db, job_id, current_user)
+    try:
+        return HighlightWorkflowService(db).include_tracking_job_candidate(
+            project=project,
+            job=job,
+        )
+    except ValueError as exc:
+        _raise_workflow_error(exc)
 
 
 @router.post(

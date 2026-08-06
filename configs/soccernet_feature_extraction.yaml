@@ -10,6 +10,12 @@ feature_extraction:
   mode: "auto"
 
   chunk_sec: 300
+  batch_size: 16
+
+  # Empty means: ACTION_SPOTTING_PYTHON_EXECUTABLE -> current backend Python.
+  # A dedicated feature-extraction environment may be configured here when needed.
+  python_executable: ""
+  runtime_probe_timeout_sec: 120
 
   sn_spotting_root: "external/sn-spotting"
   video_feature_extractor: "external/sn-spotting/Features/VideoFeatureExtractor.py"
@@ -25,6 +31,6 @@ feature_extraction:
     overwrite: false
 
   failure_policy:
-    # auto/fallback 개발 중에는 true.
-    # strict real 테스트에서는 job option으로 false를 줄 수 있다.
-    allow_analysis_to_continue_on_failure: true
+    # Champion Action Spotting has no synthetic fallback. Stop at the original
+    # feature-extraction error instead of continuing to a misleading feature error.
+    allow_analysis_to_continue_on_failure: false

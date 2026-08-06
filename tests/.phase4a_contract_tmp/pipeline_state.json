@@ -1,0 +1,23 @@
+{
+  "status": "COMPLETE_WITH_SAFE_BLOCK",
+  "decision": "AUTHORIZE_PHASE4B_CROSS_SHOT_SCORING",
+  "pending_action": null,
+  "shots": [
+    {
+      "shot_id": "shot_0004",
+      "status": "SEARCHING_MEMORY_READY"
+    }
+  ],
+  "runtime": {
+    "phase4a_initial_memory_build_complete": true,
+    "phase4a_initial_memory_review_status": "PASS",
+    "memory_revision_path": "D:\\HAESUNG\\prometheus\\KickClip-backend\\tests\\.phase4a_contract_tmp\\initial_memory.json",
+    "memory_revision_sha256": "52bc0aff4223122fd5a57a7b8e0890b4f7fd8223e1d4f6b89f4c88fcea992453",
+    "phase4a_initial_memory_reviewed_at": "2026-08-03T20:57:07+09:00",
+    "phase4b_cross_shot_scoring_authorized": true,
+    "backend_memory_used_by_provided_e2e_scoring": false,
+    "cross_shot_scoring_performed": false,
+    "automatic_target_confirmation": false
+  },
+  "updated_at": "2026-08-03T20:57:07+09:00"
+}

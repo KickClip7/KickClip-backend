@@ -27,6 +27,7 @@ from app.domains.tracking.execution import LEGACY_EXECUTION_KIND
 from app.domains.candidate_handoff_r1.model import (
     EventCandidateAmbiguityR1,
     EventCandidateMemoryRevisionR1,
+    EventCandidatePipelineR1,
     EventCandidateReviewDecisionR1,
 )
 from app.domains.tracking.repository import TrackingJobRepository
@@ -302,11 +303,15 @@ class TrackingJobService:
                 )
         elif payload.candidate_id is not None:
             raise TrackingValidationError(
-                "candidate_id must be omitted when confirming target absence."
+                "candidate_id must be omitted for absent/none-of-these/non-player-role decisions."
             )
 
+        action_kind = {
+            "none_of_these": "none_of_these",
+            "non_player_role": "non_player_role",
+        }.get(payload.decision.value, "ambiguity")
         job.queued_action = {
-            "kind": "ambiguity",
+            "kind": action_kind,
             "ambiguity_id": ambiguity_id,
             "decision": payload.decision.value,
             "candidate_id": candidate or None,
@@ -338,6 +343,11 @@ class TrackingJobService:
             else None
         )
         ambiguity = None
+        pipeline = self.db.scalar(
+            select(EventCandidatePipelineR1).where(
+                EventCandidatePipelineR1.tracking_job_id == job.tracking_job_id
+            )
+        )
         if job.pending_ambiguity_id:
             ambiguity = self.db.scalar(
                 select(EventCandidateAmbiguityR1).where(
@@ -345,10 +355,51 @@ class TrackingJobService:
                     EventCandidateAmbiguityR1.ambiguity_id == job.pending_ambiguity_id,
                 )
             )
+        active_candidates: list[dict] = []
+        if ambiguity is not None:
+            active_candidates = [
+                dict(item)
+                for item in (ambiguity.candidates or [])
+                if str(item.get("status") or "").upper() == "PENDING"
+            ]
+            active_candidate_ids = [
+                str(item.get("candidate_id") or "")
+                for item in active_candidates
+                if item.get("candidate_id")
+            ]
+            if list(ambiguity.candidate_ids or []) != active_candidate_ids:
+                raise TrackingContractError(
+                    "Pending ambiguity candidate_ids do not match PENDING candidates."
+                )
+        if job.status == TrackingBackendStatus.WAITING_CROSS_SHOT_CONFIRMATION.value:
+            if (
+                pipeline is None
+                or pipeline.pending_ambiguity_id != job.pending_ambiguity_id
+                or ambiguity is None
+                or ambiguity.status != "WAITING"
+                or not active_candidates
+            ):
+                raise TrackingContractError(
+                    "WAITING_CROSS_SHOT_CONFIRMATION requires one active WAITING ambiguity."
+                )
+        if (
+            pending is not None
+            and ambiguity is not None
+            and pending.ambiguity_id == ambiguity.ambiguity_id
+        ):
+            pending = pending.model_copy(
+                update={
+                    "candidate_ids": list(ambiguity.candidate_ids or []),
+                    "candidates": [
+                        TrackingCandidateRead.model_validate(item)
+                        for item in active_candidates
+                    ],
+                }
+            )
         artifact_readiness = {
             "pipeline_state": Path(job.pipeline_state_path).is_file(),
             "timeline": bool(job.timeline_path and Path(job.timeline_path).is_file()),
-            "pending_ambiguity": bool(ambiguity and ambiguity.candidate_ids and ambiguity.candidates),
+            "pending_ambiguity": bool(ambiguity and active_candidates),
             "target_memory": bool(memory and memory.reference_frame_ids and memory.references),
         }
         preview_readiness = {
@@ -408,13 +459,39 @@ class TrackingJobService:
                     "shot_id": ambiguity.shot_id,
                     "status": ambiguity.status,
                     "candidate_ids": list(ambiguity.candidate_ids),
-                    "candidates": list(ambiguity.candidates),
+                    "candidates": active_candidates,
                     "artifact_sha256": ambiguity.artifact_sha256,
                     "full_frame_context_sha256": ambiguity.full_frame_context_sha256,
                     "shot_clip_sha256": ambiguity.shot_clip_sha256,
+                    "generation": ambiguity.generation,
                 }
                 if ambiguity else None
             ),
+            review_progress={
+                "reviewed_candidate_count": int(
+                    ((pipeline.summary or {}) if pipeline else {}).get(
+                        "reviewed_candidate_count", 0
+                    )
+                ),
+                "remaining_candidate_count": len(active_candidates)
+                if ambiguity
+                else 0,
+                "candidate_batch_generation": int(ambiguity.generation)
+                if ambiguity
+                else int(
+                    ((pipeline.summary or {}) if pipeline else {}).get(
+                        "candidate_batch_generation", 0
+                    )
+                ),
+                "current_shot": job.current_shot_id,
+                "preparing_next_candidates": bool(
+                    job.status in {
+                        TrackingBackendStatus.QUEUED.value,
+                        TrackingBackendStatus.RUNNING.value,
+                    }
+                    and not job.pending_ambiguity_id
+                ),
+            },
             current_shot=job.current_shot_id,
             next_shot=job.next_shot_id,
             completed=job.pipeline_stage == "COMPLETED",
@@ -523,7 +600,7 @@ class TrackingJobService:
         if action_type == "MEMORY_REVIEW":
             required = "Approve or reject the MEMORY review after inspecting artifacts."
         elif action_type == "CROSS_SHOT_CONFIRMATION":
-            required = "Select a listed candidate or confirm that the target is absent."
+            required = "Select a listed candidate, choose none of these, or confirm that the target is absent."
         else:
             required = (
                 "Approve or reject the exact visual review stage after inspection."

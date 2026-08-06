@@ -311,3 +311,6 @@ service-account*.json
 service_account*.json
 credentials*.json
 !credentials*.example.json
+
+phase4a_input_bundle/
+phase4a_live_error_bundle/

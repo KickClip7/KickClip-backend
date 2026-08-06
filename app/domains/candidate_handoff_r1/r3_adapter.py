@@ -15,6 +15,8 @@ from app.domains.tracking.model import TrackingJob
 from app.storage.local_storage import LocalStorage
 
 
+SELECTED_SHOT_TRACKING_POLICY = "SELECTED_SHOT_ANCHOR_BIDIRECTIONAL_R1"
+
 class R1R3AdapterError(ValueError):
     """Raised when immutable R1 selection artifacts cannot form an R3 launch."""
 
@@ -221,6 +223,10 @@ class R1R3InputAdapter:
             "tracklet_id": selection.tracklet_id,
             "best_anchor_frame": anchor_frame,
             "best_anchor_bbox_xyxy": [float(value) for value in anchor_bbox],
+            "selected_shot_tracking_policy": SELECTED_SHOT_TRACKING_POLICY,
+            "selected_shot_bidirectional_required": True,
+            "selected_shot_forward_frame_count": shot_end - anchor_frame + 1,
+            "selected_shot_backward_frame_count": anchor_frame - shot_start + 1,
             "source_video_sha256": selection.source_video_sha256,
             "reviewed_shot_boundaries_sha256": selection.reviewed_shot_boundaries_sha256,
             "scene_target_selection_manifest": scene_manifest,
@@ -229,11 +235,16 @@ class R1R3InputAdapter:
             "automatic_target_confirmation": False,
         }
         target_selection = {
-            "schema_version": "kickclip.r1_target_selection.v1",
+            "schema_version": "kickclip.r1_target_selection.v2",
             "immutable": True,
             **provenance,
             "selected_shot_start_frame": shot_start,
             "selected_shot_end_frame_inclusive": shot_end,
+            "selected_shot_frame_count": shot_end - shot_start + 1,
+            "anchor_offset_from_shot_start": anchor_frame - shot_start,
+            "selected_shot_forward_frame_count": shot_end - anchor_frame + 1,
+            "selected_shot_backward_frame_count": anchor_frame - shot_start + 1,
+            "selected_shot_bidirectional_required": True,
             "selection_record": {
                 "path": str(selection_record_path),
                 "sha256": selection.selection_artifact_sha256,
@@ -287,6 +298,7 @@ class R1R3InputAdapter:
             )
 
         cache_material = {
+            "tracking_cache_contract_version": "kickclip.r1_tracking_cache_material.v2",
             **provenance,
             "target_selection_sha256": target_selection_sha,
             "target_reference_set_sha256": target_reference_set_sha,
@@ -297,7 +309,7 @@ class R1R3InputAdapter:
         cache_key_path = root / "tracking_cache_material.json"
         tracking_cache_key = write_json_atomic(cache_key_path, cache_material)
         launch_manifest = {
-            "schema_version": "kickclip.r1_v1_v2_launch_manifest.v1",
+            "schema_version": "kickclip.r1_v1_v2_launch_manifest.v2",
             "integration_path": "B.ADD_THIN_BACKEND_ADAPTER_TO_V1_V2_STAGES",
             "tracking_job_id": job.tracking_job_id,
             "test_name": job.test_name,
@@ -328,6 +340,8 @@ class R1R3InputAdapter:
             ),
             "candidate_scoring_generation": candidate_scoring_generation,
             "tracking_cache_key": tracking_cache_key,
+            "selected_shot_tracking_policy": SELECTED_SHOT_TRACKING_POLICY,
+            "selected_shot_bidirectional_required": True,
             "automatic_target_confirmation": False,
         }
         tracking_launch_manifest_path = root / "tracking_launch_manifest.json"
@@ -358,6 +372,10 @@ class R1R3InputAdapter:
         metadata["scene_target_selection"] = result.runtime_metadata()
         metadata["r1_runtime_integration"] = {
             "integration_path": "B.ADD_THIN_BACKEND_ADAPTER_TO_V1_V2_STAGES",
+            "selected_shot_tracking_policy": SELECTED_SHOT_TRACKING_POLICY,
+            "selected_shot_bidirectional_required": True,
+            "reverse_phase1_execution_complete": False,
+            "timeline_merge_complete": False,
             "frame_zero_fallback_used": False,
             "automatic_target_confirmation": False,
         }

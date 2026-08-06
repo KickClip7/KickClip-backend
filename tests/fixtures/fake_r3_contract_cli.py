@@ -147,9 +147,9 @@ def main() -> int:
             }
         )
     elif args.rejected_candidate:
-        state["status"] = "COMPLETE_WITH_SAFE_BLOCK"
-        state["decision"] = "CONTRACT_REJECTION_REPORTED"
-        state["failure_code"] = "RUNTIME_REJECTION_RESUME_UNSUPPORTED"
+        state["status"] = "COMPLETE_WITH_UNRESOLVED_GAPS"
+        state["decision"] = "CONTRACT_REJECTION_RESUMED_TO_EXHAUSTION"
+        state["shots"][1]["status"] = "SEARCH_EXHAUSTED_NONE_OF_THESE"
     elif args.unreviewable_candidate:
         state["status"] = "COMPLETE_WITH_UNRESOLVED_GAPS"
         state["decision"] = "CONTRACT_UNREVIEWABLE_REPORTED"
