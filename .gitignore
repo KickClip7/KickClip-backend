@@ -38,6 +38,7 @@ htmlcov/
 # =============================================================================
 
 .venv/
+.venv-tracking/
 venv/
 venv311/
 env/
@@ -256,6 +257,9 @@ Desktop.ini
 
 # Local extraction of the separately distributed tracking runtime bundle.
 /.tracking-runtime/
+
+# Pristine distribution copy of the frozen tracking runtime (122MB 가중치 포함 — GitHub 업로드 금지).
+/kickclip_tracking_runtime_minimal_20260730/
 
 # Local-only tracking development and handoff materials.
 # Backend integration code under app/ and database migrations remain tracked.
