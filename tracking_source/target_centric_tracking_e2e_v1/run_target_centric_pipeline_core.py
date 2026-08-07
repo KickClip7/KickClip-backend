@@ -11,8 +11,10 @@ This orchestrator does not modify the frozen V1/V2 source trees. It reuses:
 - V2 Stage 3-B3 anchor-selection helper;
 - frozen V1 same-shot tracking/finalization scripts.
 
-The default mode is assisted. Cross-shot candidates are never silently linked:
-AMBIGUOUS and even auto-gate candidates pause for explicit user confirmation.
+The default product mode is assisted-safe. Frozen Stage 3-B2 safe-gate PASS
+candidates are automatically reacquired; only AMBIGUOUS candidates pause for
+explicit user confirmation. Same-shot research visual-review checkpoints are
+consumed internally by the product wrapper and are never exposed as user tasks.
 
 Backend integration contract:
 - V7 is not a runtime dependency.
@@ -42,7 +44,7 @@ import numpy as np
 
 SCHEMA_VERSION = "kickclip.target_centric_e2e.v1"
 STATE_VERSION = "kickclip.target_centric_e2e_state.v1"
-PIPELINE_VERSION = "1.0.0"
+PIPELINE_VERSION = "1.1.0-product-assisted-intent"
 
 UNCERTAIN_STATES = {"LOST", "SEARCHING", "AMBIGUOUS", "ABSENT", "TERMINATED"}
 CONFIRMED_STATES = {
@@ -101,7 +103,251 @@ TEAM_PROFILE_MIN_CANDIDATE_SAMPLES = 2
 TEAM_PREFILTER_MIN_BEST_SIMILARITY = 0.55
 TEAM_PREFILTER_MAX_INCOMPATIBLE_SIMILARITY = 0.35
 TEAM_PREFILTER_MIN_GAP_FROM_BEST = 0.25
-ASSISTED_REVIEW_BATCH_SIZE = 2
+ASSISTED_REVIEW_BATCH_SIZE = int(B2_POLICY["review_candidate_count"])
+PRODUCT_NEGATIVE_MEMORY_MAX_REFERENCES = 16
+PRODUCT_NEGATIVE_MEMORY_MIN_REFERENCES = 4
+PRODUCT_NEGATIVE_MEMORY_MIN_CONFIDENCE = 0.25
+PRODUCT_NEGATIVE_MEMORY_MIN_BOX_HEIGHT_PX = 24.0
+PRODUCT_NEGATIVE_MEMORY_MAX_TARGET_IOU = 0.02
+PRODUCT_NEGATIVE_MEMORY_MIN_TARGET_CENTER_DISTANCE = 0.55
+PRODUCT_NEGATIVE_PERSON_CLASS_IDS = frozenset({0, 1, 2, 3})
+
+# Product scene policy. KickClip intentionally tracks only on-field WIDE shots.
+# Broadcast CLOSEUP and MIXED/transition shots are treated as non-trackable
+# context: no cross-shot candidate ranking, no ambiguity, and no user review.
+# This removes coach/staff close-up false positives from the target-tracking
+# problem instead of attempting to solve role classification there.
+PRODUCT_TRACKING_SCENE_POLICY_VERSION = "WIDE_ONLY_TARGET_TRACKING_R1"
+PRODUCT_TRACKING_ALLOWED_SCENE_MODES = frozenset({"WIDE"})
+PRODUCT_TRACKING_SCENE_PERSON_CLASS_IDS = frozenset({0, 1, 2, 3})
+PRODUCT_TRACKING_SCENE_OBSERVATION_CONFIDENCE = 0.25
+PRODUCT_TRACKING_SCENE_CLOSEUP_MIN_HEIGHT_RATIO = 0.35
+PRODUCT_TRACKING_SCENE_CLOSEUP_MIN_AREA_RATIO = 0.08
+PRODUCT_TRACKING_SCENE_CLOSEUP_RATIO_MIN = 0.70
+PRODUCT_TRACKING_SCENE_WIDE_RATIO_MAX = 0.30
+
+
+def _register_product_sports_osnet_safe_globals(torch: Any) -> dict[str, Any]:
+    """Register the minimal NumPy dtype globals required by the frozen Sports-OSNet checkpoint.
+
+    The checkpoint hash is verified by the caller before this compatibility hook
+    is used.  We keep ``weights_only=True`` in the frozen loader and only add
+    the exact legacy/modern NumPy globals observed in this trusted checkpoint.
+    ``weights_only=False`` remains forbidden.
+    """
+    serialization = getattr(torch, "serialization", None)
+    add_safe_globals = getattr(serialization, "add_safe_globals", None)
+    if add_safe_globals is None:
+        raise RuntimeError(
+            "torch.serialization.add_safe_globals is required for the frozen "
+            "Sports-OSNet checkpoint on this PyTorch runtime"
+        )
+
+    numpy_core = getattr(np, "_core", None)
+    multiarray = getattr(numpy_core, "multiarray", None)
+    numpy_scalar = getattr(multiarray, "scalar", None)
+    if numpy_scalar is None:
+        legacy_core = getattr(np, "core", None)
+        legacy_multiarray = getattr(legacy_core, "multiarray", None)
+        numpy_scalar = getattr(legacy_multiarray, "scalar", None)
+    if numpy_scalar is None:
+        raise RuntimeError(
+            "NumPy multiarray.scalar is unavailable; cannot authorize the "
+            "trusted legacy Sports-OSNet checkpoint safely"
+        )
+
+    safe_entries: list[Any] = [
+        (numpy_scalar, "numpy.core.multiarray.scalar"),
+        (numpy_scalar, "numpy._core.multiarray.scalar"),
+        (np.dtype, "numpy.dtype"),
+    ]
+    registered_names = [
+        "numpy.core.multiarray.scalar",
+        "numpy._core.multiarray.scalar",
+        "numpy.dtype",
+    ]
+
+    numpy_dtypes = getattr(np, "dtypes", None)
+    for dtype_name in ("Float64DType", "Float32DType"):
+        dtype_class = getattr(numpy_dtypes, dtype_name, None) if numpy_dtypes is not None else None
+        if dtype_class is not None:
+            qualified_name = f"numpy.dtypes.{dtype_name}"
+            safe_entries.append((dtype_class, qualified_name))
+            registered_names.append(qualified_name)
+
+    # PyTorch 2.6+ accepts (callable_or_type, serialized_global_name) tuples.
+    # The explicit legacy scalar alias is essential on NumPy 2.x because the
+    # live object now reports ``numpy._core`` while the checkpoint stores
+    # ``numpy.core.multiarray.scalar``.
+    add_safe_globals(safe_entries)
+    return {
+        "status": "REGISTERED",
+        "policy_version": "SPORTS_OSNET_NUMPY2_WEIGHTS_ONLY_COMPAT_R2",
+        "registered_safe_globals": registered_names,
+        "weights_only_false_allowed": False,
+    }
+
+
+
+def _bbox_iou_xyxy(a: Sequence[float], b: Sequence[float]) -> float:
+    ax1, ay1, ax2, ay2 = map(float, a)
+    bx1, by1, bx2, by2 = map(float, b)
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return 0.0 if union <= 0.0 else inter / union
+
+
+def _normalized_center_distance(a: Sequence[float], b: Sequence[float]) -> float:
+    ax1, ay1, ax2, ay2 = map(float, a)
+    bx1, by1, bx2, by2 = map(float, b)
+    acx, acy = (ax1 + ax2) * 0.5, (ay1 + ay2) * 0.5
+    bcx, bcy = (bx1 + bx2) * 0.5, (by1 + by2) * 0.5
+    reference = max(math.hypot(bx2 - bx1, by2 - by1), 1.0)
+    return math.hypot(acx - bcx, acy - bcy) / reference
+
+
+def _collect_initial_shot_negative_crops(
+    *,
+    video_path: Path,
+    detections_csv: Path,
+    timeline_path: Path,
+    first_shot_end: int,
+    tracking_threshold: float,
+) -> tuple[dict[str, np.ndarray], list[dict[str, Any]]]:
+    """Build conservative non-target memory from the user-selected initial shot.
+
+    Only person detections on frames where the frozen Stage-2 timeline has a
+    confirmed target bbox are eligible.  Detections too close to that target are
+    excluded to prevent target contamination.  This is negative evidence only;
+    it never changes target identity or frozen Stage-3B thresholds.
+    """
+
+    timeline = read_json(timeline_path)
+    target_by_frame: dict[int, list[float]] = {}
+    for raw in timeline.get("frames") or []:
+        try:
+            frame_index = int(raw.get("frame_index"))
+        except (TypeError, ValueError):
+            continue
+        if frame_index < 0 or frame_index > int(first_shot_end):
+            continue
+        if str(raw.get("state") or "") not in CONFIRMED_STATES:
+            continue
+        bbox = raw.get("bbox_xyxy")
+        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+            target_by_frame[frame_index] = [float(value) for value in bbox]
+
+    if not target_by_frame:
+        return {}, []
+
+    candidates: list[dict[str, Any]] = []
+    with detections_csv.open("r", encoding="utf-8-sig", newline="") as stream:
+        for raw in csv.DictReader(stream):
+            try:
+                frame_index = int(raw["frame_index"])
+                class_id = int(raw["class_id"])
+                confidence = float(raw["confidence"])
+                bbox = [float(raw[key]) for key in ("x1", "y1", "x2", "y2")]
+            except (KeyError, TypeError, ValueError):
+                continue
+            if frame_index not in target_by_frame:
+                continue
+            if class_id not in PRODUCT_NEGATIVE_PERSON_CLASS_IDS:
+                continue
+            if confidence < max(PRODUCT_NEGATIVE_MEMORY_MIN_CONFIDENCE, float(tracking_threshold)):
+                continue
+            if bbox[3] - bbox[1] < PRODUCT_NEGATIVE_MEMORY_MIN_BOX_HEIGHT_PX:
+                continue
+            target_bbox = target_by_frame[frame_index]
+            if _bbox_iou_xyxy(bbox, target_bbox) > PRODUCT_NEGATIVE_MEMORY_MAX_TARGET_IOU:
+                continue
+            if _normalized_center_distance(bbox, target_bbox) < PRODUCT_NEGATIVE_MEMORY_MIN_TARGET_CENTER_DISTANCE:
+                continue
+            candidates.append(
+                {
+                    "frame_index": frame_index,
+                    "detection_id": str(raw.get("detection_id") or f"f{frame_index:06d}"),
+                    "class_id": class_id,
+                    "class_name": str(raw.get("class_name") or "person"),
+                    "confidence": confidence,
+                    "bbox_xyxy": bbox,
+                }
+            )
+
+    if not candidates:
+        return {}, []
+
+    # Keep at most two strong non-target people per frame, then spread samples
+    # across time before filling remaining capacity.  This avoids a 16-crop
+    # gallery that is just one adjacent burst of the same person.
+    by_frame: dict[int, list[dict[str, Any]]] = {}
+    for row in candidates:
+        by_frame.setdefault(int(row["frame_index"]), []).append(row)
+    per_frame: list[dict[str, Any]] = []
+    for frame_index in sorted(by_frame):
+        rows = sorted(by_frame[frame_index], key=lambda item: float(item["confidence"]), reverse=True)
+        per_frame.extend(rows[:2])
+
+    selected: list[dict[str, Any]] = []
+    for row in sorted(per_frame, key=lambda item: (-float(item["confidence"]), int(item["frame_index"]))):
+        if any(abs(int(row["frame_index"]) - int(prev["frame_index"])) < 3 for prev in selected):
+            continue
+        selected.append(row)
+        if len(selected) >= PRODUCT_NEGATIVE_MEMORY_MAX_REFERENCES:
+            break
+    if len(selected) < PRODUCT_NEGATIVE_MEMORY_MAX_REFERENCES:
+        selected_ids = {str(item["detection_id"]) for item in selected}
+        for row in sorted(per_frame, key=lambda item: (-float(item["confidence"]), int(item["frame_index"]))):
+            if str(row["detection_id"]) in selected_ids:
+                continue
+            selected.append(row)
+            selected_ids.add(str(row["detection_id"]))
+            if len(selected) >= PRODUCT_NEGATIVE_MEMORY_MAX_REFERENCES:
+                break
+
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise RuntimeError(f"Cannot open video for negative target memory: {video_path}")
+    crops: dict[str, np.ndarray] = {}
+    provenance: list[dict[str, Any]] = []
+    try:
+        for index, row in enumerate(selected, start=1):
+            frame_index = int(row["frame_index"])
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                continue
+            height, width = frame.shape[:2]
+            x1, y1, x2, y2 = row["bbox_xyxy"]
+            left, top = max(0, int(math.floor(x1))), max(0, int(math.floor(y1)))
+            right, bottom = min(width, int(math.ceil(x2))), min(height, int(math.ceil(y2)))
+            if right <= left or bottom <= top:
+                continue
+            crop = frame[top:bottom, left:right]
+            if crop.size == 0:
+                continue
+            key = f"negative_{index:04d}"
+            crops[key] = crop
+            provenance.append(
+                {
+                    "reference_id": key,
+                    "frame_index": frame_index,
+                    "detection_id": row["detection_id"],
+                    "class_id": int(row["class_id"]),
+                    "class_name": row["class_name"],
+                    "confidence": float(row["confidence"]),
+                    "bbox_xyxy": [float(value) for value in row["bbox_xyxy"]],
+                    "selection_reason": "INITIAL_SHOT_CONFIRMED_TARGET_EXCLUSION_NEGATIVE",
+                }
+            )
+    finally:
+        capture.release()
+    return crops, provenance
 
 
 def parse_args() -> argparse.Namespace:
@@ -130,8 +376,9 @@ def parse_args() -> argparse.Namespace:
         choices=("assisted", "auto-safe"),
         default="assisted",
         help=(
-            "assisted pauses for every candidate link. auto-safe may accept a "
-            "candidate only when all frozen Stage 3-B2 gates pass."
+            "assisted is the product-safe mode: frozen Stage 3-B2 PASS is "
+            "automatically reacquired and only AMBIGUOUS shots require user "
+            "confirmation. auto-safe is retained as an equivalent compatibility alias."
         ),
     )
     parser.add_argument(
@@ -513,6 +760,63 @@ def manifest_script(root: Path, manifest: Mapping[str, Any], logical: str) -> Pa
     return path
 
 
+def manifest_model_is_verified(
+    root: Path,
+    manifest: Mapping[str, Any],
+    logical: str,
+) -> bool:
+    """Return True only when the frozen manifest's model file and hash verify.
+
+    Frozen Stage-0 performs legacy asset discovery outside the manifest contract.
+    On product installations that discovery can emit SPORTS_OSNET_NOT_FOUND even
+    though the exact frozen checkpoint has already been verified by the portable
+    manifest.  Product compatibility may normalize that legacy discovery warning
+    only when this authoritative check succeeds.
+    """
+
+    models = manifest.get("models")
+    if not isinstance(models, Mapping):
+        return False
+    record = models.get(logical)
+    if not isinstance(record, Mapping) or not bool(record.get("verified")):
+        return False
+    raw_path = str(record.get("path") or "").strip()
+    if not raw_path:
+        return False
+    path = resolve(root, normalized_relative_path(raw_path))
+    if not path.is_file():
+        return False
+    expected = str(
+        record.get("sha256") or record.get("expected_sha256") or ""
+    ).strip().lower()
+    if not expected:
+        return False
+    return sha256_file(path).lower() == expected
+
+
+def stage0_product_allowed_warning_codes(
+    root: Path,
+    manifest: Mapping[str, Any],
+    device: str,
+) -> frozenset[str]:
+    """Warnings that are safe for the product integration layer to normalize.
+
+    This does not modify frozen Stage-0 or its evidence.  CUDA absence is
+    expected when the runtime was requested as auto/cpu (for example macOS,
+    where the canonical tracking core currently falls back to CPU).  The
+    Sports-OSNet discovery warning is ignored only if the exact checkpoint
+    declared in the frozen manifest exists and its SHA-256 matches.
+    """
+
+    allowed = {"DURATION_OUTSIDE_RANGE"}
+    requested_device = str(device or "").strip().lower()
+    if requested_device in {"auto", "cpu"}:
+        allowed.add("CUDA_NOT_AVAILABLE")
+    if manifest_model_is_verified(root, manifest, "sports_osnet"):
+        allowed.add("SPORTS_OSNET_NOT_FOUND")
+    return frozenset(allowed)
+
+
 def video_metadata(path: Path) -> dict[str, Any]:
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
@@ -885,13 +1189,16 @@ def ensure_precut_phase1_stage2_source(
         ]
         run_command(command, root, output_dir / "logs" / "pipeline.log")
 
+    allowed_stage0_warnings = stage0_product_allowed_warning_codes(
+        root, manifest, device
+    )
     _materialize_phase1_stage0_compatibility(
         root,
         output_dir,
         raw_dir=raw_dir,
         source_dir=source_dir,
         source_test_name=source_test_name,
-        allowed_nonlegacy_warning_codes=frozenset({"DURATION_OUTSIDE_RANGE"}),
+        allowed_nonlegacy_warning_codes=allowed_stage0_warnings,
     )
 
     desired_conf = float(state.get("tracking_play_conf_threshold", 0.15))
@@ -1433,9 +1740,11 @@ def prepare_trusted_selected_reference_memory(
     """Seed identity memory from the immutable user-confirmed candidate gallery.
 
     This is a product integration layer only. Frozen V1/V2 files and thresholds
-    remain untouched. The reference gallery is positive identity evidence; no
-    synthetic negative gallery is invented. Therefore automatic cross-shot
-    acceptance is disabled when this reference-only memory is in use.
+    remain untouched. The user-selected gallery supplies positive identity
+    evidence. Conservative non-target person crops are mined only from the
+    confirmed initial shot and are excluded whenever they overlap/approach the
+    tracked target, recreating the target-vs-confuser memory used by the final
+    research design without requiring a separate human memory review.
     """
 
     reference_contract = state.get("target_reference_set")
@@ -1545,24 +1854,46 @@ def prepare_trusted_selected_reference_memory(
     device = torch.device(selected_device)
     if hasattr(reid, "configure_determinism"):
         reid.configure_determinism(torch)
+    safe_loader_compat = _register_product_sports_osnet_safe_globals(torch)
     model, model_contract = reid.build_model(torch, models, checkpoint, device)
+    model_contract = dict(model_contract)
+    model_contract["product_numpy_safe_globals_compat"] = safe_loader_compat
     transform = stage2b.build_transform()
+    negative_crops, negative_provenance = _collect_initial_shot_negative_crops(
+        video_path=Path(state["video"]["path"]).resolve(),
+        detections_csv=source_detections,
+        timeline_path=source_timeline,
+        first_shot_end=int(state["shots"][0]["end_frame_inclusive"]),
+        tracking_threshold=float(state.get("tracking_play_conf_threshold", 0.15)),
+    )
+    all_crops = {**crop_map, **negative_crops}
     embedded = stage2b.embed_crops(
-        crop_map,
+        all_crops,
         model,
         transform,
         torch,
         device,
         16,
     )
-    if len(embedded) != len(crop_map):
-        raise RuntimeError("Sports OSNet did not embed every selected target reference")
+    if len(embedded) != len(all_crops):
+        raise RuntimeError("Sports OSNet did not embed every target/negative reference crop")
     target = np.stack([embedded[key] for key in crop_map], axis=0).astype(np.float32)
     norms = np.linalg.norm(target, axis=1, keepdims=True)
     target = target / np.maximum(norms, 1e-12)
     prototype = target.mean(axis=0).astype(np.float32)
     prototype /= max(float(np.linalg.norm(prototype)), 1e-12)
-    negative = np.empty((0, target.shape[1]), dtype=np.float32)
+    if negative_crops:
+        negative = np.stack([embedded[key] for key in negative_crops], axis=0).astype(np.float32)
+        negative_norms = np.linalg.norm(negative, axis=1, keepdims=True)
+        negative = negative / np.maximum(negative_norms, 1e-12)
+    else:
+        negative = np.empty((0, target.shape[1]), dtype=np.float32)
+    negative_memory_ready = negative.shape[0] >= PRODUCT_NEGATIVE_MEMORY_MIN_REFERENCES
+    if not negative_memory_ready:
+        # Fewer than the minimum conservative negatives are not used for auto-safe
+        # acceptance. Keep the saved matrix for audit, but mark the memory as
+        # reference-only so cross-shot links continue to require review.
+        negative = np.empty((0, target.shape[1]), dtype=np.float32)
 
     memory_dir = output_dir / "work" / "selected_reference_memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
@@ -1597,7 +1928,14 @@ def prepare_trusted_selected_reference_memory(
         "status": "USER_CONFIRMED_REFERENCE_MEMORY",
         "source_stage": "BACKEND_USER_SELECTED_REFERENCE_SET",
         "backend_memory_used_for_scoring": True,
-        "reference_only_negative_memory": True,
+        "reference_only_negative_memory": not negative_memory_ready,
+        "negative_memory_source": (
+            "INITIAL_SHOT_CONFIRMED_TARGET_EXCLUSION"
+            if negative_memory_ready
+            else "INSUFFICIENT_CONSERVATIVE_NEGATIVE_REFERENCES"
+        ),
+        "negative_reference_count": int(negative.shape[0]),
+        "negative_references": negative_provenance if negative_memory_ready else [],
         "target_reference_set_path": str(reference_path),
         "target_reference_set_sha256": actual_sha,
         "reference_count": len(reference_provenance),
@@ -1625,7 +1963,12 @@ def prepare_trusted_selected_reference_memory(
         "target_reference_set_sha256": actual_sha,
         "contact_sheet": str(contact_sheet),
         "positive_reference_count": len(reference_provenance),
-        "negative_reference_count": 0,
+        "negative_reference_count": int(negative.shape[0]),
+        "negative_memory_source": (
+            "INITIAL_SHOT_CONFIRMED_TARGET_EXCLUSION"
+            if negative_memory_ready
+            else "INSUFFICIENT_CONSERVATIVE_NEGATIVE_REFERENCES"
+        ),
         "used_for_scoring": True,
         "frozen_v1_v2_modified": False,
     }
@@ -1689,7 +2032,10 @@ def load_runtime(root: Path, state: Mapping[str, Any], device_name: str) -> dict
     device = torch.device(selected_device)
     if hasattr(reid, "configure_determinism"):
         reid.configure_determinism(torch)
+    safe_loader_compat = _register_product_sports_osnet_safe_globals(torch)
     model, model_contract = reid.build_model(torch, models, checkpoint, device)
+    model_contract = dict(model_contract)
+    model_contract["product_numpy_safe_globals_compat"] = safe_loader_compat
     transform = stage2b.build_transform()
 
     target_gallery = np.load(state["memory"]["target_embeddings"], allow_pickle=False).astype(np.float32)
@@ -1775,7 +2121,7 @@ def gate_candidate_rows(ranked: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     )
     if all_pass:
         state = "AUTO_REACQUIRED_CANDIDATE"
-        decision = "AUTO_CANDIDATE_REQUIRES_ASSISTED_REVIEW"
+        decision = "AUTO_REACQUIRED_BY_FROZEN_SAFETY_GATE"
         proposed = str(top1["candidate_id"])
     elif plausible:
         state = "AMBIGUOUS"
@@ -1989,6 +2335,101 @@ def _materialize_candidate_evidence(
     }
 
 
+def _tracking_scene_mode_for_shot(
+    *,
+    state: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    shot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Classify one runtime shot for the WIDE-only product tracking policy.
+
+    Stage-1 detections already exist densely for the canonical E2E source, so
+    this adds no detector inference. A frame votes CLOSEUP when any sufficiently
+    confident person-role box occupies a large fraction of the frame. The shot
+    aggregates those frame votes using the same 0.70/0.30 policy used by
+    candidate discovery. MIXED is deliberately non-trackable.
+    """
+
+    width = max(1, int(state["video"]["width"]))
+    height = max(1, int(state["video"]["height"]))
+    frame_area = float(width * height)
+    start = int(shot["start_frame"])
+    end = int(shot["end_frame_inclusive"])
+    frame_count = max(1, end - start + 1)
+    closeup_votes = 0
+    person_detection_count = 0
+    max_height_ratios: list[float] = []
+    max_area_ratios: list[float] = []
+
+    for frame_index in range(start, end + 1):
+        frame_max_height = 0.0
+        frame_max_area = 0.0
+        for detection in runtime["by_frame"].get(frame_index, []):
+            if int(getattr(detection, "class_id", -1)) not in PRODUCT_TRACKING_SCENE_PERSON_CLASS_IDS:
+                continue
+            if float(getattr(detection, "confidence", 0.0)) < PRODUCT_TRACKING_SCENE_OBSERVATION_CONFIDENCE:
+                continue
+            bbox = getattr(detection, "bbox_xyxy", None)
+            if bbox is None or len(bbox) != 4:
+                continue
+            x1, y1, x2, y2 = [float(value) for value in bbox]
+            box_width = max(0.0, x2 - x1)
+            box_height = max(0.0, y2 - y1)
+            height_ratio = box_height / float(height)
+            area_ratio = (box_width * box_height) / frame_area
+            frame_max_height = max(frame_max_height, height_ratio)
+            frame_max_area = max(frame_max_area, area_ratio)
+            person_detection_count += 1
+        max_height_ratios.append(frame_max_height)
+        max_area_ratios.append(frame_max_area)
+        if (
+            frame_max_height >= PRODUCT_TRACKING_SCENE_CLOSEUP_MIN_HEIGHT_RATIO
+            or frame_max_area >= PRODUCT_TRACKING_SCENE_CLOSEUP_MIN_AREA_RATIO
+        ):
+            closeup_votes += 1
+
+    closeup_ratio = closeup_votes / float(frame_count)
+    if closeup_ratio >= PRODUCT_TRACKING_SCENE_CLOSEUP_RATIO_MIN:
+        mode = "CLOSEUP"
+        reason = "DENSE_STAGE1_CLOSEUP_MAJORITY"
+    elif closeup_ratio <= PRODUCT_TRACKING_SCENE_WIDE_RATIO_MAX:
+        mode = "WIDE"
+        reason = "DENSE_STAGE1_WIDE_MAJORITY"
+    else:
+        mode = "MIXED"
+        reason = "DENSE_STAGE1_MIXED_TRANSITION"
+
+    ordered_height = sorted(max_height_ratios)
+    ordered_area = sorted(max_area_ratios)
+    middle = frame_count // 2
+    if frame_count % 2:
+        median_height = ordered_height[middle]
+        median_area = ordered_area[middle]
+    else:
+        median_height = 0.5 * (ordered_height[middle - 1] + ordered_height[middle])
+        median_area = 0.5 * (ordered_area[middle - 1] + ordered_area[middle])
+
+    return {
+        "policy_version": PRODUCT_TRACKING_SCENE_POLICY_VERSION,
+        "mode": mode,
+        "reason": reason,
+        "tracking_allowed": mode in PRODUCT_TRACKING_ALLOWED_SCENE_MODES,
+        "frame_count": frame_count,
+        "closeup_vote_count": closeup_votes,
+        "closeup_vote_ratio": round(closeup_ratio, 8),
+        "person_detection_count": person_detection_count,
+        "median_max_person_height_ratio": round(float(median_height), 8),
+        "median_max_person_area_ratio": round(float(median_area), 8),
+        "thresholds": {
+            "observation_confidence": PRODUCT_TRACKING_SCENE_OBSERVATION_CONFIDENCE,
+            "closeup_min_height_ratio": PRODUCT_TRACKING_SCENE_CLOSEUP_MIN_HEIGHT_RATIO,
+            "closeup_min_area_ratio": PRODUCT_TRACKING_SCENE_CLOSEUP_MIN_AREA_RATIO,
+            "closeup_ratio_min": PRODUCT_TRACKING_SCENE_CLOSEUP_RATIO_MIN,
+            "wide_ratio_max": PRODUCT_TRACKING_SCENE_WIDE_RATIO_MAX,
+        },
+    }
+
+
 def process_shot_candidates(
     root: Path,
     output_dir: Path,
@@ -2001,6 +2442,37 @@ def process_shot_candidates(
     stage2b = runtime["stage2b"]
     start = int(shot["start_frame"])
     end = int(shot["end_frame_inclusive"])
+    shot_dir = output_dir / "work" / "shots" / str(shot["shot_id"])
+    if shot_dir.exists():
+        shutil.rmtree(shot_dir)
+    shot_dir.mkdir(parents=True, exist_ok=True)
+
+    scene_policy = _tracking_scene_mode_for_shot(
+        state=state,
+        runtime=runtime,
+        shot=shot,
+    )
+    atomic_json(shot_dir / "tracking_scene_policy.json", scene_policy)
+    if not bool(scene_policy["tracking_allowed"]):
+        gate = {
+            "operational_state": "SAFE_REJECTED_SEARCHING",
+            "decision": "EXCLUDE_NON_WIDE_SHOT_FROM_TARGET_TRACKING",
+            "automatically_proposed_candidate": None,
+            "all_auto_gates_passed": False,
+            "plausible_candidate_exists": False,
+            "gates": {},
+        }
+        atomic_json(shot_dir / "safe_gate.json", gate)
+        return {
+            "shot_id": shot["shot_id"],
+            "status": "EXCLUDED_NON_WIDE_TRACKING",
+            "candidate_count": 0,
+            "ranked_candidates": [],
+            "gate": gate,
+            "shot_dir": str(shot_dir),
+            "tracking_scene_policy": scene_policy,
+        }
+
     role_rejected_counts: Counter[str] = Counter()
     player_by_frame: dict[int, list[Any]] = {}
     for frame_index in range(start, end + 1):
@@ -2032,10 +2504,7 @@ def process_shot_candidates(
     ]
     kept.sort(key=lambda track: (track.start_frame, track.end_frame, track.internal_id))
 
-    shot_dir = output_dir / "work" / "shots" / str(shot["shot_id"])
     strip_dir = shot_dir / "candidate_strips"
-    if shot_dir.exists():
-        shutil.rmtree(shot_dir)
     strip_dir.mkdir(parents=True, exist_ok=True)
 
     role_prefilter_audit = {
@@ -2117,6 +2586,7 @@ def process_shot_candidates(
             "ranked_candidates": [],
             "gate": gate_candidate_rows([]),
             "shot_dir": str(shot_dir),
+            "tracking_scene_policy": scene_policy,
         }
 
     selected_by_candidate: dict[str, list[Any]] = {}
@@ -2239,6 +2709,7 @@ def process_shot_candidates(
         "contact_sheet": str(contact_sheet),
         "role_prefilter": role_prefilter_audit,
         "team_prefilter": team_prefilter_audit,
+        "tracking_scene_policy": scene_policy,
     }
 
 
@@ -2388,7 +2859,8 @@ def run_segment_phase1(
         "--reviewer",
         state.get("reviewer", "USER"),
         "--review-note",
-        "E2E user-confirmed anchor continuation segment",
+        "E2E confirmed/auto-safe anchor continuation segment",
+        "--product-runtime-auto-review",
     ]
     reviews = segment.setdefault("phase1_reviews", {})
     mapping = {
@@ -2464,6 +2936,8 @@ def overlay_timeline(
     global_end: int,
     identity_source: str,
     first_state: Optional[str] = None,
+    first_identity_source: Optional[str] = None,
+    first_reason: Optional[str] = None,
 ) -> None:
     width = int(source["video"]["width"])
     height = int(source["video"]["height"])
@@ -2497,8 +2971,8 @@ def overlay_timeline(
         if row.get("bbox_xyxy") is not None:
             row["state"] = first_state
             row["identity_confidence"] = 1.0
-            row["identity_source"] = "USER_CONFIRMED"
-            row["decision_reason"] = "USER_CONFIRMED_CROSS_SHOT_ANCHOR"
+            row["identity_source"] = first_identity_source or identity_source
+            row["decision_reason"] = first_reason or "CONFIRMED_SEGMENT_ANCHOR"
 
 
 
@@ -2571,6 +3045,16 @@ def build_global_timeline(root: Path, output_dir: Path, state: Mapping[str, Any]
                 frames[index]["state"] = "ABSENT"
                 frames[index]["decision_reason"] = "USER_CONFIRMED_TARGET_ABSENT_IN_SHOT"
                 frames[index]["identity_source"] = "USER_CONFIRMED_ABSENT"
+        elif shot.get("status") == "EXCLUDED_NON_WIDE_TRACKING":
+            for index in range(int(shot["start_frame"]), int(shot["end_frame_inclusive"]) + 1):
+                frames[index]["state"] = "SEARCHING"
+                frames[index]["bbox_xyxy"] = None
+                frames[index]["tracking_confidence"] = 0.0
+                frames[index]["identity_confidence"] = 0.0
+                frames[index]["selected_detection_id"] = None
+                frames[index]["decision_reason"] = "NON_WIDE_SHOT_EXCLUDED_FROM_TARGET_TRACKING"
+                frames[index]["identity_source"] = "WIDE_ONLY_SCENE_POLICY"
+                frames[index]["review_required"] = False
 
     if state.get("memory") and state["memory"].get("source_timeline"):
         source = read_json(Path(state["memory"]["source_timeline"]))
@@ -2590,13 +3074,26 @@ def build_global_timeline(root: Path, output_dir: Path, state: Mapping[str, Any]
         if not timeline_path.is_file():
             raise FileNotFoundError(timeline_path)
         source = read_json(timeline_path)
+        auto_safe = str(segment.get("source") or "") == "AUTO_SAFE_CROSS_SHOT_CANDIDATE"
         overlay_timeline(
             frames,
             source,
             int(segment["global_start_frame"]),
             int(segment["global_end_frame_inclusive"]),
-            "PHASE1_FROM_USER_CONFIRMED_ANCHOR",
-            first_state="USER_CONFIRMED",
+            (
+                "PHASE1_FROM_AUTO_SAFE_REACQUIRED_ANCHOR"
+                if auto_safe
+                else "PHASE1_FROM_USER_CONFIRMED_ANCHOR"
+            ),
+            first_state="REACQUIRED" if auto_safe else "USER_CONFIRMED",
+            first_identity_source=(
+                "AUTO_SAFE_REACQUIRED" if auto_safe else "USER_CONFIRMED"
+            ),
+            first_reason=(
+                "FROZEN_STAGE3B2_SAFE_GATE_AUTO_REACQUIRED"
+                if auto_safe
+                else "USER_CONFIRMED_CROSS_SHOT_ANCHOR"
+            ),
         )
 
     ambiguity_by_shot = {
@@ -2907,7 +3404,7 @@ def write_contract_outputs(output_dir: Path, state: dict[str, Any], timeline: Ma
 ## Safety contract
 
 - Camera cuts reset shot-local motion continuity.
-- A candidate is never silently linked in assisted mode.
+- Frozen Stage 3-B2 safe-gate PASS is auto-reacquired; only AMBIGUOUS shots require user confirmation.
 - `SEARCHING`, `AMBIGUOUS`, and `ABSENT` remain explicit with null target bbox.
 - Frozen V1/V2 code and thresholds are not modified.
 - `global_ID_tracking_upgrade_v7` is not a runtime dependency.
@@ -3015,6 +3512,54 @@ def new_segment_from_confirmation(
 
 
 
+def new_segment_from_auto_safe(
+    output_dir: Path,
+    state: dict[str, Any],
+    shot: Mapping[str, Any],
+    candidate_id: str,
+    anchor: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Start frozen Phase-1 from a Stage-3B2 safe-gate reacquisition.
+
+    No ambiguity or human confirmation record is created.  The candidate was
+    accepted only because every frozen cross-shot safety gate passed with a
+    real negative gallery available.
+    """
+    segment_number = len(state.get("segments", [])) + 1
+    selected = anchor["selected"]
+    start = int(selected["frame_index"])
+    end = int(shot["end_frame_inclusive"])
+    safe = validate_name(state["test_name"])
+    segment = {
+        "segment_id": f"segment_{segment_number:04d}",
+        "shot_id": shot["shot_id"],
+        "source": "AUTO_SAFE_CROSS_SHOT_CANDIDATE",
+        "ambiguity_id": None,
+        "candidate_id": candidate_id,
+        "global_start_frame": start,
+        "global_end_frame_inclusive": end,
+        "initial_bbox_xyxy": [
+            float(selected["x1"]),
+            float(selected["y1"]),
+            float(selected["x2"]),
+            float(selected["y2"]),
+        ],
+        "anchor": dict(selected),
+        "anchor_scored_observations": anchor["scored"],
+        "clip_path": str(output_dir / "work" / "clips" / f"segment_{segment_number:04d}.mp4"),
+        "source_stage0_test_name": f"e2e_{safe}__seg{segment_number:04d}_stage0",
+        "phase1_test_name": f"e2e_{safe}__seg{segment_number:04d}_phase1",
+        "v2_adapter_test_name": f"e2e_{safe}__seg{segment_number:04d}_adapter",
+        "phase1_reviews": {},
+        "status": "PENDING_PHASE1",
+        "created_at": now_iso(),
+    }
+    state.setdefault("segments", []).append(segment)
+    shot["status"] = "AUTO_SAFE_REACQUIRED_PENDING_TRACKING"
+    return segment
+
+
+
 def record_review_decision_provenance(
     state: dict[str, Any],
     arguments: argparse.Namespace,
@@ -3088,34 +3633,9 @@ def _resolve_safe_candidate_rejection(
         state["decision"] = "PAUSE_AT_CROSS_SHOT_AMBIGUITY"
         return False
 
-    # Keep the visible review burden small without discarding rank-3+ recall.
-    # Once the current two-candidate batch is exhausted, expose the next small
-    # batch from the already-ranked canonical candidate set. No reranking or
-    # threshold search occurs here.
-    rejected_all = set(str(value) for value in ambiguity.get("rejected_candidate_ids") or [])
-    reviewed_ids = {str(item.get("candidate_id") or "") for item in review_rows}
-    all_ranked = [
-        dict(item) for item in (ambiguity.get("all_ranked_candidates") or [])
-        if isinstance(item, Mapping)
-    ]
-    remaining = [
-        item
-        for item in all_ranked
-        if str(item.get("candidate_id") or "")
-        and str(item.get("candidate_id") or "") not in rejected_all
-        and str(item.get("candidate_id") or "") not in reviewed_ids
-    ]
-    if remaining:
-        next_batch = remaining[:ASSISTED_REVIEW_BATCH_SIZE]
-        ambiguity["review_candidates"] = [*review_rows, *next_batch]
-        state["pending_action"]["candidate_ids"] = [
-            str(item["candidate_id"]) for item in next_batch
-        ]
-        state["status"] = "NEEDS_CONFIRMATION"
-        state["decision"] = "PAUSE_AT_CROSS_SHOT_AMBIGUITY"
-        ambiguity["status"] = "PENDING"
-        return False
-
+    # Product contract: one ambiguity exposes at most the initial top-3
+    # tracklets. If the user rejects that set, do not page through the rest of
+    # the ranked pool; retain SEARCHING/ABSENT semantics and continue.
     ambiguity["status"] = (
         "ALL_CANDIDATES_NON_PLAYER_ROLE"
         if reason == "NON_PLAYER_ROLE"
@@ -3353,6 +3873,18 @@ def search_remaining_shots(
             continue
         result = process_shot_candidates(root, output_dir, state, runtime, shot)
         state.setdefault("shot_search_results", {})[shot["shot_id"]] = result
+        scene_policy = result.get("tracking_scene_policy") or {}
+        if scene_policy and not bool(scene_policy.get("tracking_allowed", True)):
+            shot["status"] = "EXCLUDED_NON_WIDE_TRACKING"
+            shot["tracking_scene_mode"] = str(scene_policy.get("mode") or "MIXED")
+            shot["tracking_scene_policy"] = str(
+                scene_policy.get("policy_version") or PRODUCT_TRACKING_SCENE_POLICY_VERSION
+            )
+            next_index += 1
+            state["search"]["next_shot_index"] = next_index
+            state["decision"] = "NON_WIDE_SHOT_SKIPPED_CONTINUE_SEARCH"
+            save_state(output_dir, state)
+            continue
         operational = result["gate"]["operational_state"]
         if operational == "SAFE_REJECTED_SEARCHING":
             shot["status"] = "SAFE_REJECTED_SEARCHING"
@@ -3362,26 +3894,25 @@ def search_remaining_shots(
             continue
         if (
             operational == "AUTO_REACQUIRED_CANDIDATE"
-            and state["reacquisition_mode"] == "auto-safe"
+            and state["reacquisition_mode"] in {"assisted", "auto-safe"}
             and not bool((state.get("memory") or {}).get("reference_only_negative_memory"))
         ):
             candidate_id = str(result["gate"]["automatically_proposed_candidate"])
-            synthetic = create_ambiguity(output_dir, state, shot, result)
-            synthetic["status"] = "AUTO_SAFE_CANDIDATE_ACCEPTED_PENDING_SEGMENT_REVIEW"
-            anchor = candidate_anchor(root, synthetic, candidate_id)
-            segment = new_segment_from_confirmation(output_dir, state, shot, synthetic, candidate_id, anchor)
-            state.setdefault("confirmations", []).append(
-                {
-                    "ambiguity_id": synthetic["ambiguity_id"],
-                    "shot_id": shot["shot_id"],
-                    "decision": "AUTO_SAFE_CANDIDATE",
-                    "candidate_id": candidate_id,
-                    "anchor_frame": int(anchor["selected"]["frame_index"]),
-                    "confirmed_at": now_iso(),
-                }
+            # AUTO-safe links are not ambiguities and are never shown as user
+            # review cards. Reuse only the immutable assignments needed to pick
+            # the Stage-3B3 anchor, then resume frozen Phase-1 within the shot.
+            anchor = candidate_anchor(
+                root,
+                {"assignments": str(result["assignments"])},
+                candidate_id,
             )
+            segment = new_segment_from_auto_safe(
+                output_dir, state, shot, candidate_id, anchor
+            )
+            segment["safe_gate"] = dict(result["gate"])
             state["pending_action"] = None
             state["status"] = "RUNNING"
+            state["decision"] = "AUTO_SAFE_REACQUIRED_CONTINUE_SAME_SHOT_TRACKING"
             save_state(output_dir, state)
             if not continue_pending_segment(root, output_dir, state, device):
                 return
@@ -3430,7 +3961,10 @@ def create_manifest(
         "policies": {"stage3b0": B0_POLICY, "stage3b1": B1_POLICY, "stage3b2": B2_POLICY},
         "safety_contract": {
             "silent_wrong_player_switch": "FORBIDDEN",
-            "assisted_mode_requires_confirmation": True,
+            "assisted_mode_requires_confirmation": False,
+            "ambiguous_cross_shot_requires_confirmation": True,
+            "auto_safe_requires_real_negative_memory": True,
+            "maximum_review_candidates_per_ambiguity": ASSISTED_REVIEW_BATCH_SIZE,
             "threshold_search": False,
             "frozen_source_modification": False,
             "v7_runtime_dependency": False,

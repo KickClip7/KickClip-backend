@@ -12,6 +12,7 @@ from app.domains.artifact.model import Artifact
 from app.domains.artifact.repository import ArtifactRepository
 from app.domains.auth.model import User
 from app.domains.project.model import Project
+from app.domains.highlight.repository import HighlightRepository
 from app.storage.local_storage import LocalStorage
 from app.utils.id_generator import generate_prefixed_id
 
@@ -77,6 +78,56 @@ class EventCandidateRankingV12BackendAdapter:
             raise ValueError("Source artifact SHA-256 mismatch.")
         return artifact
 
+    def _shot_scene_modes_for_source(
+        self,
+        *,
+        source_metadata: dict[str, Any],
+        project: Project,
+    ) -> dict[str, dict[str, Any]]:
+        revision_id = str(source_metadata.get("revision_id") or "")
+        if not revision_id:
+            return {}
+        revision = HighlightRepository(self.db).get_revision(revision_id)
+        if revision is None or revision.project_id != project.project_id:
+            return {}
+        options = revision.options or {}
+        discovery = options.get("scene_target_selection") or {}
+        candidate_inputs = options.get("candidate_pipeline_inputs") or {}
+        detections_artifact_id = str(
+            discovery.get("detections_artifact_id")
+            or candidate_inputs.get("detections_artifact_id")
+            or ""
+        )
+        if not detections_artifact_id:
+            return {}
+        artifact = self.artifacts.get_by_id(detections_artifact_id)
+        if (
+            artifact is None
+            or artifact.project_id != project.project_id
+            or artifact.match_id != project.match_id
+        ):
+            return {}
+        router = (artifact.metadata_ or {}).get("shot_scene_router")
+        if not isinstance(router, dict):
+            return {}
+        raw_modes = router.get("shot_modes")
+        if not isinstance(raw_modes, dict):
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for shot_id, raw in raw_modes.items():
+            if not isinstance(raw, dict):
+                continue
+            mode = str(raw.get("mode") or "MIXED").upper()
+            if mode not in {"WIDE", "CLOSEUP", "MIXED"}:
+                mode = "MIXED"
+            result[str(shot_id)] = {
+                "mode": mode,
+                "reason": str(raw.get("reason") or ""),
+                "evidence_frame_count": int(raw.get("evidence_frame_count") or 0),
+                "closeup_vote_ratio": raw.get("closeup_vote_ratio"),
+            }
+        return result
+
     def run(
         self,
         *,
@@ -107,6 +158,12 @@ class EventCandidateRankingV12BackendAdapter:
         shots_access_path = self._access_path(shots_path)
         source_sha = sha256_file(source_access_path)
         shots_sha = sha256_file(shots_access_path)
+        source_metadata = source.metadata_ or {}
+        shot_scene_modes = self._shot_scene_modes_for_source(
+            source_metadata=source_metadata,
+            project=project,
+        )
+        shot_scene_router_fingerprint = canonical_sha256(shot_scene_modes)
         cache_key = canonical_sha256(
             {
                 "source_ranking_artifact_id": source.artifact_id,
@@ -121,6 +178,8 @@ class EventCandidateRankingV12BackendAdapter:
                 "shortlist_policy_sha256": sha256_file(
                     self.package_root / "shortlist_policy.json"
                 ),
+                "product_scene_router_fingerprint": shot_scene_router_fingerprint,
+                "product_scene_router_policy": "SHOT_LEVEL_BROADCAST_MODE_R1",
             }
         )
         existing_rows = self.db.scalars(
@@ -129,7 +188,6 @@ class EventCandidateRankingV12BackendAdapter:
                 Artifact.artifact_type == ARTIFACT_TYPE,
             )
         ).all()
-        source_metadata = source.metadata_ or {}
         identity = {
             "cache_key": cache_key,
             "revision_id": source_metadata.get("revision_id"),
@@ -184,6 +242,7 @@ class EventCandidateRankingV12BackendAdapter:
             source_ranking_artifact_id=source.artifact_id,
             source_ranking_sha256=source_sha,
             shortlist_size=shortlist_size,
+            shot_scene_modes=shot_scene_modes,
         )
         Draft202012Validator(
             self._load_json(self.package_root / "output_schema.json")
@@ -225,6 +284,15 @@ class EventCandidateRankingV12BackendAdapter:
                 "shot_boundaries_artifact_id": shots.artifact_id,
                 "reviewed_shots_sha256": shots_sha,
                 "cache_key": cache_key,
+                "product_scene_router_fingerprint": shot_scene_router_fingerprint,
+                "product_scene_router_mode_counts": {
+                    mode: sum(
+                        1
+                        for row in shot_scene_modes.values()
+                        if str(row.get("mode") or "").upper() == mode
+                    )
+                    for mode in ("WIDE", "CLOSEUP", "MIXED")
+                },
                 "sha256": sha256_file(output_path),
                 "status": output["ranking_status"],
                 "automatic_target_confirmation": False,

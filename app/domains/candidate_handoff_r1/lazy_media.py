@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -17,7 +19,7 @@ from .work_metrics import CandidatePreparationWorkMetrics
 
 
 LAZY_MEDIA_SCHEMA_VERSION = "kickclip.candidate_lazy_media.r1"
-LAZY_MEDIA_CACHE_SCHEMA_VERSION = "kickclip.candidate_lazy_media_cache.r1"
+LAZY_MEDIA_CACHE_SCHEMA_VERSION = "kickclip.candidate_lazy_media_cache.r2"
 LAZY_MEDIA_NAMES = {
     "best_crop_display",
     "first_middle_last",
@@ -484,6 +486,9 @@ class LazyCandidateMediaMaterializer:
         temporary = output_path.with_name(
             f".{output_path.stem}.{os.getpid()}.incomplete.mp4"
         )
+        browser_temporary = output_path.with_name(
+            f".{output_path.stem}.{os.getpid()}.browser.incomplete.mp4"
+        )
         writer = cv2.VideoWriter(
             str(temporary),
             cv2.VideoWriter_fourcc(*"mp4v"),
@@ -541,7 +546,59 @@ class LazyCandidateMediaMaterializer:
             raise LazyCandidateMediaError(
                 "Lazy tracklet video was not created."
             )
-        os.replace(temporary, output_path)
+
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg is None:
+            temporary.unlink(missing_ok=True)
+            raise LazyCandidateMediaError(
+                "ffmpeg is required to create a browser-playable tracklet video."
+            )
+
+        browser_temporary.unlink(missing_ok=True)
+        try:
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(temporary),
+                    "-an",
+                    "-vf",
+                    "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "23",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                    str(browser_temporary),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            browser_temporary.unlink(missing_ok=True)
+            raise LazyCandidateMediaError(
+                "Browser-compatible tracklet video transcoding failed."
+            ) from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+
+        if (
+            not browser_temporary.is_file()
+            or browser_temporary.stat().st_size <= 0
+        ):
+            browser_temporary.unlink(missing_ok=True)
+            raise LazyCandidateMediaError(
+                "Browser-compatible tracklet video was not created."
+            )
+        metrics.increment("lazy_video_browser_transcodes")
+        os.replace(browser_temporary, output_path)
 
     def materialize(
         self,

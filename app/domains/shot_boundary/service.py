@@ -55,9 +55,12 @@ OBSERVATIONS_ARTIFACT_TYPE = "SCENE_RFDETR_OBSERVATIONS"
 # Initial player-candidate discovery is intentionally much cheaper than final
 # target tracking. Action Spotting already tells us *when* the interesting
 # event happened, and automatic shot boundaries tell us where broadcast shots
-# begin/end. Candidate discovery therefore runs RF-DETR only on 1-3
-# representative frames from the event-near shots instead of scanning the
-# whole event clip at a fixed FPS.
+# begin/end. Candidate discovery therefore runs RF-DETR only on sparse
+# representative bursts from the event-near shots instead of scanning the
+# whole event clip at a fixed FPS. A single 3-frame burst was too easy to miss
+# the real target in a multi-second WIDE shot, so P1.9 distributes up to three
+# short bursts across the shot while preserving contiguous observations inside
+# each burst for the frozen local-tracklet builder.
 #
 # Downstream responsibilities remain unchanged:
 #   sampled RF-DETR rows
@@ -67,9 +70,15 @@ OBSERVATIONS_ARTIFACT_TYPE = "SCENE_RFDETR_OBSERVATIONS"
 #   -> explicit user selection
 #   -> canonical target-centric E2E tracking.
 FAST_CANDIDATE_DETECTION_POLICY_VERSION = (
-    "ACTION_SPOTTING_SHOT_LOCAL_TRIPLET_RFDETR_V6_ROLE_CONSISTENCY"
+    "ACTION_SPOTTING_SHOT_DISTRIBUTED_BURSTS_RFDETR_V9_WIDE_RECALL_SAFE"
 )
-FAST_CANDIDATE_FRAMES_PER_SHOT = 3
+FAST_CANDIDATE_BURST_SIZE = 3
+FAST_CANDIDATE_MAX_BURSTS_PER_SHOT = 3
+FAST_CANDIDATE_FRAMES_PER_SHOT = (
+    FAST_CANDIDATE_BURST_SIZE * FAST_CANDIDATE_MAX_BURSTS_PER_SHOT
+)
+FAST_CANDIDATE_SINGLE_BURST_MAX_SEC = 1.50
+FAST_CANDIDATE_DOUBLE_BURST_MAX_SEC = 4.00
 FAST_CANDIDATE_PRE_SHOTS_BY_LABEL: dict[str, int] = {
     "goal": 2,
     "shot": 2,
@@ -81,8 +90,8 @@ FAST_CANDIDATE_PRE_SHOTS_BY_LABEL: dict[str, int] = {
 }
 FAST_CANDIDATE_POST_SHOTS_BY_LABEL: dict[str, int] = {
     # Goal broadcasts commonly show scorer celebration/close-up after A, so
-    # retain a slightly wider post-event shot envelope while still sampling
-    # at most three frames per shot.
+    # retain a slightly wider post-event shot envelope. CLOSEUP/MIXED shots
+    # are still excluded from selectable tracking candidates by the scene gate.
     "goal": 5,
     "shot": 2,
     "foul": 3,
@@ -98,12 +107,36 @@ FAST_CANDIDATE_DEFAULT_POST_SHOTS = 3
 # all observation roles, but a selectable player/goalkeeper detection must be
 # checked against a small shot-local verification window. Extra frames are
 # observation-only: they can veto staff/referee class flips but never become
-# selectable candidates. This preserves the frozen three-frame candidate budget.
-ROLE_CONSISTENCY_POLICY_VERSION = "TEMPORAL_PERSON_ROLE_WINDOW_HARD_VETO_R3"
+# selectable candidates. Weak player support is no longer a hard recall filter:
+# in a WIDE shot it is kept as ROLE_UNVERIFIED so a small/low-resolution scorer
+# is not removed merely because RF-DETR flickers on adjacent frames.
+ROLE_CONSISTENCY_POLICY_VERSION = (
+    "TEMPORAL_PERSON_ROLE_WINDOW_HARD_NONPLAYER_VETO_R5_WIDE_RECALL_SAFE"
+)
 ROLE_CONSISTENCY_MIN_PLAYER_SUPPORT = 2
+
+# Product scene router. Frame-level box size remains useful as evidence, but it
+# is no longer used as the final broadcast-mode decision. All sparse inference
+# frames inside one reviewed shot vote together; the shot is then routed as
+# WIDE, CLOSEUP, or MIXED. MIXED deliberately uses the conservative close-up
+# observation policy without claiming that the whole shot is a close-up.
+SHOT_SCENE_ROUTER_POLICY_VERSION = "SHOT_LEVEL_BROADCAST_MODE_R1"
+SHOT_SCENE_CLOSEUP_RATIO_MIN = 0.70
+SHOT_SCENE_WIDE_RATIO_MAX = 0.30
+SHOT_SCENE_MIN_EVIDENCE_FRAMES = 2
+CLOSEUP_ROLE_POLICY_VERSION = "CLOSEUP_PLAYER_ROLE_UNVERIFIED_R1"
+# Product policy: KickClip target tracking is intentionally restricted to
+# on-field WIDE shots. CLOSEUP and MIXED/transition shots remain available as
+# diagnostic observations for scene routing, but they never become selectable
+# target candidates and never produce close-up review crops. This avoids
+# persistent player/staff class confusion in broadcast close-ups by removing
+# those shots from the tracking problem instead of trying to classify roles.
+TRACKING_SCENE_POLICY_VERSION = "WIDE_ONLY_TARGET_TRACKING_R1"
+TRACKING_ALLOWED_SHOT_SCENE_MODES = frozenset({"WIDE"})
+TRACKING_EXCLUDED_SHOT_SCENE_MODES = frozenset({"CLOSEUP", "MIXED"})
 ROLE_CONSISTENCY_MATCH_MIN_IOU = 0.05
 ROLE_CONSISTENCY_MATCH_MAX_CENTER_DISTANCE = 0.80
-# Candidate generation still uses only the frozen 3-frame shot-local burst.
+# Candidate generation uses 1-3 distributed contiguous bursts per shot.
 # RF-DETR is additionally evaluated on nearby frames for *role evidence only*.
 # Those extra detections can veto a staff/referee false-positive but can never
 # become selectable candidates or local-track observations themselves.
@@ -130,64 +163,120 @@ def _event_near_shot_counts(event: TimelineEvent) -> tuple[int, int]:
     return max(0, int(before)), max(0, int(after))
 
 
+def _candidate_burst_count_for_shot(*, length_frames: int, fps: float) -> int:
+    if length_frames <= FAST_CANDIDATE_BURST_SIZE:
+        return 1
+    duration_sec = length_frames / max(fps, 1e-6)
+    if duration_sec <= FAST_CANDIDATE_SINGLE_BURST_MAX_SEC:
+        return 1
+    if duration_sec <= FAST_CANDIDATE_DOUBLE_BURST_MAX_SEC:
+        return 2
+    return FAST_CANDIDATE_MAX_BURSTS_PER_SHOT
+
+
+def _candidate_burst_frames(
+    *,
+    start_frame: int,
+    end_frame: int,
+    anchor_frame: int,
+) -> list[int]:
+    if end_frame < start_frame:
+        return []
+    length = end_frame - start_frame + 1
+    if length <= FAST_CANDIDATE_BURST_SIZE:
+        return list(range(start_frame, end_frame + 1))
+    half = FAST_CANDIDATE_BURST_SIZE // 2
+    first = int(anchor_frame) - half
+    last_first = end_frame - (FAST_CANDIDATE_BURST_SIZE - 1)
+    first = min(max(first, start_frame), last_first)
+    return list(range(first, first + FAST_CANDIDATE_BURST_SIZE))
+
+
 def _representative_frames_for_shot(
     *,
     start_frame: int,
     end_frame: int,
     event_frame: int | None,
     relative_to_event: int = 0,
+    fps: float,
 ) -> list[int]:
-    """Return a shot-local contiguous 1-3 frame representative burst.
+    """Return 1-3 distributed contiguous RF-DETR bursts for one shot.
 
-    V4 sampled the quarter/middle/three-quarter positions of each shot.  That
-    was cheap for RF-DETR, but those observations can be seconds apart.  The
-    frozen scene-candidate runtime groups detections into short same-shot
-    tracklets, so isolated observations were correctly rejected and could
-    leave ``scene_candidates.json`` empty.
+    The frozen scene-target runtime requires at least three temporally adjacent
+    observations to form a local tracklet. Sampling isolated frames across a
+    multi-second shot therefore improves coverage but can still be discarded by
+    the frozen local-tracklet builder. P1.9 instead spreads *3-frame bursts*
+    across the shot: 3 frames for short shots, up to 6 for medium shots, and up
+    to 9 for long shots. This raises initial-target recall while preserving the
+    local temporal support expected downstream.
 
-    V5 keeps the exact same RF-DETR budget (at most three frames per shot) but
-    makes the three frames contiguous.  This preserves enough temporal support
-    for the existing same-shot grouping without returning to dense detection.
-
-    Anchor placement is event-conditioned:
-    - event shot: centered on Action Spotting event A;
-    - shot before A: near the latter part of the shot (build-up);
-    - shot after A: near the early part of the shot (reaction/celebration);
-    - fallback: center of the shot.
+    For the event-containing shot the Action Spotting event is always included
+    as an anchor when possible. Other anchors are spread across the shot so the
+    selected player is not missed merely because they were absent at one fixed
+    sampling instant.
     """
 
     if end_frame < start_frame:
         return []
     length = end_frame - start_frame + 1
-    if length <= FAST_CANDIDATE_FRAMES_PER_SHOT:
+    if length <= FAST_CANDIDATE_BURST_SIZE:
         return list(range(start_frame, end_frame + 1))
 
-    if event_frame is not None and start_frame <= event_frame <= end_frame:
-        anchor = int(event_frame)
-        anchor_strategy = "ACTION_SPOTTING_EVENT"
-    elif relative_to_event < 0:
-        anchor = start_frame + int(round((length - 1) * 0.75))
-        anchor_strategy = "PRE_EVENT_LATE_SHOT"
-    elif relative_to_event > 0:
-        anchor = start_frame + int(round((length - 1) * 0.25))
-        anchor_strategy = "POST_EVENT_EARLY_SHOT"
-    else:
-        anchor = start_frame + int(round((length - 1) * 0.50))
-        anchor_strategy = "SHOT_CENTER"
-
-    # Shift the 3-frame window at the shot edges rather than shrinking it.
-    # For every shot with >=3 frames this therefore returns exactly 3
-    # consecutive, in-shot frame indices.
-    first = anchor - 1
-    last_first = end_frame - (FAST_CANDIDATE_FRAMES_PER_SHOT - 1)
-    first = min(max(first, start_frame), last_first)
-    frames = list(
-        range(first, first + FAST_CANDIDATE_FRAMES_PER_SHOT)
+    burst_count = _candidate_burst_count_for_shot(
+        length_frames=length,
+        fps=fps,
     )
-    # ``anchor_strategy`` is intentionally local documentation only; the
-    # caller records the relation/frames in sampling provenance.
-    _ = anchor_strategy
-    return frames
+
+    def frame_at(fraction: float) -> int:
+        return start_frame + int(round((length - 1) * fraction))
+
+    anchors: list[int]
+    if event_frame is not None and start_frame <= event_frame <= end_frame:
+        event_anchor = int(event_frame)
+        if burst_count == 1:
+            anchors = [event_anchor]
+        elif burst_count == 2:
+            edge_candidates = [frame_at(0.25), frame_at(0.75)]
+            far_anchor = max(
+                edge_candidates,
+                key=lambda value: abs(value - event_anchor),
+            )
+            anchors = [event_anchor, far_anchor]
+        else:
+            anchors = [frame_at(0.20), event_anchor, frame_at(0.80)]
+    elif burst_count == 1:
+        if relative_to_event < 0:
+            anchors = [frame_at(0.75)]
+        elif relative_to_event > 0:
+            anchors = [frame_at(0.25)]
+        else:
+            anchors = [frame_at(0.50)]
+    elif burst_count == 2:
+        anchors = [frame_at(0.30), frame_at(0.70)]
+    else:
+        anchors = [frame_at(0.20), frame_at(0.50), frame_at(0.80)]
+
+    frames: set[int] = set()
+    for anchor in anchors:
+        frames.update(
+            _candidate_burst_frames(
+                start_frame=start_frame,
+                end_frame=end_frame,
+                anchor_frame=anchor,
+            )
+        )
+    return sorted(frames)
+
+
+def _contiguous_burst_count(frames: list[int]) -> int:
+    if not frames:
+        return 0
+    ordered = sorted(set(int(value) for value in frames))
+    count = 1
+    for left, right in zip(ordered, ordered[1:]):
+        if right != left + 1:
+            count += 1
+    return count
 
 
 def _sampled_candidate_frames(
@@ -199,13 +288,14 @@ def _sampled_candidate_frames(
     pre_shot_count: int,
     post_shot_count: int,
 ) -> tuple[list[int], dict[str, Any]]:
-    """Sample only event-near automatic shots, at 1-3 frames per shot.
+    """Sample event-near shots with adaptive distributed 3-frame bursts.
 
     The complete Action Spotting scene clip remains the search envelope (for a
     Goal this is typically the existing ~45 s 15-before/30-after clip). We do
-    not run RF-DETR over every frame in that envelope. Instead, the shot that
-    contains A plus a small number of neighbouring shots are selected and each
-    contributes at most three representative frames.
+    not run RF-DETR over every frame in that envelope. Selected shots contribute
+    1-3 contiguous bursts (up to 9 primary frames per shot) depending on shot
+    duration, improving target recall without breaking frozen local-tracklet
+    minimum-frame assumptions.
     """
 
     if fps <= 0 or frame_count <= 0:
@@ -293,6 +383,7 @@ def _sampled_candidate_frames(
             end_frame=int(row["end_frame_inclusive"]),
             event_frame=(event_frame if is_event_shot else None),
             relative_to_event=relative_to_event,
+            fps=fps,
         )
         frames.update(representative)
         sampled_shots.append(
@@ -300,15 +391,22 @@ def _sampled_candidate_frames(
                 **row,
                 "is_event_shot": is_event_shot,
                 "relative_to_event_shot": relative_to_event,
-                "sampling_mode": "CONTIGUOUS_SHOT_LOCAL_TRIPLET",
+                "sampling_mode": "DISTRIBUTED_CONTIGUOUS_SHOT_BURSTS",
                 "sampled_frames": representative,
                 "sampled_frame_count": len(representative),
+                "sampled_burst_count": _contiguous_burst_count(representative),
+                "burst_size": FAST_CANDIDATE_BURST_SIZE,
+                "shot_duration_sec": (
+                    int(row["end_frame_inclusive"])
+                    - int(row["start_frame"])
+                    + 1
+                ) / fps,
             }
         )
 
     ordered = sorted(frame for frame in frames if 0 <= frame < frame_count)
     return ordered, {
-        "strategy": "EVENT_NEAR_SHOTS_CONTIGUOUS_REPRESENTATIVE_TRIPLETS",
+        "strategy": "EVENT_NEAR_SHOTS_DISTRIBUTED_CONTIGUOUS_BURSTS_V1",
         "scene_duration_sec": duration_sec,
         "scene_frame_count": frame_count,
         "event_scene_local_sec": event_local_sec,
@@ -322,6 +420,10 @@ def _sampled_candidate_frames(
         "post_event_shot_count": max(0, int(post_shot_count)),
         "selected_shot_count": len(selected_shots),
         "frames_per_shot_max": FAST_CANDIDATE_FRAMES_PER_SHOT,
+        "burst_size": FAST_CANDIDATE_BURST_SIZE,
+        "max_bursts_per_shot": FAST_CANDIDATE_MAX_BURSTS_PER_SHOT,
+        "single_burst_max_sec": FAST_CANDIDATE_SINGLE_BURST_MAX_SEC,
+        "double_burst_max_sec": FAST_CANDIDATE_DOUBLE_BURST_MAX_SEC,
         "sampled_frame_count": len(ordered),
         "selected_shots": sampled_shots,
         "window_start_frame": int(selected_shots[0]["start_frame"]),
@@ -345,8 +447,8 @@ def _role_verification_frames(
 ) -> list[int]:
     """Expand sparse candidate frames into a small shot-local role audit window.
 
-    The returned frames are inference-only evidence frames.  They do not alter
-    the three-frame-per-shot candidate budget.  Expansion never crosses a shot
+    The returned frames are inference-only evidence frames. They do not alter
+    the distributed primary-burst candidate budget. Expansion never crosses a shot
     boundary, because role continuity is invalid across camera cuts.
     """
 
@@ -461,6 +563,139 @@ def _is_closeup_frame(
         ):
             return True
     return False
+
+
+def _frame_scene_router_evidence(
+    detections: list[PlayerDetection],
+    *,
+    frame_width: int,
+    frame_height: int,
+    observation_class_ids: frozenset[int],
+    observation_conf_threshold: float,
+    closeup_min_height_ratio: float,
+    closeup_min_area_ratio: float,
+) -> dict[str, Any]:
+    person_class_ids = observation_class_ids.intersection({0, 1, 2, 3})
+    eligible: list[tuple[float, float]] = []
+    for detection in detections:
+        if (
+            int(detection.class_id) not in person_class_ids
+            or float(detection.confidence) < observation_conf_threshold
+        ):
+            continue
+        eligible.append(
+            _bbox_ratios(
+                detection,
+                frame_width=frame_width,
+                frame_height=frame_height,
+            )
+        )
+    max_height_ratio = max((row[0] for row in eligible), default=0.0)
+    max_area_ratio = max((row[1] for row in eligible), default=0.0)
+    closeup_vote = bool(
+        max_height_ratio >= closeup_min_height_ratio
+        or max_area_ratio >= closeup_min_area_ratio
+    )
+    return {
+        "closeup_vote": closeup_vote,
+        "person_count": len(eligible),
+        "max_person_height_ratio": round(max_height_ratio, 8),
+        "max_person_area_ratio": round(max_area_ratio, 8),
+    }
+
+
+def _shot_descriptor_for_frame(
+    shots: list[dict[str, Any]],
+    frame_index: int,
+) -> dict[str, Any] | None:
+    for shot in shots:
+        start = int(shot["start_frame"])
+        end = int(shot.get("end_frame_inclusive", shot.get("end_frame", start)))
+        if start <= frame_index <= end:
+            return shot
+    return None
+
+
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return 0.5 * (ordered[middle - 1] + ordered[middle])
+
+
+def _build_shot_scene_modes(
+    *,
+    shots: list[dict[str, Any]],
+    frame_evidence: dict[int, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Stabilize sparse frame evidence into one broadcast mode per shot.
+
+    A single large foreground person no longer determines the routing policy for
+    the whole frame independently.  Every RF-DETR inference frame available in
+    the reviewed shot contributes one vote.  Ambiguous/transition shots become
+    MIXED and use the conservative observation policy.
+    """
+
+    result: dict[str, dict[str, Any]] = {}
+    for shot in shots:
+        shot_id = str(shot.get("shot_id") or f"shot_{int(shot.get('shot_index') or 0):04d}")
+        start = int(shot["start_frame"])
+        end = int(shot.get("end_frame_inclusive", shot.get("end_frame", start)))
+        rows = [
+            evidence
+            for frame_index, evidence in sorted(frame_evidence.items())
+            if start <= int(frame_index) <= end
+        ]
+        frame_indices = [
+            int(frame_index)
+            for frame_index in sorted(frame_evidence)
+            if start <= int(frame_index) <= end
+        ]
+        evidence_count = len(rows)
+        closeup_votes = sum(bool(row.get("closeup_vote")) for row in rows)
+        closeup_ratio = (closeup_votes / evidence_count) if evidence_count else None
+        if evidence_count < SHOT_SCENE_MIN_EVIDENCE_FRAMES:
+            mode = "MIXED"
+            reason = "INSUFFICIENT_SHOT_LEVEL_SCENE_EVIDENCE"
+        elif closeup_ratio is not None and closeup_ratio >= SHOT_SCENE_CLOSEUP_RATIO_MIN:
+            mode = "CLOSEUP"
+            reason = "SHOT_LEVEL_CLOSEUP_MAJORITY"
+        elif closeup_ratio is not None and closeup_ratio <= SHOT_SCENE_WIDE_RATIO_MAX:
+            mode = "WIDE"
+            reason = "SHOT_LEVEL_WIDE_MAJORITY"
+        else:
+            mode = "MIXED"
+            reason = "SHOT_LEVEL_MIXED_TRANSITION"
+        result[shot_id] = {
+            "shot_id": shot_id,
+            "shot_index": int(shot.get("shot_index") or 0),
+            "start_frame": start,
+            "end_frame_inclusive": end,
+            "mode": mode,
+            "reason": reason,
+            "evidence_frame_count": evidence_count,
+            "evidence_frames": frame_indices,
+            "closeup_vote_count": closeup_votes,
+            "closeup_vote_ratio": (
+                round(float(closeup_ratio), 8) if closeup_ratio is not None else None
+            ),
+            "median_max_person_height_ratio": round(
+                _median([float(row.get("max_person_height_ratio") or 0.0) for row in rows]),
+                8,
+            ),
+            "median_max_person_area_ratio": round(
+                _median([float(row.get("max_person_area_ratio") or 0.0) for row in rows]),
+                8,
+            ),
+            "median_person_count": round(
+                _median([float(row.get("person_count") or 0.0) for row in rows]),
+                3,
+            ),
+        }
+    return result
 
 
 def _select_candidate_detections_for_frame(
@@ -651,6 +886,11 @@ def _apply_temporal_role_consistency_prefilter(
         "match_min_iou": ROLE_CONSISTENCY_MATCH_MIN_IOU,
         "match_max_center_distance": ROLE_CONSISTENCY_MATCH_MAX_CENTER_DISTANCE,
         "verification_radius_frames": ROLE_CONSISTENCY_VERIFICATION_RADIUS_FRAMES,
+        "scene_router_policy": SHOT_SCENE_ROUTER_POLICY_VERSION,
+        "closeup_role_policy": CLOSEUP_ROLE_POLICY_VERSION,
+        "closeup_or_mixed_requires_secondary_role_verification": True,
+        "insufficient_player_support_is_soft": True,
+        "weak_wide_player_rows_preserved_for_recall": True,
     }
     if not candidate_rows:
         return [], {
@@ -739,11 +979,22 @@ def _apply_temporal_role_consistency_prefilter(
             }
         )
 
-        # No temporal evidence means "unverified", not "non-player".  Sparse
-        # sampling must not manufacture a negative identity decision.
+        scene_mode = str(row.get("shot_scene_mode") or "MIXED").upper()
+        row["product_role_state"] = "ROLE_UNVERIFIED"
+
+        # No temporal evidence means "unverified", not "non-player". Sparse
+        # sampling must not manufacture a negative identity decision. Close-up
+        # and mixed shots are explicitly marked ROLE_UNVERIFIED because repeated
+        # RF-DETR class-0 predictions are not an independent role verifier.
         if shot_range is None or adjacent_evidence == 0:
-            row["role_gate_status"] = "UNVERIFIED_NO_TEMPORAL_EVIDENCE"
-            row["role_gate_reason"] = "NO_ADJACENT_ROLE_EVIDENCE"
+            if scene_mode in {"CLOSEUP", "MIXED"}:
+                row["role_gate_status"] = "ROLE_UNVERIFIED"
+                row["role_gate_reason"] = (
+                    "CLOSEUP_ROLE_REQUIRES_SECONDARY_VERIFICATION"
+                )
+            else:
+                row["role_gate_status"] = "UNVERIFIED_NO_TEMPORAL_EVIDENCE"
+                row["role_gate_reason"] = "NO_ADJACENT_ROLE_EVIDENCE"
             unverified_count += 1
             kept.append(row)
             continue
@@ -760,19 +1011,42 @@ def _apply_temporal_role_consistency_prefilter(
             reason = "TEMPORAL_NON_PLAYER_ROLE_HARD_VETO"
             row["role_gate_status"] = "REJECTED"
             row["role_gate_reason"] = reason
+            row["product_role_state"] = "ROLE_NEGATIVE"
             rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
+            continue
+
+        # Repeated class-0/class-1 predictions are useful support on a WIDE
+        # gameplay shot, but they are not independent proof that a large
+        # close-up person is a player. Persistent coach/staff misclassification
+        # is exactly the failure mode this state is designed to expose.
+        if scene_mode in {"CLOSEUP", "MIXED"}:
+            row["role_gate_status"] = "ROLE_UNVERIFIED"
+            row["role_gate_reason"] = (
+                "CLOSEUP_PLAYER_CLASS_ONLY_REQUIRES_SECONDARY_ROLE_VERIFICATION"
+            )
+            row["product_role_state"] = "ROLE_UNVERIFIED"
+            unverified_count += 1
+            kept.append(row)
             continue
 
         if player_support >= ROLE_CONSISTENCY_MIN_PLAYER_SUPPORT:
             row["role_gate_status"] = "PASS"
             row["role_gate_reason"] = "TEMPORAL_PLAYER_ROLE_SUPPORTED"
+            row["product_role_state"] = "ROLE_SUPPORTED"
             kept.append(row)
             continue
 
-        reason = "INSUFFICIENT_PLAYER_ROLE_SUPPORT"
-        row["role_gate_status"] = "REJECTED"
-        row["role_gate_reason"] = reason
-        rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
+        # Recall-safe WIDE policy: weak temporal player support is not evidence
+        # that the detection is a non-player. Small scorers in wide broadcast
+        # footage can flicker in/out of RF-DETR across adjacent frames. Preserve
+        # the row as unverified and let downstream trackability/ranking decide
+        # whether it is useful. Explicit referee/staff evidence above remains the
+        # only role-based hard veto.
+        row["role_gate_status"] = "ROLE_UNVERIFIED"
+        row["role_gate_reason"] = "INSUFFICIENT_PLAYER_ROLE_SUPPORT_PRESERVED"
+        row["product_role_state"] = "ROLE_UNVERIFIED"
+        unverified_count += 1
+        kept.append(row)
 
     return kept, {
         **base_audit,
@@ -1146,6 +1420,23 @@ class ShotBoundaryReviewService:
             "tracking_tracker_applied_to_initial_candidate_discovery": False,
             "role_consistency_policy": ROLE_CONSISTENCY_POLICY_VERSION,
             "role_consistency_min_player_support": ROLE_CONSISTENCY_MIN_PLAYER_SUPPORT,
+            "role_consistency_insufficient_player_support_is_soft": True,
+            "candidate_burst_size": FAST_CANDIDATE_BURST_SIZE,
+            "candidate_max_bursts_per_shot": FAST_CANDIDATE_MAX_BURSTS_PER_SHOT,
+            "candidate_frames_per_shot_max": FAST_CANDIDATE_FRAMES_PER_SHOT,
+            "candidate_single_burst_max_sec": FAST_CANDIDATE_SINGLE_BURST_MAX_SEC,
+            "candidate_double_burst_max_sec": FAST_CANDIDATE_DOUBLE_BURST_MAX_SEC,
+            "shot_scene_router_policy": SHOT_SCENE_ROUTER_POLICY_VERSION,
+            "shot_scene_closeup_ratio_min": SHOT_SCENE_CLOSEUP_RATIO_MIN,
+            "shot_scene_wide_ratio_max": SHOT_SCENE_WIDE_RATIO_MAX,
+            "shot_scene_min_evidence_frames": SHOT_SCENE_MIN_EVIDENCE_FRAMES,
+            "mixed_uses_observation_policy": True,
+            "closeup_role_policy": CLOSEUP_ROLE_POLICY_VERSION,
+            "closeup_player_is_role_unverified": True,
+            "tracking_scene_policy": TRACKING_SCENE_POLICY_VERSION,
+            "tracking_allowed_shot_scene_modes": sorted(TRACKING_ALLOWED_SHOT_SCENE_MODES),
+            "tracking_excluded_shot_scene_modes": sorted(TRACKING_EXCLUDED_SHOT_SCENE_MODES),
+            "tracking_requires_noncloseup_primary_frame": True,
             "bbox_bounds_policy": "inclusive_width_minus_1_height_minus_1_v1",
         }
 
@@ -2832,18 +3123,21 @@ class ShotBoundaryReviewService:
 
         candidate_rows: list[dict[str, Any]] = []
         observation_rows: list[dict[str, Any]] = []
+        frame_results: dict[int, dict[str, Any]] = {}
+        frame_scene_evidence: dict[int, dict[str, Any]] = {}
         batch_size = max(1, int(self.settings.PLAYER_DETECTOR_BATCH_SIZE))
         batch_indices: list[int] = []
         batch_frames: list[Any] = []
-        # We seek directly to the sparse keyframes. This avoids decoding every
-        # frame in the Action Spotting clip merely to run inference on a few of
-        # them. Keep the legacy metric name for API compatibility; under V4 it
-        # now means successfully decoded representative frames.
+        # We seek directly to sparse keyframes. The first pass performs RF-DETR
+        # only and records compact detection/evidence structures. Scene routing
+        # is decided *after* all available frames in a shot have voted.
         decoded_window_frame_count = 0
         decoded_primary_frame_count = 0
         decoded_role_verification_frame_count = 0
         wide_frame_count = 0
         closeup_frame_count = 0
+        mixed_frame_count = 0
+        closeup_primary_frame_veto_count = 0
         raw_base_detection_count = 0
         observation_eligible_count = 0
         closeup_crop_eligible_count = 0
@@ -2851,12 +3145,7 @@ class ShotBoundaryReviewService:
         excluded_role_counts: dict[str, int] = {}
 
         def flush_batch() -> None:
-            nonlocal wide_frame_count
-            nonlocal closeup_frame_count
             nonlocal raw_base_detection_count
-            nonlocal observation_eligible_count
-            nonlocal closeup_crop_eligible_count
-            nonlocal saved_closeup_crop_count
             if not batch_frames:
                 return
             detected = cache.detect_batch(
@@ -2881,8 +3170,7 @@ class ShotBoundaryReviewService:
                     if clean is not None:
                         normalized.append(clean)
                 raw_base_detection_count += len(normalized)
-
-                is_closeup = _is_closeup_frame(
+                evidence = _frame_scene_router_evidence(
                     normalized,
                     frame_width=frame_width,
                     frame_height=frame_height,
@@ -2895,159 +3183,13 @@ class ShotBoundaryReviewService:
                         self.settings.CLOSEUP_MIN_BOX_AREA_RATIO
                     ),
                 )
-                is_primary_candidate_frame = index in primary_sampled_frames
-                if is_primary_candidate_frame:
-                    if is_closeup:
-                        closeup_frame_count += 1
-                    else:
-                        wide_frame_count += 1
-
-                candidates, frame_observations = (
-                    _select_candidate_detections_for_frame(
-                        normalized,
-                        frame_width=frame_width,
-                        frame_height=frame_height,
-                        is_closeup=is_closeup,
-                        play_class_ids=play_class_ids,
-                        play_conf_threshold=play_conf_threshold,
-                        observation_class_ids=observation_class_ids,
-                        observation_conf_threshold=observation_conf_threshold,
-                        crop_top_k=int(self.settings.OBSERVATION_CROP_TOP_K),
-                        crop_min_conf=float(self.settings.CLOSEUP_CROP_MIN_CONF),
-                        crop_min_height_ratio=float(
-                            self.settings.CLOSEUP_CROP_MIN_HEIGHT_RATIO
-                        ),
-                        crop_min_area_ratio=float(
-                            self.settings.CLOSEUP_CROP_MIN_AREA_RATIO
-                        ),
-                    )
-                )
-
-                for raw_index, row in enumerate(frame_observations):
-                    item = row["detection"]
-                    if row["observation_eligible"]:
-                        observation_eligible_count += 1
-                    if (
-                        is_primary_candidate_frame
-                        and is_closeup
-                        and row["crop_eligible"]
-                    ):
-                        closeup_crop_eligible_count += 1
-                    if (
-                        row["observation_eligible"]
-                        and int(item.class_id) not in play_class_ids
-                    ):
-                        role = str(item.class_name or "unknown").strip().lower()
-                        excluded_role_counts[role] = (
-                            excluded_role_counts.get(role, 0) + 1
-                        )
-                    x1, y1, x2, y2 = item.bbox_xyxy
-                    crop_relative_path = None
-                    if (
-                        is_primary_candidate_frame
-                        and is_closeup
-                        and row["observation_rank"] is not None
-                    ):
-                        ix1 = max(0, min(frame_width - 1, int(math.floor(x1))))
-                        iy1 = max(0, min(frame_height - 1, int(math.floor(y1))))
-                        ix2 = max(0, min(frame_width - 1, int(math.ceil(x2))))
-                        iy2 = max(0, min(frame_height - 1, int(math.ceil(y2))))
-                        if ix2 > ix1 and iy2 > iy1:
-                            crop = frame[iy1 : iy2 + 1, ix1 : ix2 + 1]
-                            if crop.size > 0:
-                                frame_crop_root = (
-                                    closeup_crop_root / f"frame_{index:08d}"
-                                )
-                                frame_crop_root.mkdir(
-                                    parents=True, exist_ok=True
-                                )
-                                crop_path = frame_crop_root / (
-                                    f"rank_{int(row['observation_rank']):02d}_"
-                                    f"class_{int(item.class_id)}_"
-                                    f"obs_{raw_index:04d}.jpg"
-                                )
-                                if cv2.imwrite(str(crop_path), crop):
-                                    saved_closeup_crop_count += 1
-                                    crop_relative_path = crop_path.relative_to(
-                                        self.storage.project_root
-                                    ).as_posix()
-                    observation_rows.append(
-                        {
-                            "frame": index,
-                            "frame_index": index,
-                            "time_ms": int(
-                                round(index * 1000.0 / scene_fps)
-                            ),
-                            "detection_index": raw_index,
-                            "detection_id": (
-                                f"obs_{index:08d}_{raw_index:04d}"
-                            ),
-                            "class_id": int(item.class_id),
-                            "class_name": str(item.class_name),
-                            "confidence": float(item.confidence),
-                            "x1": float(x1),
-                            "y1": float(y1),
-                            "x2": float(x2),
-                            "y2": float(y2),
-                            "box_height_ratio": round(
-                                float(row["height_ratio"]), 8
-                            ),
-                            "box_area_ratio": round(
-                                float(row["area_ratio"]), 8
-                            ),
-                            "is_closeup_frame": bool(is_closeup),
-                            "observation_eligible": bool(
-                                row["observation_eligible"]
-                            ),
-                            "crop_eligible": bool(row["crop_eligible"]),
-                            "observation_rank": row["observation_rank"],
-                            "candidate_eligible": bool(
-                                is_primary_candidate_frame
-                                and row["candidate_eligible"]
-                            ),
-                            "role_verification_only": bool(
-                                not is_primary_candidate_frame
-                            ),
-                            "crop_path": crop_relative_path,
-                            "source_model": runtime.get("model_class")
-                            or runtime.get("backend"),
-                            "model_sha256": model_sha,
-                            "scene_video_sha256": scene_sha,
-                        }
-                    )
-
-                # Frozen Scene Target Selection consumes only the original
-                # three-frame candidate budget. Role-verification-only frames
-                # are deliberately excluded from detections.csv.
-                if not is_primary_candidate_frame:
-                    continue
-                # The candidate CSV must never receive referee/staff/ball rows.
-                for detection_index, item in enumerate(candidates):
-                    x1, y1, x2, y2 = item.bbox_xyxy
-                    candidate_rows.append(
-                        {
-                            "frame": index,
-                            "frame_index": index,
-                            "time_ms": int(
-                                round(index * 1000.0 / scene_fps)
-                            ),
-                            "detection_index": detection_index,
-                            "detection_id": (
-                                f"det_{index:08d}_{detection_index:04d}"
-                            ),
-                            "class_id": int(item.class_id),
-                            "class_name": str(item.class_name),
-                            "confidence": float(item.confidence),
-                            "x1": float(x1),
-                            "y1": float(y1),
-                            "x2": float(x2),
-                            "y2": float(y2),
-                            "source_model": runtime.get("model_class")
-                            or runtime.get("backend"),
-                            "model_sha256": model_sha,
-                            "scene_video_sha256": scene_sha,
-                        }
-                    )
+                frame_scene_evidence[int(index)] = evidence
+                frame_results[int(index)] = {
+                    "frame_width": int(frame_width),
+                    "frame_height": int(frame_height),
+                    "detections": normalized,
+                    "scene_evidence": evidence,
+                }
             batch_indices.clear()
             batch_frames.clear()
 
@@ -3067,6 +3209,208 @@ class ShotBoundaryReviewService:
                 if len(batch_frames) >= batch_size:
                     flush_batch()
             flush_batch()
+
+            shot_scene_modes = _build_shot_scene_modes(
+                shots=candidate_shots,
+                frame_evidence=frame_scene_evidence,
+            )
+
+            for index in sorted(frame_results):
+                result = frame_results[index]
+                frame_width = int(result["frame_width"])
+                frame_height = int(result["frame_height"])
+                normalized = list(result["detections"])
+                frame_evidence = dict(result["scene_evidence"])
+                shot = _shot_descriptor_for_frame(candidate_shots, index)
+                shot_id = str(
+                    (shot or {}).get("shot_id")
+                    or f"shot_{int((shot or {}).get('shot_index') or 0):04d}"
+                )
+                scene_context = shot_scene_modes.get(shot_id) or {
+                    "mode": "MIXED",
+                    "reason": "SHOT_SCENE_CONTEXT_MISSING",
+                }
+                shot_scene_mode = str(scene_context.get("mode") or "MIXED").upper()
+                # CLOSEUP/MIXED observations are retained only for scene-router
+                # diagnostics. Product target tracking is WIDE-only, so these
+                # shots cannot seed target candidates or review crops.
+                use_observation_policy = shot_scene_mode in {"CLOSEUP", "MIXED"}
+                tracking_scene_allowed = (
+                    shot_scene_mode in TRACKING_ALLOWED_SHOT_SCENE_MODES
+                )
+                frame_closeup_vote = bool(frame_evidence.get("closeup_vote"))
+                tracking_candidate_frame_allowed = (
+                    tracking_scene_allowed and not frame_closeup_vote
+                )
+                is_primary_candidate_frame = index in primary_sampled_frames
+                if (
+                    is_primary_candidate_frame
+                    and tracking_scene_allowed
+                    and frame_closeup_vote
+                ):
+                    closeup_primary_frame_veto_count += 1
+                if is_primary_candidate_frame:
+                    if shot_scene_mode == "CLOSEUP":
+                        closeup_frame_count += 1
+                    elif shot_scene_mode == "WIDE":
+                        wide_frame_count += 1
+                    else:
+                        mixed_frame_count += 1
+
+                candidates, frame_observations = (
+                    _select_candidate_detections_for_frame(
+                        normalized,
+                        frame_width=frame_width,
+                        frame_height=frame_height,
+                        is_closeup=use_observation_policy,
+                        play_class_ids=play_class_ids,
+                        play_conf_threshold=play_conf_threshold,
+                        observation_class_ids=observation_class_ids,
+                        observation_conf_threshold=observation_conf_threshold,
+                        crop_top_k=int(self.settings.OBSERVATION_CROP_TOP_K),
+                        crop_min_conf=float(self.settings.CLOSEUP_CROP_MIN_CONF),
+                        crop_min_height_ratio=float(
+                            self.settings.CLOSEUP_CROP_MIN_HEIGHT_RATIO
+                        ),
+                        crop_min_area_ratio=float(
+                            self.settings.CLOSEUP_CROP_MIN_AREA_RATIO
+                        ),
+                    )
+                )
+
+                crop_frame = None
+                for raw_index, row in enumerate(frame_observations):
+                    item = row["detection"]
+                    if row["observation_eligible"]:
+                        observation_eligible_count += 1
+                    if (
+                        is_primary_candidate_frame
+                        and tracking_scene_allowed
+                        and use_observation_policy
+                        and row["crop_eligible"]
+                    ):
+                        closeup_crop_eligible_count += 1
+                    if (
+                        row["observation_eligible"]
+                        and int(item.class_id) not in play_class_ids
+                    ):
+                        role = str(item.class_name or "unknown").strip().lower()
+                        excluded_role_counts[role] = (
+                            excluded_role_counts.get(role, 0) + 1
+                        )
+                    x1, y1, x2, y2 = item.bbox_xyxy
+                    crop_relative_path = None
+                    if (
+                        is_primary_candidate_frame
+                        and tracking_scene_allowed
+                        and use_observation_policy
+                        and row["observation_rank"] is not None
+                    ):
+                        if crop_frame is None:
+                            capture.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+                            ok, reread = capture.read()
+                            if ok and reread is not None:
+                                crop_frame = reread
+                        if crop_frame is not None:
+                            ix1 = max(0, min(frame_width - 1, int(math.floor(x1))))
+                            iy1 = max(0, min(frame_height - 1, int(math.floor(y1))))
+                            ix2 = max(0, min(frame_width - 1, int(math.ceil(x2))))
+                            iy2 = max(0, min(frame_height - 1, int(math.ceil(y2))))
+                            if ix2 > ix1 and iy2 > iy1:
+                                crop = crop_frame[iy1 : iy2 + 1, ix1 : ix2 + 1]
+                                if crop.size > 0:
+                                    frame_crop_root = (
+                                        closeup_crop_root / f"frame_{index:08d}"
+                                    )
+                                    frame_crop_root.mkdir(parents=True, exist_ok=True)
+                                    crop_path = frame_crop_root / (
+                                        f"rank_{int(row['observation_rank']):02d}_"
+                                        f"class_{int(item.class_id)}_"
+                                        f"obs_{raw_index:04d}.jpg"
+                                    )
+                                    if cv2.imwrite(str(crop_path), crop):
+                                        saved_closeup_crop_count += 1
+                                        crop_relative_path = crop_path.relative_to(
+                                            self.storage.project_root
+                                        ).as_posix()
+                    observation_rows.append(
+                        {
+                            "frame": index,
+                            "frame_index": index,
+                            "time_ms": int(round(index * 1000.0 / scene_fps)),
+                            "detection_index": raw_index,
+                            "detection_id": f"obs_{index:08d}_{raw_index:04d}",
+                            "class_id": int(item.class_id),
+                            "class_name": str(item.class_name),
+                            "confidence": float(item.confidence),
+                            "x1": float(x1),
+                            "y1": float(y1),
+                            "x2": float(x2),
+                            "y2": float(y2),
+                            "box_height_ratio": round(float(row["height_ratio"]), 8),
+                            "box_area_ratio": round(float(row["area_ratio"]), 8),
+                            # Diagnostic frame vote remains visible, but final
+                            # routing is the stabilized shot_scene_mode below.
+                            "is_closeup_frame": frame_closeup_vote,
+                            "shot_id": shot_id,
+                            "shot_scene_mode": shot_scene_mode,
+                            "shot_scene_policy_closeup": bool(use_observation_policy),
+                            "observation_eligible": bool(row["observation_eligible"]),
+                            "crop_eligible": bool(row["crop_eligible"]),
+                            "observation_rank": row["observation_rank"],
+                            "candidate_eligible": bool(
+                                is_primary_candidate_frame
+                                and tracking_candidate_frame_allowed
+                                and row["candidate_eligible"]
+                            ),
+                            "role_verification_only": bool(
+                                not is_primary_candidate_frame
+                            ),
+                            "crop_path": crop_relative_path,
+                            "source_model": runtime.get("model_class")
+                            or runtime.get("backend"),
+                            "model_sha256": model_sha,
+                            "scene_video_sha256": scene_sha,
+                        }
+                    )
+
+                # Frozen Scene Target Selection consumes only the distributed
+                # primary candidate bursts. Role-verification-only frames remain
+                # evidence-only. Referee/staff/ball never enter this CSV.
+                if not is_primary_candidate_frame:
+                    continue
+                # Hard product boundary: only non-closeup primary frames from
+                # WIDE shots may enter the frozen scene-target grouping/ranking
+                # pipeline. CLOSEUP/MIXED shots are excluded, and a closeup-like
+                # frame inside an otherwise WIDE shot is also vetoed so a brief
+                # coach/bench insert cannot seed a selectable target candidate.
+                if not tracking_candidate_frame_allowed:
+                    continue
+                for detection_index, item in enumerate(candidates):
+                    x1, y1, x2, y2 = item.bbox_xyxy
+                    candidate_rows.append(
+                        {
+                            "frame": index,
+                            "frame_index": index,
+                            "time_ms": int(round(index * 1000.0 / scene_fps)),
+                            "detection_index": detection_index,
+                            "detection_id": f"det_{index:08d}_{detection_index:04d}",
+                            "class_id": int(item.class_id),
+                            "class_name": str(item.class_name),
+                            "confidence": float(item.confidence),
+                            "x1": float(x1),
+                            "y1": float(y1),
+                            "x2": float(x2),
+                            "y2": float(y2),
+                            "shot_id": shot_id,
+                            "shot_scene_mode": shot_scene_mode,
+                            "frame_closeup_vote": bool(frame_evidence.get("closeup_vote")),
+                            "source_model": runtime.get("model_class")
+                            or runtime.get("backend"),
+                            "model_sha256": model_sha,
+                            "scene_video_sha256": scene_sha,
+                        }
+                    )
         finally:
             capture.release()
 
@@ -3092,6 +3436,9 @@ class ShotBoundaryReviewService:
             "y1",
             "x2",
             "y2",
+            "shot_id",
+            "shot_scene_mode",
+            "frame_closeup_vote",
             "role_player_support",
             "role_nonplayer_support",
             "role_referee_support",
@@ -3100,22 +3447,39 @@ class ShotBoundaryReviewService:
             "role_matched_frames",
             "role_gate_status",
             "role_gate_reason",
+            "product_role_state",
             "source_model",
             "model_sha256",
             "scene_video_sha256",
         ]
         observation_fields = [
-            *candidate_fields[:12],
+            "frame",
+            "frame_index",
+            "time_ms",
+            "detection_index",
+            "detection_id",
+            "class_id",
+            "class_name",
+            "confidence",
+            "x1",
+            "y1",
+            "x2",
+            "y2",
             "box_height_ratio",
             "box_area_ratio",
             "is_closeup_frame",
+            "shot_id",
+            "shot_scene_mode",
+            "shot_scene_policy_closeup",
             "observation_eligible",
             "crop_eligible",
             "observation_rank",
             "candidate_eligible",
             "role_verification_only",
             "crop_path",
-            *candidate_fields[12:],
+            "source_model",
+            "model_sha256",
+            "scene_video_sha256",
         ]
         with output.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=candidate_fields)
@@ -3162,6 +3526,19 @@ class ShotBoundaryReviewService:
                 "saved_closeup_crop_count": saved_closeup_crop_count,
                 "wide_frame_count": wide_frame_count,
                 "closeup_frame_count": closeup_frame_count,
+                "mixed_frame_count": mixed_frame_count,
+                "closeup_primary_frame_veto_count": closeup_primary_frame_veto_count,
+                "shot_scene_router": {
+                    "policy_version": SHOT_SCENE_ROUTER_POLICY_VERSION,
+                    "closeup_ratio_min": SHOT_SCENE_CLOSEUP_RATIO_MIN,
+                    "wide_ratio_max": SHOT_SCENE_WIDE_RATIO_MAX,
+                    "minimum_evidence_frames": SHOT_SCENE_MIN_EVIDENCE_FRAMES,
+                    "mixed_uses_observation_policy": True,
+                    "tracking_scene_policy": TRACKING_SCENE_POLICY_VERSION,
+                    "tracking_allowed_modes": sorted(TRACKING_ALLOWED_SHOT_SCENE_MODES),
+                    "tracking_excluded_modes": sorted(TRACKING_EXCLUDED_SHOT_SCENE_MODES),
+                    "shot_modes": shot_scene_modes,
+                },
                 "excluded_role_counts": dict(
                     sorted(excluded_role_counts.items())
                 ),
@@ -3207,6 +3584,19 @@ class ShotBoundaryReviewService:
                 "detection_count": len(candidate_rows),
                 "wide_frame_count": wide_frame_count,
                 "closeup_frame_count": closeup_frame_count,
+                "mixed_frame_count": mixed_frame_count,
+                "closeup_primary_frame_veto_count": closeup_primary_frame_veto_count,
+                "shot_scene_router": {
+                    "policy_version": SHOT_SCENE_ROUTER_POLICY_VERSION,
+                    "closeup_ratio_min": SHOT_SCENE_CLOSEUP_RATIO_MIN,
+                    "wide_ratio_max": SHOT_SCENE_WIDE_RATIO_MAX,
+                    "minimum_evidence_frames": SHOT_SCENE_MIN_EVIDENCE_FRAMES,
+                    "mixed_uses_observation_policy": True,
+                    "tracking_scene_policy": TRACKING_SCENE_POLICY_VERSION,
+                    "tracking_allowed_modes": sorted(TRACKING_ALLOWED_SHOT_SCENE_MODES),
+                    "tracking_excluded_modes": sorted(TRACKING_EXCLUDED_SHOT_SCENE_MODES),
+                    "shot_modes": shot_scene_modes,
+                },
                 "closeup_crop_eligible_count": closeup_crop_eligible_count,
                 "saved_closeup_crop_count": saved_closeup_crop_count,
                 "excluded_role_counts": dict(

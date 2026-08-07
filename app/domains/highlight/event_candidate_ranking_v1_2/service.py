@@ -20,7 +20,7 @@ from .contract import (
 # Product shortlist policy only. This does not change the frozen V1.1.2a
 # recommendation score or global rank. It only changes which already-eligible
 # candidates are surfaced first for user target selection.
-PRODUCT_SHORTLIST_POLICY_VERSION = "FIELD_CONTEXT_PRIORITY_R1"
+PRODUCT_SHORTLIST_POLICY_VERSION = "SHOT_SCENE_ROLE_AWARE_PRIORITY_R2"
 PRODUCT_WIDE_BBOX_AREA_RATIO_MAX = 0.08
 
 
@@ -80,6 +80,7 @@ class EventCandidateRankingV12ShortlistPatch:
         *,
         phase: str,
         adjacent_shot_id: str | None,
+        shot_scene_mode: str | None,
     ) -> tuple[int, str]:
         """Return a deterministic product-only shortlist priority.
 
@@ -97,6 +98,14 @@ class EventCandidateRankingV12ShortlistPatch:
         - large close-up-only rows remain visible, but are role-unverified and
           therefore sorted last.
         """
+
+        explicit_scene_mode = str(shot_scene_mode or "").upper()
+        # Close-up/MIXED player labels are deliberately not treated as verified
+        # identity roles until the future secondary role classifier is present.
+        # They remain selectable, but cannot outrank on-field WIDE candidates
+        # merely because the crop is large, sharp, or action-adjacent.
+        if explicit_scene_mode in {"CLOSEUP", "MIXED"}:
+            return 4, "PRODUCT_CLOSEUP_ROLE_UNVERIFIED"
 
         if adjacent_shot_id is not None and row.get("shot_id") == adjacent_shot_id:
             return 0, "PRODUCT_ACTION_ADJACENT_PRIORITY"
@@ -148,6 +157,7 @@ class EventCandidateRankingV12ShortlistPatch:
         source_ranking_artifact_id: str,
         source_ranking_sha256: str,
         shortlist_size: int = 5,
+        shot_scene_modes: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if shortlist_size != int(self.policy["shortlist_size"]):
             raise ValueError("V1.2 patch supports the frozen shortlist size only.")
@@ -190,11 +200,17 @@ class EventCandidateRankingV12ShortlistPatch:
             for row in eligible
         }
 
+        shot_scene_modes = shot_scene_modes or {}
         product_context_by_id = {
             row["candidate_id"]: self._product_context_priority(
                 row,
                 phase=phase_by_id[row["candidate_id"]],
                 adjacent_shot_id=adjacent_shot_id,
+                shot_scene_mode=(
+                    (shot_scene_modes.get(str(row.get("shot_id") or "")) or {}).get(
+                        "mode"
+                    )
+                ),
             )
             for row in eligible
         }
@@ -237,10 +253,12 @@ class EventCandidateRankingV12ShortlistPatch:
             candidate_id = row["candidate_id"]
             selected[candidate_id] = row
             reasons = inclusion_reasons.setdefault(candidate_id, [])
+            # IMPORTANT: shortlist_patch_reason_codes is a frozen V1.2 schema
+            # field. Keep it limited to the legacy enum values declared in
+            # output_schema.json. Product context priority is an internal
+            # deterministic ordering signal only; it must never be serialized
+            # into this schema-governed reason-code list.
             reasons.append(reason)
-            product_reason = product_context_by_id[candidate_id][1]
-            if product_reason not in reasons:
-                reasons.append(product_reason)
             shot_counts[row["shot_id"]] += 1
             phase_counts[phase_by_id[candidate_id]] += 1
             return True

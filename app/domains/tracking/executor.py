@@ -191,12 +191,21 @@ class TrackingJobExecutor:
             )
             self._after_pipeline_sync(db, job, state, mapping, artifacts)
             if mapping.backend_status == TrackingBackendStatus.FAILED:
-                error_type, public_message = classify_runtime_failure(
-                    result.stdout_log_path,
-                    result.stderr_log_path,
-                )
-                job.error_type = error_type
-                job.error_message = public_message
+                state_error_type, state_error_message = pipeline_state_failure_details(state)
+                if state_error_message:
+                    job.error_type = mapping.error_type or "PIPELINE_FATAL_ERROR"
+                    job.error_message = (
+                        f"{state_error_type}: {state_error_message}"
+                        if state_error_type
+                        else state_error_message
+                    )
+                else:
+                    error_type, public_message = classify_runtime_failure(
+                        result.stdout_log_path,
+                        result.stderr_log_path,
+                    )
+                    job.error_type = error_type
+                    job.error_message = public_message
             metadata = dict(job.runtime_metadata or {})
             metadata["stdout_log_path"] = str(result.stdout_log_path)
             metadata["stderr_log_path"] = str(result.stderr_log_path)
@@ -311,6 +320,20 @@ class TrackingJobExecutor:
                 # rows were missing/inconsistent.
                 self._after_pipeline_sync(db, job, state, mapping, artifacts)
                 return
+            if mapping.backend_status == TrackingBackendStatus.FAILED:
+                state_error_type, state_error_message = pipeline_state_failure_details(state)
+                if state_error_message:
+                    mark_process_failed(
+                        job,
+                        error_type=mapping.error_type or fallback_type,
+                        public_message=(
+                            f"{state_error_type}: {state_error_message}"
+                            if state_error_type
+                            else state_error_message
+                        ),
+                        process_pid=process_pid,
+                    )
+                    return
         except Exception:
             logger.exception(
                 "Could not reconcile tracking state after process failure: %s",
@@ -410,6 +433,26 @@ def get_tracking_executor() -> TrackingJobExecutor:
         if _executor is None:
             _executor = TrackingJobExecutor()
         return _executor
+
+
+def pipeline_state_failure_details(
+    state: Mapping[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """Return the pipeline-authored fatal error before falling back to log heuristics.
+
+    Full-scene/product runtimes write an ``error`` object into terminal FAILED
+    pipeline_state.json.  That state is more specific than the generic process
+    classifier and is safe to surface to the developer UI.
+    """
+
+    if not isinstance(state, Mapping):
+        return None, None
+    raw_error = state.get("error")
+    if not isinstance(raw_error, Mapping):
+        return None, None
+    error_type = str(raw_error.get("type") or "").strip() or None
+    message = str(raw_error.get("message") or "").strip() or None
+    return error_type, message
 
 
 def classify_runtime_failure(

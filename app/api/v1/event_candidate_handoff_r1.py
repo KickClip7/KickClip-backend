@@ -25,6 +25,9 @@ from app.domains.candidate_handoff_r1.preparation import (
     PREPARATION_TASK_TYPE,
     install_candidate_preparation_integration,
 )
+from app.domains.candidate_handoff_r1.initial_target_gallery import (
+    INITIAL_TARGET_GALLERY_POLICY_VERSION,
+)
 from app.domains.candidate_handoff_r1.schema import (
     CandidateRecommendationPrepareRequest,
     CandidateReviewDecisionRequest,
@@ -366,6 +369,11 @@ def prepare_event_candidate_recommendations(
             "event_id": event_id,
             "scene_id": scene_id,
             "shortlist_size": payload.shortlist_size,
+            # Included in the idempotency payload so an already-completed R1C
+            # preparation cannot hide the wider temporal-diversity gallery.
+            "initial_target_gallery_policy": (
+                INITIAL_TARGET_GALLERY_POLICY_VERSION
+            ),
             "shot_boundaries_artifact_id": contract[
                 "shot_boundaries_artifact_id"
             ],

@@ -41,6 +41,7 @@ from .candidate_grouping import (
     CANDIDATE_GROUPING_POLICY_VERSION,
     CANDIDATE_GROUPING_SCHEMA_VERSION,
 )
+from .initial_target_gallery import INITIAL_TARGET_GALLERY_POLICY_VERSION
 from .errors import (
     CandidateRecommendationNotPrepared,
     CandidateSelectionProvenanceMismatch,
@@ -748,6 +749,8 @@ class CandidateHandoffR1Service:
             and (row.metadata_ or {}).get("shortlist_patch_id") == shortlist_patch_id
             and (row.metadata_ or {}).get("candidate_grouping_policy")
             == CANDIDATE_GROUPING_POLICY_VERSION
+            and (row.metadata_ or {}).get("initial_target_gallery_policy")
+            == INITIAL_TARGET_GALLERY_POLICY_VERSION
             and (row.metadata_ or {}).get("status") == "READY"
         ]
         if not matches:
@@ -786,10 +789,31 @@ class CandidateHandoffR1Service:
                 "CANDIDATE_GROUPING_PROVENANCE_MISMATCH"
             )
 
-        expected_candidate_ids = {
+        gallery_contract = document.get("initial_target_gallery")
+        if (
+            not isinstance(gallery_contract, dict)
+            or gallery_contract.get("policy_version")
+            != INITIAL_TARGET_GALLERY_POLICY_VERSION
+        ):
+            raise CandidateRecommendationNotPrepared(
+                "INITIAL_TARGET_GALLERY_PREPARATION_REQUIRED"
+            )
+        raw_gallery_ids = gallery_contract.get("candidate_ids") or []
+        expected_candidate_ids = {str(value) for value in raw_gallery_ids}
+        ranked_candidate_ids = {
             public_candidate_id(str(row["candidate_id"]))
-            for row in ranking.get("shortlist") or []
+            for row in ranking.get("all_candidates") or []
+            if isinstance(row, dict) and row.get("candidate_id")
         }
+        if (
+            not expected_candidate_ids
+            or not expected_candidate_ids.issubset(ranked_candidate_ids)
+            or int(gallery_contract.get("candidate_count", -1))
+            != len(expected_candidate_ids)
+        ):
+            raise CandidateRecommendationNotPrepared(
+                "CANDIDATE_GROUPING_PROVENANCE_MISMATCH"
+            )
         seen_members: set[str] = set()
         representatives: set[str] = set()
         for group in groups:
@@ -887,8 +911,17 @@ class CandidateHandoffR1Service:
         grouping_sha256 = str((grouping_artifact.metadata_ or {}).get("sha256") or "")
         ranking_by_candidate_id = {
             public_candidate_id(str(row["candidate_id"])): row
-            for row in ranking["shortlist"]
+            for row in ranking.get("all_candidates") or []
+            if isinstance(row, dict) and row.get("candidate_id")
         }
+        # Preserve V1.2 shortlist annotations when the candidate is also in the
+        # immutable shortlist, while allowing the wider initial target gallery
+        # to surface candidates such as global rank 13.
+        for row in ranking.get("shortlist") or []:
+            if isinstance(row, dict) and row.get("candidate_id"):
+                ranking_by_candidate_id[
+                    public_candidate_id(str(row["candidate_id"]))
+                ] = row
 
         candidates: list[EventCandidateRecommendationRead] = []
         groups = sorted(
@@ -958,6 +991,8 @@ class CandidateHandoffR1Service:
                 risk_codes.append("POSSIBLE_FRAGMENT_DUPLICATE_GROUP")
 
             reason_codes = list(row.get("shortlist_patch_reason_codes") or [])
+            if not reason_codes:
+                reason_codes.append("INITIAL_TARGET_GALLERY_TEMPORAL_DIVERSITY")
             if len(member_candidate_ids) > 1:
                 reason_codes.append("FRAGMENT_GROUP_REPRESENTATIVE")
 
@@ -1153,14 +1188,14 @@ class CandidateHandoffR1Service:
         ranking_row = next(
             (
                 row
-                for row in ranking["shortlist"]
+                for row in ranking.get("all_candidates") or []
                 if public_candidate_id(str(row["candidate_id"])) == candidate_id
             ),
             None,
         )
         if ranking_row is None:
             raise CandidateSelectionProvenanceMismatch(
-                "The selected candidate is not in the served V1.2 shortlist."
+                "The selected candidate is not in the served initial target gallery."
             )
         bundle_artifact = self._bundle_artifact(
             project_id=project.project_id,

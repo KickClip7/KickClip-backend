@@ -42,6 +42,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stage2d2-visual-review", choices=("PASS", "FAIL"), default=None)
     p.add_argument("--reviewer", default="USER")
     p.add_argument("--review-note", default="Frozen Phase-1 visual review")
+    p.add_argument(
+        "--product-runtime-auto-review",
+        action="store_true",
+        help=(
+            "Consume frozen research-only same-shot visual-review checkpoints "
+            "inside the product runtime. This never auto-confirms cross-shot identity."
+        ),
+    )
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--skip-hash-check", action="store_true")
     p.add_argument("--dry-run", action="store_true")
@@ -136,6 +144,57 @@ def write_state(test_dir: Path, status: str, **extra: Any) -> None:
     os.replace(tmp, state_path(test_dir))
 
 
+
+def record_product_auto_review(test_dir: Path, stage: str, preview: Path | None) -> None:
+    path = test_dir / "product_runtime_auto_review_audit.json"
+    if path.is_file():
+        value = read_json(path)
+    else:
+        value = {
+            "schema_version": "kickclip.phase1_product_auto_review_audit.v1",
+            "policy": "RESEARCH_VISUAL_CHECKPOINT_NOT_EXPOSED_TO_PRODUCT_USER",
+            "records": [],
+        }
+    records = list(value.get("records") or [])
+    records.append(
+        {
+            "stage": stage,
+            "decision": "PRODUCT_RUNTIME_CONTINUE",
+            "reason": "FINAL_TARGET_CENTRIC_DESIGN_SAME_SHOT_REENTRY_IS_AUTOMATIC",
+            "human_confirmation": False,
+            "cross_shot_identity_confirmation": False,
+            "preview": str(preview) if preview is not None else None,
+            "recorded_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        }
+    )
+    value["records"] = records
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def review_is_passed(
+    *,
+    explicit: str | None,
+    product_auto: bool,
+    stage: str,
+    test_dir: Path,
+    preview: Path | None,
+) -> bool:
+    if explicit == "FAIL":
+        return False
+    if explicit == "PASS":
+        return True
+    if product_auto:
+        record_product_auto_review(test_dir, stage, preview)
+        print(
+            f"[PHASE1] product runtime continues research-only visual checkpoint: {stage}",
+            flush=True,
+        )
+        return True
+    return False
+
+
 def selected_candidate(summary: dict[str, Any]) -> bool:
     selection = summary.get("selection") or {}
     return bool(selection.get("selected_tracklet_id") or selection.get("selected_candidate"))
@@ -206,14 +265,30 @@ def main() -> int:
         if a.stage2b_visual_review == "FAIL":
             write_state(test_dir, "BLOCKED", review_stage="STAGE2B", reason="USER_REVIEW_FAIL")
             raise RuntimeError("Stage 2-B visual review failed; pipeline blocked")
-        if a.stage2b_visual_review != "PASS":
+        stage2b_preview = test_dir / "stage2b_reentry_preview.mp4"
+        stage2b_pass = review_is_passed(
+            explicit=a.stage2b_visual_review,
+            product_auto=a.product_runtime_auto_review,
+            stage="STAGE2B",
+            test_dir=test_dir,
+            preview=stage2b_preview,
+        )
+        if not stage2b_pass:
             write_state(test_dir, "REVIEW_REQUIRED", review_stage="STAGE2B",
-                        preview=str(test_dir / "stage2b_reentry_preview.mp4"))
+                        preview=str(stage2b_preview))
             print("Review required: Stage 2-B. Re-run with --stage2b-visual-review PASS or FAIL.")
             return 3
 
+        auto_runtime_review = a.stage2b_visual_review is None and a.product_runtime_auto_review
+        stage2c_reviewer = "KICKCLIP_PRODUCT_RUNTIME" if auto_runtime_review else a.reviewer
+        stage2c_note = (
+            "Research-only same-shot visual checkpoint consumed by product runtime; "
+            "no human identity confirmation."
+            if auto_runtime_review
+            else a.review_note
+        )
         stage2c = [python, str(script_path(root, manifest, "stage2c")), "--test-name", test_name,
-                   "--stage2b-visual-review", "PASS", "--reviewer", a.reviewer, "--review-note", a.review_note]
+                   "--stage2b-visual-review", "PASS", "--reviewer", stage2c_reviewer, "--review-note", stage2c_note]
         run_stage_if_missing(test_dir / "stage2c_audit.json", stage2c, root, False, a.overwrite, "--overwrite-stage2c")
 
         stage2d = [python, str(script_path(root, manifest, "stage2d")), "--test-name", test_name, "--device", a.device]
@@ -224,9 +299,16 @@ def main() -> int:
             if a.stage2d_visual_review == "FAIL":
                 write_state(test_dir, "BLOCKED", review_stage="STAGE2D", reason="USER_REVIEW_FAIL")
                 raise RuntimeError("Stage 2-D visual review failed; pipeline blocked")
-            if a.stage2d_visual_review != "PASS":
+            stage2d_preview = test_dir / "stage2d_multi_reentry_preview.mp4"
+            if not review_is_passed(
+                explicit=a.stage2d_visual_review,
+                product_auto=a.product_runtime_auto_review,
+                stage="STAGE2D",
+                test_dir=test_dir,
+                preview=stage2d_preview,
+            ):
                 write_state(test_dir, "REVIEW_REQUIRED", review_stage="STAGE2D",
-                            preview=str(test_dir / "stage2d_multi_reentry_preview.mp4"))
+                            preview=str(stage2d_preview))
                 print("Review required: Stage 2-D. Re-run with --stage2d-visual-review PASS or FAIL.")
                 return 3
         elif d_summary.get("decision") == SAFE_D:
@@ -237,9 +319,16 @@ def main() -> int:
                 if a.stage2d1_visual_review == "FAIL":
                     write_state(test_dir, "BLOCKED", review_stage="STAGE2D1", reason="USER_REVIEW_FAIL")
                     raise RuntimeError("Stage 2-D1 visual review failed; pipeline blocked")
-                if a.stage2d1_visual_review != "PASS":
+                stage2d1_preview = test_dir / "stage2d1_multi_reentry_preview.mp4"
+                if not review_is_passed(
+                    explicit=a.stage2d1_visual_review,
+                    product_auto=a.product_runtime_auto_review,
+                    stage="STAGE2D1",
+                    test_dir=test_dir,
+                    preview=stage2d1_preview,
+                ):
                     write_state(test_dir, "REVIEW_REQUIRED", review_stage="STAGE2D1",
-                                preview=str(test_dir / "stage2d1_multi_reentry_preview.mp4"))
+                                preview=str(stage2d1_preview))
                     print("Review required: Stage 2-D1. Re-run with --stage2d1-visual-review PASS or FAIL.")
                     return 3
                 stage2d2 = [python, str(script_path(root, manifest, "stage2d2")), "--test-name", test_name]
@@ -249,9 +338,16 @@ def main() -> int:
                     if a.stage2d2_visual_review == "FAIL":
                         write_state(test_dir, "BLOCKED", review_stage="STAGE2D2", reason="USER_REVIEW_FAIL")
                         raise RuntimeError("Stage 2-D2 visual review failed; pipeline blocked")
-                    if a.stage2d2_visual_review != "PASS":
+                    stage2d2_preview = test_dir / "stage2d2_hysteresis_preview.mp4"
+                    if not review_is_passed(
+                        explicit=a.stage2d2_visual_review,
+                        product_auto=a.product_runtime_auto_review,
+                        stage="STAGE2D2",
+                        test_dir=test_dir,
+                        preview=stage2d2_preview,
+                    ):
                         write_state(test_dir, "REVIEW_REQUIRED", review_stage="STAGE2D2",
-                                    preview=str(test_dir / "stage2d2_hysteresis_preview.mp4"))
+                                    preview=str(stage2d2_preview))
                         print("Review required: Stage 2-D2. Re-run with --stage2d2-visual-review PASS or FAIL.")
                         return 3
             elif d1_summary.get("decision") != SAFE_D1:
@@ -267,8 +363,14 @@ def main() -> int:
 
     validator = script_path(root, manifest, "validator")
     run([python, str(validator), "--test-name", test_name], root, False)
-    write_state(test_dir, "COMPLETE", final_timeline=str(test_dir / "final_target_timeline.json"),
-                final_preview=str(test_dir / "final_target_centered_preview.mp4"))
+    write_state(
+        test_dir,
+        "COMPLETE",
+        final_timeline=str(test_dir / "final_target_timeline.json"),
+        final_preview=str(test_dir / "final_target_centered_preview.mp4"),
+        product_runtime_auto_review=bool(a.product_runtime_auto_review),
+        product_runtime_auto_review_audit=str(test_dir / "product_runtime_auto_review_audit.json"),
+    )
     print("KickClip product-compatible Phase-1 pipeline complete")
     print(f"Output: {test_dir}")
     return 0
