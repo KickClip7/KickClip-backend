@@ -1,19 +1,32 @@
 import json
+import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from sqlalchemy.orm import Session
 
+from app.ai.runtime.job_runner import run_analysis_job_background
 from app.db.session import get_db
 from app.domains.artifact.model import Artifact
 from app.domains.artifact.signed_url import build_signed_artifact_url
 from app.domains.auth.access import require_match_access
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
+from app.domains.highlight.action_cache import ActionSpottingCacheService
 from app.domains.match.model import Match
 from app.domains.match.schema import MatchRead
 from app.domains.match.service import MatchService
+from app.domains.media.feature_bootstrap import ensure_preloaded_half_features
 from app.domains.media.model import MediaAsset
 from app.domains.media.signed_url import build_signed_media_url
 from app.domains.project.schema import ProjectCreate, ProjectRead
@@ -21,6 +34,8 @@ from app.domains.project.service import ProjectService
 from app.domains.studio.schema import UploadMatchVideoResponse
 from app.domains.studio.service import StudioService
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -116,12 +131,13 @@ def upload_match_video(
 def create_match_project(
     match_id: str,
     payload: ProjectCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ProjectRead:
-    require_match_access(db, match_id, current_user)
+    match = require_match_access(db, match_id, current_user)
     try:
-        return ProjectService(db).create_project(
+        project = ProjectService(db).create_project(
             payload,
             match_id=match_id,
             owner_id=current_user.user_id,
@@ -131,6 +147,50 @@ def create_match_project(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
+    _start_action_spotting_if_possible(db, match, background_tasks)
+    return project
+
+
+def _start_action_spotting_if_possible(
+    db: Session,
+    match: Match,
+    background_tasks: BackgroundTasks,
+) -> None:
+    """편집에 필요한 Action Spotting을 best-effort로 준비한다.
+
+    half 피처가 없으면 사전 추출 NPY를 등록한 뒤 캐시된 Champion 작업을
+    가져오거나 새로 만들어 백그라운드로 실행한다. 실패해도 Project 생성
+    응답에는 영향을 주지 않는다.
+    """
+
+    try:
+        bootstrap = ensure_preloaded_half_features(db, match)
+        job, reused = ActionSpottingCacheService(db).get_or_create(
+            match_id=match.match_id,
+            request_options={
+                "run_feature_extraction": True,
+                "highlight_workflow": True,
+            },
+        )
+        db.commit()
+        if job.status == "QUEUED":
+            background_tasks.add_task(
+                run_analysis_job_background,
+                job.analysis_job_id,
+            )
+        logger.info(
+            "Action spotting bootstrap for %s: features=%s job=%s reused=%s",
+            match.match_id,
+            bootstrap.get("status"),
+            job.analysis_job_id,
+            reused,
+        )
+    except Exception:  # noqa: BLE001 - Project 생성은 이미 성공한 상태다
+        db.rollback()
+        logger.exception(
+            "Best-effort action spotting bootstrap failed for %s",
+            match.match_id,
+        )
 
 
 @router.get(

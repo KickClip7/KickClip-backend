@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     # Storage
     # -------------------------------------------------------------------------
     STORAGE_ROOT: Path = Path("storage")
+    # 로컬 데모 전용: SoccerNet 피처 추출 러너가 없는 환경에서, 업로드된 Match에
+    # half 피처가 없으면 이 사전 추출 [T, 512] NPY를 등록해 Champion Action
+    # Spotting을 실행할 수 있게 한다. 비워 두면 아무 동작도 하지 않는다.
+    PRELOADED_FEATURE_NPY_PATH: str = ""
     # 목업 데이터 사용은 반드시 .env에서 명시적으로 켠다.
     # 기본값을 False로 두어 실제 데이터 운영 경로가 기본 동작이 되도록 한다.
     USE_MOCK_DATA: bool = False
@@ -353,6 +357,12 @@ class Settings(BaseSettings):
         if self.AGENT_DEV_MATCH_ID.strip():
             raise ValueError(
                 "운영 환경에서는 AGENT_DEV_MATCH_ID를 설정할 수 없습니다."
+            )
+
+        if self.PRELOADED_FEATURE_NPY_PATH.strip():
+            raise ValueError(
+                "운영 환경에서는 PRELOADED_FEATURE_NPY_PATH를 "
+                "설정할 수 없습니다."
             )
 
         insecure_secret_keys = {
