@@ -17,8 +17,21 @@ from .contract import (
 )
 
 
+# Product shortlist policy only. This does not change the frozen V1.1.2a
+# recommendation score or global rank. It only changes which already-eligible
+# candidates are surfaced first for user target selection.
+PRODUCT_SHORTLIST_POLICY_VERSION = "FIELD_CONTEXT_PRIORITY_R1"
+PRODUCT_WIDE_BBOX_AREA_RATIO_MAX = 0.08
+
+
 class EventCandidateRankingV12ShortlistPatch:
-    """Rebuild only the shortlist while preserving V1.1.2a scores/ranks."""
+    """Rebuild the product shortlist while preserving V1.1.2a scores/ranks.
+
+    V1.2 is a product surfacing layer, not a scorer. The global V1.1.2a rank
+    remains immutable; only shortlist inclusion/display order is made field-first
+    so low-resolution wide-shot players are not displaced by large role-unverified
+    close-ups.
+    """
 
     def __init__(self, package_root: Path) -> None:
         self.package_root = package_root.resolve()
@@ -55,6 +68,77 @@ class EventCandidateRankingV12ShortlistPatch:
         return str(row.get("reliability_state") or "") in set(
             policy["eligible_reliability_states"]
         )
+
+    @staticmethod
+    def _nested_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    @classmethod
+    def _product_context_priority(
+        cls,
+        row: dict[str, Any],
+        *,
+        phase: str,
+        adjacent_shot_id: str | None,
+    ) -> tuple[int, str]:
+        """Return a deterministic product-only shortlist priority.
+
+        The frozen V1.1.2a score/rank is never recomputed. The product UI needs
+        actual on-field player candidates to remain reviewable even when they are
+        LOW_RESOLUTION, while large event/post close-ups that RF-DETR persistently
+        labels as ``player`` must not automatically outrank them just because the
+        crop is large and sharp.
+
+        Evidence is intentionally conservative:
+        - the manually/structurally action-adjacent previous shot is strongest;
+        - small/wide candidates or candidates with usable ball evidence are
+          field-supported;
+        - pre-event candidates are preferred to event/post context-neutral rows;
+        - large close-up-only rows remain visible, but are role-unverified and
+          therefore sorted last.
+        """
+
+        if adjacent_shot_id is not None and row.get("shot_id") == adjacent_shot_id:
+            return 0, "PRODUCT_ACTION_ADJACENT_PRIORITY"
+
+        raw_features = cls._nested_dict(row.get("raw_features"))
+        visual = cls._nested_dict(raw_features.get("visual"))
+        ball = cls._nested_dict(raw_features.get("ball"))
+
+        area_value = visual.get("bbox_area_ratio")
+        bbox_area_ratio: float | None = None
+        if isinstance(area_value, (int, float)):
+            candidate_area = float(area_value)
+            if candidate_area >= 0:
+                bbox_area_ratio = candidate_area
+
+        selected_ball_observation_count = ball.get(
+            "selected_ball_observation_count",
+            0,
+        )
+        if not isinstance(selected_ball_observation_count, (int, float)):
+            selected_ball_observation_count = 0
+        ball_supported = bool(
+            str(ball.get("state") or "").upper() == "AVAILABLE"
+            and float(selected_ball_observation_count) > 0
+        )
+        wide_supported = bool(
+            bbox_area_ratio is not None
+            and bbox_area_ratio <= PRODUCT_WIDE_BBOX_AREA_RATIO_MAX
+        )
+        if wide_supported or ball_supported:
+            return 1, "PRODUCT_FIELD_SUPPORTED_PRIORITY"
+
+        closeup_only = bool(
+            bbox_area_ratio is not None
+            and bbox_area_ratio > PRODUCT_WIDE_BBOX_AREA_RATIO_MAX
+        )
+        if closeup_only:
+            return 4, "PRODUCT_CLOSEUP_ROLE_UNVERIFIED"
+
+        if phase == "PRE_EVENT_ACTION":
+            return 2, "PRODUCT_PRE_EVENT_CONTEXT_PRIORITY"
+        return 3, "PRODUCT_EVENT_POST_CONTEXT_PRIORITY"
 
     def run(
         self,
@@ -106,6 +190,23 @@ class EventCandidateRankingV12ShortlistPatch:
             for row in eligible
         }
 
+        product_context_by_id = {
+            row["candidate_id"]: self._product_context_priority(
+                row,
+                phase=phase_by_id[row["candidate_id"]],
+                adjacent_shot_id=adjacent_shot_id,
+            )
+            for row in eligible
+        }
+        eligible_product_order = sorted(
+            eligible,
+            key=lambda row: (
+                product_context_by_id[row["candidate_id"]][0],
+                int(row["rank"]),
+                str(row["candidate_id"]),
+            ),
+        )
+
         selected: dict[str, dict[str, Any]] = {}
         inclusion_reasons: dict[str, list[str]] = {}
         shot_counts: Counter[str] = Counter()
@@ -135,7 +236,11 @@ class EventCandidateRankingV12ShortlistPatch:
                 return False
             candidate_id = row["candidate_id"]
             selected[candidate_id] = row
-            inclusion_reasons.setdefault(candidate_id, []).append(reason)
+            reasons = inclusion_reasons.setdefault(candidate_id, [])
+            reasons.append(reason)
+            product_reason = product_context_by_id[candidate_id][1]
+            if product_reason not in reasons:
+                reasons.append(product_reason)
             shot_counts[row["shot_id"]] += 1
             phase_counts[phase_by_id[candidate_id]] += 1
             return True
@@ -145,7 +250,7 @@ class EventCandidateRankingV12ShortlistPatch:
             adjacent = next(
                 (
                     row
-                    for row in eligible
+                    for row in eligible_product_order
                     if row["shot_id"] == adjacent_shot_id
                 ),
                 None,
@@ -160,23 +265,26 @@ class EventCandidateRankingV12ShortlistPatch:
             else:
                 include(adjacent, "CUT_ADJACENT_ACTION_CANDIDATE")
 
-        for row in eligible:
-            if phase_counts["EVENT_CONTAINING_POST"] >= max_event_post:
-                break
-            if phase_by_id[row["candidate_id"]] == "EVENT_CONTAINING_POST":
-                include(row, "EVENT_CONTAINING_POST_PHASE_SLOT")
-
         preferred_pre = int(
             self.policy["phase_diversity"]["preferred_pre_event_action"]
         )
         minimum_pre = int(
             self.policy["phase_diversity"]["min_pre_event_action"]
         )
-        for row in eligible:
+        # Product-first selection: preserve the frozen phase quotas, but satisfy
+        # the pre-event action slots before spending capacity on event/post
+        # close-ups. This keeps LOW_RESOLUTION on-field players eligible.
+        for row in eligible_product_order:
             if phase_counts["PRE_EVENT_ACTION"] >= preferred_pre:
                 break
             if phase_by_id[row["candidate_id"]] == "PRE_EVENT_ACTION":
                 include(row, "PRE_EVENT_ACTION_PHASE_SLOT")
+
+        for row in eligible_product_order:
+            if phase_counts["EVENT_CONTAINING_POST"] >= max_event_post:
+                break
+            if phase_by_id[row["candidate_id"]] == "EVENT_CONTAINING_POST":
+                include(row, "EVENT_CONTAINING_POST_PHASE_SLOT")
         if phase_counts["PRE_EVENT_ACTION"] < minimum_pre:
             phase_fallbacks.append(
                 {
@@ -196,7 +304,7 @@ class EventCandidateRankingV12ShortlistPatch:
                 }
             )
 
-        for row in eligible:
+        for row in eligible_product_order:
             if len(selected) >= shortlist_size:
                 break
             include(row, "GLOBAL_SCORE_FALLBACK")
@@ -212,7 +320,11 @@ class EventCandidateRankingV12ShortlistPatch:
 
         selected_rows = sorted(
             selected.values(),
-            key=lambda row: int(row["rank"]),
+            key=lambda row: (
+                product_context_by_id[row["candidate_id"]][0],
+                int(row["rank"]),
+                str(row["candidate_id"]),
+            ),
         )
         shortlist = []
         for shortlist_rank, row in enumerate(selected_rows, start=1):

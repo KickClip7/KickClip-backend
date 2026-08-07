@@ -1064,6 +1064,9 @@ class SceneTargetSelectionService:
             output,
             "tracking_launch_manifest.json",
         )
+        launch_sha256 = sha256_file(launch_path)
+        shot_boundaries_path = self._artifact_path(shot_boundaries_artifact)
+        shot_boundaries_sha256 = sha256_file(shot_boundaries_path)
         target_selection_path = self._immutable_selection_file(
             selection,
             path_attribute="target_selection_path",
@@ -1102,9 +1105,9 @@ class SceneTargetSelectionService:
                         self.settings.TRACKING_R2_MANIFEST_SHA256
                     ),
                     "tracking_launch_manifest_path": str(launch_path),
-                    "shot_boundaries_path": str(
-                        self._artifact_path(shot_boundaries_artifact)
-                    ),
+                    "tracking_launch_manifest_sha256": launch_sha256,
+                    "shot_boundaries_path": str(shot_boundaries_path),
+                    "shot_boundaries_sha256": shot_boundaries_sha256,
                     "target_selection_path": str(target_selection_path),
                     "target_selection_sha256": (
                         selection.target_selection_sha256

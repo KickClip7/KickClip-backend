@@ -59,10 +59,6 @@ class Settings(BaseSettings):
     # Storage
     # -------------------------------------------------------------------------
     STORAGE_ROOT: Path = Path("storage")
-    # 로컬 데모 전용: SoccerNet 피처 추출 러너가 없는 환경에서, 업로드된 Match에
-    # half 피처가 없으면 이 사전 추출 [T, 512] NPY를 등록해 Champion Action
-    # Spotting을 실행할 수 있게 한다. 비워 두면 아무 동작도 하지 않는다.
-    PRELOADED_FEATURE_NPY_PATH: str = ""
     # 목업 데이터 사용은 반드시 .env에서 명시적으로 켠다.
     # 기본값을 False로 두어 실제 데이터 운영 경로가 기본 동작이 되도록 한다.
     USE_MOCK_DATA: bool = False
@@ -85,6 +81,10 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     ACTION_SPOTTING_AI_PROJECT_ROOT: str = ""
     ACTION_SPOTTING_PYTHON_EXECUTABLE: str = ""
+    # Optional local/dev bootstrap for a pre-extracted merged SoccerNet feature
+    # array [T, 512]. Empty keeps the normal feature-extraction path and makes
+    # ensure_preloaded_half_features() a no-op.
+    PRELOADED_FEATURE_NPY_PATH: str = ""
 
     # -------------------------------------------------------------------------
     # Qwen
@@ -135,6 +135,14 @@ class Settings(BaseSettings):
     TRACKING_PROCESS_TIMEOUT_SECONDS: int = Field(default=21600, ge=60)
     TRACKING_VERIFY_TIMEOUT_SECONDS: int = Field(default=300, ge=10)
     TRACKING_PREVIEW_ENABLED: bool = True
+    # Backend product integration. When enabled, the canonical E2E entrypoint
+    # tracks both directions from the user-confirmed anchor and merges the
+    # result back onto the whole Action Spotting scene timeline.
+    TRACKING_FULL_SCENE: bool = True
+    # The user-selected reference crops are trusted identity seeds. They are
+    # used by the product E2E wrapper for Sports-OSNet ranking while the frozen
+    # V1/V2 research sources remain byte-for-byte unchanged.
+    TRACKING_USE_SELECTED_REFERENCE_MEMORY: bool = True
 
     # -------------------------------------------------------------------------
     # Scene target selection / event ranking frozen AI runtime
@@ -363,12 +371,6 @@ class Settings(BaseSettings):
         if self.AGENT_DEV_MATCH_ID.strip():
             raise ValueError(
                 "운영 환경에서는 AGENT_DEV_MATCH_ID를 설정할 수 없습니다."
-            )
-
-        if self.PRELOADED_FEATURE_NPY_PATH.strip():
-            raise ValueError(
-                "운영 환경에서는 PRELOADED_FEATURE_NPY_PATH를 "
-                "설정할 수 없습니다."
             )
 
         insecure_secret_keys = {
