@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.scene_tracking_launch_manifest.v1",
+  "type": "object",
+  "required": [
+    "selection_id", "target_selection_revision", "selected_candidate_id",
+    "anchor_candidate_id", "anchor_shot_id", "anchor_frame_index",
+    "anchor_bbox_xyxy", "tracking_cache_key", "inputs", "runtime",
+    "pre_anchor_contract"
+  ],
+  "properties": {
+    "cross_shot_mode": {"const": "assisted"},
+    "identity_auto_confirmed": {"const": false},
+    "pre_anchor_contract": {
+      "type": "object",
+      "properties": {
+        "bbox_count": {"const": 0},
+        "absence_claimed": {"const": false}
+      }
+    }
+  }
+}

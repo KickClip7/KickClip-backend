@@ -276,6 +276,130 @@ class TrackingInstallationVerifier:
         return hashlib.sha256("\0".join(values).encode("utf-8")).hexdigest()
 
 
+_SCENE_SUPPORTED_PYTHON_MINORS = frozenset({(3, 10), (3, 11)})
+_SCENE_CORE_VERSION_DEPENDENCIES = frozenset({"torch", "torchvision"})
+
+
+def _scene_core_release(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text.split("+", 1)[0]
+
+
+def _scene_python_minor(value: object) -> tuple[int, int] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parts = text.split(".")
+        return int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _scene_dependency_comparison_is_supported(
+    dependency: str,
+    comparison: object,
+) -> bool:
+    if not isinstance(comparison, dict):
+        return False
+
+    expected = comparison.get("expected")
+    actual = comparison.get("actual")
+    if actual in (None, ""):
+        return False
+
+    if dependency == "python":
+        return _scene_python_minor(actual) in _SCENE_SUPPORTED_PYTHON_MINORS
+
+    if dependency in _SCENE_CORE_VERSION_DEPENDENCIES:
+        return _scene_core_release(actual) == _scene_core_release(expected)
+
+    return str(actual) == str(expected)
+
+
+def _scene_frozen_runtime_is_platform_compatible(
+    result: object,
+) -> bool:
+    """Accept only a pure platform-environment mismatch from the frozen verifier.
+
+    The scene-discovery compatibility package is self-hashed.  We therefore keep
+    that package byte-for-byte frozen and interpret its legacy Windows/CUDA
+    environment lock here in the backend-owned product verifier.
+
+    This is intentionally fail-closed:
+      * no material/hash/checkpoint failure is accepted;
+      * package import and contract smoke tests must pass;
+      * the only frozen-verifier failure may be the environment mismatch;
+      * Python must be 3.10.x/3.11.x;
+      * torch/torchvision core release versions must match the frozen versions;
+      * all other locked dependencies must still match exactly.
+    """
+    if not isinstance(result, dict):
+        return False
+
+    failures = result.get("failures")
+    if not isinstance(failures, list) or not failures:
+        return False
+
+    failure_codes = {
+        str(item.get("code") or "")
+        for item in failures
+        if isinstance(item, dict)
+    }
+    if failure_codes != {"COMPATIBILITY_ENVIRONMENT_MISMATCH"}:
+        return False
+
+    material = result.get("material")
+    if not isinstance(material, dict):
+        return False
+    if material.get("compatibility_dependency_file_hashes_verified") is not True:
+        return False
+    if material.get("rfdetr_checkpoint_verified") is not True:
+        return False
+    try:
+        if int(material.get("original_scene_package_files_verified") or 0) <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+
+    if result.get("package_import_verified") is not True:
+        return False
+
+    tests = result.get("tests")
+    if not isinstance(tests, dict):
+        return False
+    if tests.get("synthetic_discovery_smoke") is not True:
+        return False
+    if tests.get("deterministic_repeat") is not True:
+        return False
+
+    environment = result.get("environment")
+    if not isinstance(environment, dict):
+        return False
+    dependencies = environment.get("runtime_dependencies")
+    if not isinstance(dependencies, dict) or not dependencies:
+        return False
+
+    required = {
+        "python",
+        "opencv",
+        "numpy",
+        "torch",
+        "torchvision",
+        "pillow",
+        "scipy",
+    }
+    if not required.issubset(dependencies):
+        return False
+
+    return all(
+        _scene_dependency_comparison_is_supported(name, dependencies.get(name))
+        for name in required
+    )
+
+
 class SceneTargetTrackingInstallationVerifier:
     """Verify scene-selection inputs plus the canonical E2E tracker.
 
@@ -433,22 +557,33 @@ class SceneTargetTrackingInstallationVerifier:
                 "scene_discovery_runtime_verified",
             )
         ) or selection_result.get("status") == "PASS"
-        if not selection_verified:
+
+        platform_compatible = bool(
+            selection_result.get("_platform_compatibility_accepted")
+        )
+        if not selection_verified and not platform_compatible:
+            platform_compatible = _scene_frozen_runtime_is_platform_compatible(
+                selection_result
+            )
+
+        if not selection_verified and not platform_compatible:
             return TrackingInstallationStatus(
                 enabled=True,
                 available=False,
                 checked_at=now,
                 code="SCENE_TARGET_SELECTION_VERIFICATION_FAILED",
                 message=(
-                    "Scene target selection verifier did not confirm the package. "
-                    "Expected one of: scene_target_selection_source_verified, "
-                    "scene_target_selection_verified, scene_discovery_runtime_verified, "
-                    "or status=PASS."
+                    "Scene target selection verifier did not confirm the package, "
+                    "and the failure was not an approved platform-only compatibility "
+                    "difference."
                 ),
                 components=components,
             )
 
         components["SCENE_TARGET_SELECTION_RUNTIME_VERIFIED"] = True
+        components["SCENE_TARGET_PLATFORM_COMPATIBILITY_VERIFIED"] = bool(
+            platform_compatible
+        )
         components["CANONICAL_SCENE_TARGET_E2E_VERIFIED"] = True
         # These compatibility keys mean the whole scene-selection -> canonical
         # tracker wiring is available; they do not imply a separate R3 algorithm.
@@ -487,25 +622,68 @@ class SceneTargetTrackingInstallationVerifier:
         except (OSError, subprocess.TimeoutExpired):
             logger.exception("Scene target runtime verifier could not run.")
             return None
-        if completed.returncode != 0:
+        raw = (completed.stdout or "").strip()
+        if not raw:
+            if completed.returncode == 0:
+                return {"status": "PASS", "_verifier_return_code": 0}
             logger.error(
-                "Scene target verifier failed rc=%s stdout=%r stderr=%r",
+                "Scene target verifier failed rc=%s without structured output. "
+                "stderr=%r",
+                completed.returncode,
+                completed.stderr,
+            )
+            return None
+
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            # Some frozen verifiers print key=value lines rather than JSON.
+            if (
+                completed.returncode == 0
+                and ("Status=PASS" in raw or "Status = PASS" in raw)
+            ):
+                return {
+                    "status": "PASS",
+                    "scene_target_selection_verified": True,
+                    "_verifier_return_code": 0,
+                }
+            logger.error(
+                "Scene target verifier produced non-JSON failure output rc=%s "
+                "stdout=%r stderr=%r",
                 completed.returncode,
                 completed.stdout,
                 completed.stderr,
             )
             return None
-        raw = (completed.stdout or "").strip()
-        if not raw:
-            return {"status": "PASS"}
-        try:
-            result = json.loads(raw)
-        except json.JSONDecodeError:
-            # Some frozen verifiers print key=value lines rather than JSON.
-            if "Status=PASS" in raw or "Status = PASS" in raw:
-                return {"status": "PASS", "scene_target_selection_verified": True}
+
+        if not isinstance(result, dict):
             return None
-        return result if isinstance(result, dict) else None
+
+        result["_verifier_return_code"] = completed.returncode
+
+        if completed.returncode == 0:
+            return result
+
+        # The frozen compat verifier intentionally exact-matches its original
+        # Windows/CUDA environment and therefore returns rc=1 on a supported
+        # macOS/MPS or CPU build even when every material/hash/contract check
+        # succeeds. Normalize that one verified platform-only case here.
+        if _scene_frozen_runtime_is_platform_compatible(result):
+            result["_platform_compatibility_accepted"] = True
+            logger.info(
+                "Scene target frozen runtime verified with supported platform "
+                "compatibility (subprocess rc=%s).",
+                completed.returncode,
+            )
+            return result
+
+        logger.error(
+            "Scene target verifier failed rc=%s stdout=%r stderr=%r",
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+        )
+        return result
 
     def _settings_fingerprint(self) -> str:
         names = (

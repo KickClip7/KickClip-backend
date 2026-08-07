@@ -67,7 +67,7 @@ OBSERVATIONS_ARTIFACT_TYPE = "SCENE_RFDETR_OBSERVATIONS"
 #   -> explicit user selection
 #   -> canonical target-centric E2E tracking.
 FAST_CANDIDATE_DETECTION_POLICY_VERSION = (
-    "ACTION_SPOTTING_SHOT_LOCAL_TRIPLET_RFDETR_V5_WIDE_OBSERVATION"
+    "ACTION_SPOTTING_SHOT_LOCAL_TRIPLET_RFDETR_V6_ROLE_CONSISTENCY"
 )
 FAST_CANDIDATE_FRAMES_PER_SHOT = 3
 FAST_CANDIDATE_PRE_SHOTS_BY_LABEL: dict[str, int] = {
@@ -93,6 +93,16 @@ FAST_CANDIDATE_POST_SHOTS_BY_LABEL: dict[str, int] = {
 }
 FAST_CANDIDATE_DEFAULT_PRE_SHOTS = 2
 FAST_CANDIDATE_DEFAULT_POST_SHOTS = 3
+
+# Thin temporal role-consistency pre-filter. RF-DETR class evidence is kept for
+# all observation roles, but a selectable player/goalkeeper detection must be
+# supported by a spatially consistent player-like observation on at least one
+# adjacent sampled frame. This removes many one-frame player<->staff/referee
+# class flips without changing the frozen detector thresholds.
+ROLE_CONSISTENCY_POLICY_VERSION = "TEMPORAL_PERSON_ROLE_SUPPORT_V1"
+ROLE_CONSISTENCY_MIN_PLAYER_SUPPORT = 2
+ROLE_CONSISTENCY_MATCH_MIN_IOU = 0.05
+ROLE_CONSISTENCY_MATCH_MAX_CENTER_DISTANCE = 0.80
 
 
 def _event_near_shot_counts(event: TimelineEvent) -> tuple[int, int]:
@@ -499,6 +509,179 @@ def _select_candidate_detections_for_frame(
     return candidates, observation_rows
 
 
+def _row_bbox(row: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        float(row["x1"]),
+        float(row["y1"]),
+        float(row["x2"]),
+        float(row["y2"]),
+    )
+
+
+def _bbox_iou_rows(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    ix1 = max(left[0], right[0])
+    iy1 = max(left[1], right[1])
+    ix2 = min(left[2], right[2])
+    iy2 = min(left[3], right[3])
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    intersection = iw * ih
+    if intersection <= 0:
+        return 0.0
+    left_area = max(1e-6, (left[2] - left[0]) * (left[3] - left[1]))
+    right_area = max(1e-6, (right[2] - right[0]) * (right[3] - right[1]))
+    return intersection / max(1e-6, left_area + right_area - intersection)
+
+
+def _normalized_center_distance_rows(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> float:
+    lcx = (left[0] + left[2]) * 0.5
+    lcy = (left[1] + left[3]) * 0.5
+    rcx = (right[0] + right[2]) * 0.5
+    rcy = (right[1] + right[3]) * 0.5
+    scale = max(
+        1.0,
+        math.hypot(left[2] - left[0], left[3] - left[1]),
+    )
+    return math.hypot(lcx - rcx, lcy - rcy) / scale
+
+
+def _shot_range_for_frame(
+    shots: list[dict[str, Any]],
+    frame_index: int,
+) -> tuple[int, int] | None:
+    for shot in shots:
+        start = int(shot["start_frame"])
+        end = int(shot.get("end_frame_inclusive", shot.get("end_frame", start)))
+        if start <= frame_index <= end:
+            return start, end
+    return None
+
+
+def _apply_temporal_role_consistency_prefilter(
+    candidate_rows: list[dict[str, Any]],
+    observation_rows: list[dict[str, Any]],
+    *,
+    shots: list[dict[str, Any]],
+    play_conf_threshold: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Reject one-frame player labels contradicted by adjacent role evidence.
+
+    This is deliberately a thin pre-filter. It never changes RF-DETR scores or
+    classes. It only checks the already-sampled contiguous triplet and requires
+    a selectable player/goalkeeper row to have at least one adjacent spatial
+    match that is also classified as player/goalkeeper. Referee/staff evidence
+    is retained in observations.csv and can veto a class-flipping candidate.
+    """
+
+    if not candidate_rows:
+        return [], {
+            "policy_version": ROLE_CONSISTENCY_POLICY_VERSION,
+            "input_candidate_rows": 0,
+            "kept_candidate_rows": 0,
+            "rejected_candidate_rows": 0,
+        }
+
+    observations_by_frame: dict[int, list[dict[str, Any]]] = {}
+    for row in observation_rows:
+        class_id = int(row.get("class_id", -1))
+        if class_id not in {0, 1, 2, 3}:
+            continue
+        confidence = float(row.get("confidence") or 0.0)
+        if class_id in {0, 1}:
+            if confidence < play_conf_threshold:
+                continue
+        elif not bool(row.get("observation_eligible")):
+            continue
+        observations_by_frame.setdefault(int(row["frame_index"]), []).append(row)
+
+    kept: list[dict[str, Any]] = []
+    rejected_by_reason: dict[str, int] = {}
+    for row in candidate_rows:
+        frame_index = int(row["frame_index"])
+        shot_range = _shot_range_for_frame(shots, frame_index)
+        if shot_range is None:
+            # Fail open on malformed auxiliary shot metadata; the downstream
+            # immutable scene-selection contract will still validate the row.
+            kept.append(row)
+            continue
+        shot_start, shot_end = shot_range
+        candidate_box = _row_bbox(row)
+        player_support = 1  # the candidate row itself is class 0/1
+        nonplayer_support = 0
+        adjacent_evidence = 0
+
+        for neighbor_frame in (frame_index - 1, frame_index + 1):
+            if neighbor_frame < shot_start or neighbor_frame > shot_end:
+                continue
+            best: tuple[float, float, dict[str, Any]] | None = None
+            for observation in observations_by_frame.get(neighbor_frame, []):
+                other_box = _row_bbox(observation)
+                iou = _bbox_iou_rows(candidate_box, other_box)
+                distance = _normalized_center_distance_rows(candidate_box, other_box)
+                if (
+                    iou < ROLE_CONSISTENCY_MATCH_MIN_IOU
+                    and distance > ROLE_CONSISTENCY_MATCH_MAX_CENTER_DISTANCE
+                ):
+                    continue
+                score = (iou, -distance)
+                if best is None or score > (best[0], best[1]):
+                    best = (iou, -distance, observation)
+            if best is None:
+                continue
+            adjacent_evidence += 1
+            matched_class = int(best[2].get("class_id", -1))
+            if matched_class in {0, 1}:
+                player_support += 1
+            elif matched_class in {2, 3}:
+                nonplayer_support += 1
+
+        # A one-frame shot cannot provide temporal evidence; do not invent a
+        # negative decision in that rare case.
+        if shot_end <= shot_start or adjacent_evidence == 0:
+            kept.append(row)
+            continue
+
+        if (
+            player_support >= ROLE_CONSISTENCY_MIN_PLAYER_SUPPORT
+            and player_support > nonplayer_support
+        ):
+            kept.append(row)
+            continue
+
+        reason = (
+            "NON_PLAYER_ROLE_DOMINANT"
+            if nonplayer_support >= player_support
+            else "INSUFFICIENT_PLAYER_ROLE_SUPPORT"
+        )
+        rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + 1
+
+    # The pre-filter is safety-oriented but must not erase the entire initial
+    # candidate pool because of sparse auxiliary observations. If every row was
+    # rejected, fall back to the original player/goalkeeper-only rows and record
+    # that the role gate was inconclusive.
+    fallback_used = bool(candidate_rows and not kept)
+    if fallback_used:
+        kept = list(candidate_rows)
+
+    return kept, {
+        "policy_version": ROLE_CONSISTENCY_POLICY_VERSION,
+        "input_candidate_rows": len(candidate_rows),
+        "kept_candidate_rows": len(kept),
+        "rejected_candidate_rows": (0 if fallback_used else len(candidate_rows) - len(kept)),
+        "rejected_by_reason": dict(sorted(rejected_by_reason.items())),
+        "fallback_used": fallback_used,
+        "minimum_player_support": ROLE_CONSISTENCY_MIN_PLAYER_SUPPORT,
+        "match_min_iou": ROLE_CONSISTENCY_MATCH_MIN_IOU,
+        "match_max_center_distance": ROLE_CONSISTENCY_MATCH_MAX_CENTER_DISTANCE,
+    }
+
+
 class ShotBoundaryWorkflowError(RuntimeError):
     def __init__(
         self,
@@ -858,6 +1041,8 @@ class ShotBoundaryReviewService:
             ),
             "tracking_tracker": str(self.settings.TRACKING_TRACKER),
             "tracking_tracker_applied_to_initial_candidate_discovery": False,
+            "role_consistency_policy": ROLE_CONSISTENCY_POLICY_VERSION,
+            "role_consistency_min_player_support": ROLE_CONSISTENCY_MIN_PLAYER_SUPPORT,
             "bbox_bounds_policy": "inclusive_width_minus_1_height_minus_1_v1",
         }
 
@@ -2744,6 +2929,13 @@ class ShotBoundaryReviewService:
         finally:
             capture.release()
 
+        candidate_rows, role_consistency = _apply_temporal_role_consistency_prefilter(
+            candidate_rows,
+            observation_rows,
+            shots=candidate_shots,
+            play_conf_threshold=play_conf_threshold,
+        )
+
         output = root / "detections.csv"
         observations_output = root / "observations.csv"
         candidate_fields = [
@@ -2817,6 +3009,7 @@ class ShotBoundaryReviewService:
                 "excluded_role_counts": dict(
                     sorted(excluded_role_counts.items())
                 ),
+                "role_consistency": role_consistency,
                 "candidate_detection_policy": detector_policy,
                 "sampling": sampling_contract,
                 "runtime": portable_runtime,
@@ -2856,6 +3049,7 @@ class ShotBoundaryReviewService:
                 "excluded_role_counts": dict(
                     sorted(excluded_role_counts.items())
                 ),
+                "role_consistency": role_consistency,
                 "observations_artifact_id": observation_artifact.artifact_id,
                 "observations_sha256": observations_digest,
                 "candidate_detection_policy": detector_policy,

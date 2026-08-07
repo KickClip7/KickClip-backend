@@ -1,0 +1,70 @@
+{
+  "schema_version": "kickclip.phase1_frozen_policy.v1",
+  "bundle_version": "1.0.0",
+  "frozen_at": "2026-07-25",
+  "scope": "camera-cut-free 10-30 second football video; one user-selected target",
+  "primary_objective": "minimize silent wrong-player switches",
+  "phase1_states": [
+    "INITIALIZING",
+    "ACTIVE",
+    "OCCLUDED",
+    "LOST",
+    "SEARCHING",
+    "AMBIGUOUS",
+    "REACQUIRED",
+    "ABSENT",
+    "USER_CONFIRMED",
+    "TERMINATED"
+  ],
+  "frozen_scripts": {
+    "stage0": ["stage0_audit_inputs.py"],
+    "stage1": ["stage1_generate_rfdetr_detections.py", "stage1_generate_rfdetr_detections_compact.py"],
+    "stage2": ["stage2_run_conservative_target_association.py"],
+    "stage2b": ["stage2b_run_same_shot_reentry_reacquisition.py"],
+    "stage2c": ["stage2c_finalize_target_timeline_and_render.py"],
+    "stage2d": ["stage2d_run_iterative_multi_reentry.py"],
+    "stage2d1": ["stage2d1_run_temporal_episode_multi_reentry.py"],
+    "stage2d2": ["stage2d2_run_confirmed_track_hysteresis.py"]
+  },
+  "expected_rfdetr_checkpoint": {
+    "path": "weights/rfdetr/checkpoint_best_regular.pth",
+    "sha256": "5d1d05cf78b6a777430430955d0e745ce5c61913c659b2e96ae5deddbd1a3a94"
+  },
+  "known_sports_osnet_checkpoint_sha256": "8d5b2fd8763db34c2aad69810466adf413f0426d9f8119d322227e0e639c5fbd",
+  "stage2d1_temporal_policy": {
+    "temporal_start_gap_frames": 12,
+    "temporal_confirmation_gap_frames": 12,
+    "minimum_absence_frames": 12,
+    "threshold_relaxation": false,
+    "automatic_memory_update": false
+  },
+  "stage2d2_hysteresis_policy": {
+    "geometry_iou_min": 0.12,
+    "geometry_center_distance_max": 0.9,
+    "soft_target_similarity_min": 0.66,
+    "soft_target_max_similarity_min": 0.7,
+    "soft_negative_margin_min": 0.0,
+    "strong_target_similarity_max": 0.64,
+    "strong_target_max_similarity_max": 0.67,
+    "strong_negative_margin_max": -0.1,
+    "strong_geometry_required_frames": 4,
+    "extreme_target_similarity_max": 0.58,
+    "extreme_negative_margin_max": -0.16,
+    "extreme_required_frames": 6,
+    "max_missing_detection_gap": 3,
+    "threshold_search": false,
+    "automatic_memory_update": false
+  },
+  "forbidden_during_frozen_evaluation": [
+    "threshold changes after viewing a result",
+    "manual same-player links as inference input",
+    "forced low-confidence candidate selection",
+    "Global ID or V7 product logic",
+    "camera-cut coordinate continuation"
+  ],
+  "mandatory_visual_review": [
+    "Stage 2-B newly selected re-entry",
+    "Stage 2-D or Stage 2-D1 newly selected re-entry",
+    "Stage 2-D2 hysteresis preview before final acceptance"
+  ]
+}

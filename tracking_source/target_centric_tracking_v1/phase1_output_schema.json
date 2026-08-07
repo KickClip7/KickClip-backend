@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.phase1_final_target_timeline.v1",
+  "title": "KickClip Phase 1 Final Target Timeline",
+  "type": "object",
+  "required": ["schema_version", "target_id", "video", "frames", "provenance"],
+  "properties": {
+    "schema_version": {"const": "kickclip.phase1_final_target_timeline.v1"},
+    "target_id": {"type": "string", "minLength": 1},
+    "test_name": {"type": "string", "minLength": 1},
+    "video": {
+      "type": "object",
+      "required": ["path", "width", "height", "fps", "frame_count"],
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": ["string", "null"]},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "fps": {"type": "number", "exclusiveMinimum": 0},
+        "frame_count": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": true
+    },
+    "frames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["frame_index", "state", "bbox_xyxy", "tracking_confidence", "identity_confidence"],
+        "properties": {
+          "frame_index": {"type": "integer", "minimum": 0},
+          "state": {
+            "enum": ["INITIALIZING", "ACTIVE", "ACTIVE_LOW_CONFIDENCE", "OCCLUDED", "LOST", "SEARCHING", "AMBIGUOUS", "REACQUIRED", "ABSENT", "USER_CONFIRMED", "TERMINATED"]
+          },
+          "bbox_xyxy": {
+            "oneOf": [
+              {"type": "null"},
+              {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number"}}
+            ]
+          },
+          "tracking_confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "identity_confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        },
+        "additionalProperties": true
+      }
+    },
+    "episodes": {"type": "array"},
+    "provenance": {"type": "object"}
+  },
+  "additionalProperties": true
+}

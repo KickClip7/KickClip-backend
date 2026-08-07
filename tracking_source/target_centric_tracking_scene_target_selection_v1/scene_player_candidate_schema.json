@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.scene_player_candidate.v1",
+  "type": "object",
+  "required": [
+    "candidate_id", "scene_id", "shot_id", "shot_index",
+    "local_tracklet_id", "first_frame", "last_frame", "observation_count",
+    "representative_observation", "tracking_initialization_observation",
+    "quality", "artifacts", "provenance"
+  ],
+  "properties": {
+    "candidate_id": {"type": "string", "pattern": "^scene_candidate_"},
+    "scene_id": {"type": "string"},
+    "shot_id": {"type": "string"},
+    "shot_index": {"type": "integer", "minimum": 0},
+    "local_tracklet_id": {"type": "string"},
+    "first_frame": {"type": "integer", "minimum": 0},
+    "last_frame": {"type": "integer", "minimum": 0},
+    "observation_count": {"type": "integer", "minimum": 1},
+    "representative_observation": {
+      "type": "object",
+      "required": ["frame_index", "time_sec", "bbox_xyxy", "detector_confidence", "thumbnail_artifact"]
+    },
+    "tracking_initialization_observation": {
+      "type": "object",
+      "required": ["frame_index", "time_sec", "bbox_xyxy", "validation_state"],
+      "properties": {
+        "validation_state": {"enum": ["VALID", "INVALID"]}
+      }
+    },
+    "quality": {"type": "object"},
+    "artifacts": {"type": "object"},
+    "provenance": {"type": "object"}
+  }
+}

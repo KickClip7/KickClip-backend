@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.target_centric_e2e.v1",
+  "title": "KickClip Target-Centric E2E Timeline",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "pipeline_version",
+    "test_name",
+    "target_id",
+    "status",
+    "video",
+    "shots",
+    "frames",
+    "ambiguities",
+    "confirmations",
+    "provenance"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "kickclip.target_centric_e2e.v1"
+    },
+    "pipeline_version": {
+      "type": "string"
+    },
+    "test_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string"
+    },
+    "video": {
+      "type": "object",
+      "required": [
+        "path",
+        "width",
+        "height",
+        "fps",
+        "frame_count"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fps": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "frame_count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "shots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "shot_index",
+          "shot_id",
+          "start_frame",
+          "end_frame_inclusive",
+          "frame_count",
+          "status"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "frames": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "frame_index",
+          "time_seconds",
+          "shot_id",
+          "state",
+          "bbox_xyxy",
+          "tracking_confidence",
+          "identity_confidence",
+          "identity_source",
+          "review_required"
+        ],
+        "properties": {
+          "frame_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "time_seconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "shot_id": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "INITIALIZING",
+              "ACTIVE",
+              "ACTIVE_LOW_CONFIDENCE",
+              "OCCLUDED",
+              "LOST",
+              "SEARCHING",
+              "AMBIGUOUS",
+              "REACQUIRED",
+              "ABSENT",
+              "USER_CONFIRMED",
+              "TERMINATED"
+            ]
+          },
+          "bbox_xyxy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": {
+                  "type": "number"
+                }
+              }
+            ]
+          },
+          "tracking_confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "identity_confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "identity_source": {
+            "type": "string"
+          },
+          "review_required": {
+            "type": "boolean"
+          },
+          "ambiguity_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "local_frame_index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "time_ms": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "ambiguities": {
+      "type": "array"
+    },
+    "confirmations": {
+      "type": "array"
+    },
+    "provenance": {
+      "type": "object"
+    },
+    "tracked_range": {
+      "type": "object",
+      "required": [
+        "source_start_frame",
+        "source_end_frame_inclusive",
+        "tracking_direction"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

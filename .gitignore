@@ -272,7 +272,12 @@ Desktop.ini
 /tests/test_scene_target_selection_backend.py
 /tests/test_scene_target_reviewability_backend.py
 .pytest_tmp/
-tracking_source/
+
+# The cleaned tracking runtime is source-controlled. Its own .gitignore keeps
+# generated outputs and the separately distributed RF-DETR checkpoint local.
+!tracking_source/
+!tracking_source/**
+
 storage/tracking_runtime/
 .runtime/
 

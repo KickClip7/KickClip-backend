@@ -1,0 +1,33 @@
+{
+  "schema_version": "kickclip.scene_target_selection_dependency_lock.v1",
+  "validated_environment": {
+    "python": "3.11.9",
+    "opencv-python": "4.13.0",
+    "numpy": "2.4.4",
+    "torch": "2.12.1",
+    "torchvision": "0.27.1",
+    "Pillow": "11.3.0",
+    "scipy": "1.17.1",
+    "pytest": "9.1.1"
+  },
+  "external_binaries": {
+    "ffmpeg": "required for R3 anchor subclip"
+  },
+  "device_contract": {
+    "selection_ranker_order": ["cuda", "mps", "cpu"],
+    "frozen_r2_v1_mps_fallback": "cpu"
+  },
+  "sports_osnet_load_contract": {
+    "feature_backbone_strict_load": "PASS",
+    "missing_non_classifier_tensors": 0,
+    "classifier_tensors_excluded": 2,
+    "weights_only": true,
+    "unsafe_pickle_load": false,
+    "embedding_dimension": 512
+  },
+  "frozen_dependencies": {
+    "production_r2_manifest_sha256": "751338f51c4f7c08bb24576e5afea7d82b9cbbdefbb651ff1a3c1d5c45ffcc86",
+    "rfdetr_checkpoint_sha256": "5d1d05cf78b6a777430430955d0e745ce5c61913c659b2e96ae5deddbd1a3a94",
+    "sports_osnet_checkpoint_sha256": "8d5b2fd8763db34c2aad69810466adf413f0426d9f8119d322227e0e639c5fbd"
+  }
+}

@@ -82,8 +82,12 @@ class TrackingTimelineService:
         self._validate(payload)
 
         frames = payload["frames"]
-        requested_start = 0 if start_frame is None else start_frame
-        requested_end = end_frame
+        tracked_start, tracked_end = _tracked_frame_range(
+            payload,
+            frame_count=_video_frame_count(payload),
+        )
+        requested_start = tracked_start if start_frame is None else start_frame
+        requested_end = tracked_end if end_frame is None else end_frame
         filtered = [
             copy.deepcopy(frame)
             for frame in frames
@@ -101,6 +105,8 @@ class TrackingTimelineService:
             "start_frame": requested_start,
             "end_frame": requested_end,
             "returned_frame_count": len(filtered),
+            "tracked_start_frame": tracked_start,
+            "tracked_end_frame": tracked_end,
         }
         return public_payload
 
@@ -362,7 +368,12 @@ class TrackingTimelineService:
             "reviewed_shot_count": len(reviewed_shots),
             "runtime_shot_translation_count": runtime_translation_count,
             "corrected_frame_shot_id_count": corrected_frame_shot_id_count,
-            "full_frame_coverage": True,
+            "reviewed_shot_metadata_full_source_coverage": True,
+            "timeline_frame_coverage": (
+                "TRACKED_RANGE_ONLY"
+                if isinstance(normalized.get("tracked_range"), Mapping)
+                else "FULL_VIDEO"
+            ),
             "metadata_only": True,
             "tracking_state_modified": False,
             "bbox_modified": False,
@@ -395,11 +406,20 @@ class TrackingTimelineService:
                     f"Target timeline video.{key} is invalid."
                 ) from exc
         frame_count = _video_frame_count(payload)
+        tracked_start, tracked_end = _tracked_frame_range(
+            payload,
+            frame_count=frame_count,
+        )
 
         shots = payload.get("shots")
         if not isinstance(shots, list):
             raise TrackingContractError("Target timeline shots must be an array.")
-        canonical_shots = _validate_public_shots(shots, frame_count=frame_count)
+        canonical_shots = _validate_public_shots_for_tracked_range(
+            shots,
+            frame_count=frame_count,
+            tracked_start=tracked_start,
+            tracked_end=tracked_end,
+        )
 
         if not isinstance(payload.get("ambiguities"), list) or not isinstance(
             payload.get("confirmations"),
@@ -416,9 +436,10 @@ class TrackingTimelineService:
         frames = payload.get("frames")
         if not isinstance(frames, list):
             raise TrackingContractError("Target timeline frames must be an array.")
-        if len(frames) != frame_count:
+        expected_frame_count = tracked_end - tracked_start + 1
+        if len(frames) != expected_frame_count:
             raise TrackingContractError(
-                "Target timeline frame count does not match video.frame_count."
+                "Target timeline frame count does not match tracked_range."
             )
 
         seen_frames: set[int] = set()
@@ -441,7 +462,8 @@ class TrackingTimelineService:
                     "Target timeline frame index/time is invalid."
                 ) from exc
             if (
-                frame_index < 0
+                frame_index < tracked_start
+                or frame_index > tracked_end
                 or frame_index >= frame_count
                 or time_seconds < 0
                 or frame_index in seen_frames
@@ -501,10 +523,54 @@ class TrackingTimelineService:
                     "Uncertain target frame contains a forbidden bbox."
                 )
 
-        if seen_frames != set(range(frame_count)):
+        if seen_frames != set(range(tracked_start, tracked_end + 1)):
             raise TrackingContractError(
-                "Target timeline frame indices are not complete and contiguous."
+                "Target timeline frame indices are not complete and contiguous "
+                "within tracked_range."
             )
+
+
+def _tracked_frame_range(
+    payload: Mapping[str, Any],
+    *,
+    frame_count: int,
+) -> tuple[int, int]:
+    tracked = payload.get("tracked_range")
+    if isinstance(tracked, Mapping):
+        raw_start = tracked.get("source_start_frame")
+        raw_end = tracked.get("source_end_frame_inclusive")
+        if raw_start is not None or raw_end is not None:
+            try:
+                start = int(raw_start)
+                end = int(raw_end)
+            except (TypeError, ValueError) as exc:
+                raise TrackingContractError(
+                    "Target timeline tracked_range is invalid."
+                ) from exc
+            if start < 0 or end < start or end >= frame_count:
+                raise TrackingContractError(
+                    "Target timeline tracked_range is outside video bounds."
+                )
+            return start, end
+
+    frames = payload.get("frames")
+    if isinstance(frames, list) and frames:
+        try:
+            indices = [int(row["frame_index"]) for row in frames if isinstance(row, Mapping)]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TrackingContractError(
+                "Target timeline frame index is invalid."
+            ) from exc
+        if indices:
+            start = min(indices)
+            end = max(indices)
+            if start < 0 or end >= frame_count:
+                raise TrackingContractError(
+                    "Target timeline frames are outside video bounds."
+                )
+            return start, end
+
+    return 0, frame_count - 1
 
 
 def _video_frame_count(payload: Mapping[str, Any]) -> int:
@@ -586,6 +652,80 @@ def _canonical_reviewed_shots(
     for index, row in enumerate(normalized):
         row["shot_index"] = index
     return _validate_public_shots(normalized, frame_count=frame_count)
+
+
+def _validate_public_shots_for_tracked_range(
+    shots: list[Any],
+    *,
+    frame_count: int,
+    tracked_start: int,
+    tracked_end: int,
+) -> list[dict[str, Any]]:
+    """Validate shot metadata for either full-video or anchor-forward timelines.
+
+    Canonical scene-target tracking may start from a user-confirmed source frame.
+    In that case target_timeline.json intentionally contains only the forward
+    tracked range; pre-anchor frames are not fabricated as ABSENT/SEARCHING.
+    Reviewed shot metadata may still cover the full source video.
+    """
+
+    if not shots:
+        raise TrackingContractError("Target timeline reviewed shots are empty.")
+
+    # Preserve the strict historical full-video contract when it applies.
+    try:
+        return _validate_public_shots(shots, frame_count=frame_count)
+    except TrackingContractError:
+        pass
+
+    normalized: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    previous_end: int | None = None
+    for index, raw in enumerate(shots):
+        if not isinstance(raw, Mapping):
+            raise TrackingContractError("Target timeline shot is invalid.")
+        shot_id = str(raw.get("shot_id") or "").strip()
+        try:
+            start = int(raw.get("start_frame", -1))
+            end = int(raw.get("end_frame_inclusive", raw.get("end_frame", -1)))
+        except (TypeError, ValueError) as exc:
+            raise TrackingContractError(
+                "Target timeline shot frame range is invalid."
+            ) from exc
+        if (
+            not shot_id
+            or shot_id in seen_ids
+            or start < 0
+            or end < start
+            or end >= frame_count
+            or (previous_end is not None and start != previous_end + 1)
+        ):
+            raise TrackingContractError(
+                "Target timeline shots do not form one unique contiguous coverage."
+            )
+        row = copy.deepcopy(dict(raw))
+        row.update(
+            {
+                "shot_index": index,
+                "shot_id": shot_id,
+                "start_frame": start,
+                "end_frame_inclusive": end,
+                "frame_count": end - start + 1,
+                "cut_in_frame": None if start == 0 else start,
+                "cut_out_frame": None if end == frame_count - 1 else end + 1,
+            }
+        )
+        normalized.append(row)
+        seen_ids.add(shot_id)
+        previous_end = end
+
+    coverage_start = int(normalized[0]["start_frame"])
+    coverage_end = int(normalized[-1]["end_frame_inclusive"])
+    if coverage_start > tracked_start or coverage_end < tracked_end:
+        raise TrackingContractError(
+            "Target timeline shots do not cover tracked_range."
+        )
+    return normalized
 
 
 def _validate_public_shots(

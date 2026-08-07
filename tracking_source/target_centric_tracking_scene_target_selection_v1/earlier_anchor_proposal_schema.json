@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.earlier_anchor_proposals.v1",
+  "type": "object",
+  "required": ["selection_id", "selected_candidate_id", "state", "proposals", "automatic_confirmation_allowed"],
+  "properties": {
+    "state": {"enum": ["WAITING_EARLIER_ANCHOR_CONFIRMATION", "NO_SAFE_EARLIER_CANDIDATE"]},
+    "automatic_confirmation_allowed": {"const": false},
+    "proposals": {"type": "array"}
+  }
+}

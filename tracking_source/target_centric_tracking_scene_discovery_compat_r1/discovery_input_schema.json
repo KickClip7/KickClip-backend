@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.scene_discovery_compat_r1.input.schema.json",
+  "title": "Scene Discovery Compatibility R1 Input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "project_root",
+    "scene_id",
+    "discovery_id",
+    "video",
+    "detections_csv",
+    "shot_boundaries",
+    "output_root"
+  ],
+  "properties": {
+    "project_root": {"type": "string", "minLength": 1},
+    "scene_id": {"type": "string", "minLength": 1},
+    "discovery_id": {"type": "string", "minLength": 1},
+    "video": {"type": "string", "minLength": 1},
+    "detections_csv": {"type": "string", "minLength": 1},
+    "shot_boundaries": {"type": "string", "minLength": 1},
+    "output_root": {"type": "string", "minLength": 1}
+  }
+}
+
