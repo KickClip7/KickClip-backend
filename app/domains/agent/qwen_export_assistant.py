@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -12,7 +14,10 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.ai.runtime.gpu_coordinator import claim_gpu_slot
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 from app.domains.agent.schema import (
     ExportAssistantRecommendation,
     ExportMetadataRecommendResponse,
@@ -149,6 +154,7 @@ class QwenExportAssistant:
                 frames.append(SampledFrame(index, edited_sec, source_sec, frame_path))
         if not frames:
             raise RuntimeError("영상에서 Qwen 분석용 프레임을 추출하지 못했습니다. FFmpeg와 원본 영상을 확인해주세요.")
+        logger.info("Qwen export frames extracted: %d/%d", len(frames), len(points))
         return frames
 
     @staticmethod
@@ -192,7 +198,11 @@ class QwenExportAssistant:
         language: str,
         targets: set[str],
     ) -> dict[str, Any]:
-        model, processor, device = _load_qwen_runtime(self.settings.QWEN_MODEL_ID)
+        model, processor, device = _load_qwen_runtime(
+            self.settings.QWEN_MODEL_ID,
+            self.settings.QWEN_MIN_PIXELS,
+            self.settings.QWEN_MAX_PIXELS,
+        )
         target_names = {
             "title": "제목",
             "hashtags": "해시태그",
@@ -231,10 +241,66 @@ class QwenExportAssistant:
         inputs = processor(
             text=[text], images=image_inputs, videos=video_inputs, padding=True, return_tensors="pt"
         ).to(device)
-        generated = model.generate(**inputs, max_new_tokens=self.settings.QWEN_MAX_NEW_TOKENS)
+
+        # 요청된 항목만큼만 생성한다. 썸네일 하나 고르는 데 384토큰을 다 쓰면
+        # 로컬 MPS에서는 그 시간만큼 사용자가 기다린다.
+        token_budget = 48
+        if "title" in targets:
+            token_budget += 72
+        if "hashtags" in targets:
+            token_budget += 112
+        if "thumbnail" in targets:
+            token_budget += 96
+        max_new_tokens = min(self.settings.QWEN_MAX_NEW_TOKENS, token_budget)
+
+        from transformers import MaxTimeCriteria, StoppingCriteriaList
+
+        started = time.monotonic()
+        # Action Spotting·RF-DETR·트래킹과 같은 GPU 슬롯을 공유해 동시 실행으로 인한
+        # 메모리 폭주(스왑)를 막는다. MaxTimeCriteria는 생성이 제한 시간을 넘기면 끊는다.
+        with claim_gpu_slot():
+            generated = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                stopping_criteria=StoppingCriteriaList(
+                    [MaxTimeCriteria(self.settings.QWEN_GENERATE_TIMEOUT_SECONDS)]
+                ),
+            )
+        elapsed = time.monotonic() - started
+        logger.info(
+            "Qwen export generation finished: frames=%d, max_new_tokens=%d, elapsed=%.1fs",
+            len(frames), max_new_tokens, elapsed,
+        )
+        if elapsed >= self.settings.QWEN_GENERATE_TIMEOUT_SECONDS:
+            logger.warning(
+                "Qwen generation hit the %.0fs time limit — output may be truncated. "
+                "메모리 부족(스왑)일 가능성이 높으니 다른 앱을 종료하거나 QWEN_EXPORT_SAMPLE_FRAMES를 줄여보세요.",
+                self.settings.QWEN_GENERATE_TIMEOUT_SECONDS,
+            )
         trimmed = [out[len(source):] for source, out in zip(inputs.input_ids, generated)]
         output = processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        return self._parse_json(output)
+        self._release_accelerator_cache(device)
+        try:
+            return self._parse_json(output)
+        except RuntimeError as exc:
+            if elapsed >= self.settings.QWEN_GENERATE_TIMEOUT_SECONDS:
+                raise RuntimeError(
+                    "Qwen 분석이 제한 시간을 초과해 중단됐습니다. 메모리가 부족한 상태일 수 있어요. "
+                    "다른 앱을 종료한 뒤 다시 시도하거나 .env의 QWEN_EXPORT_SAMPLE_FRAMES 값을 줄여주세요."
+                ) from exc
+            raise
+
+    @staticmethod
+    def _release_accelerator_cache(device: str) -> None:
+        """생성이 끝난 뒤 MPS 활성값 캐시를 반환해 다른 AI 작업의 메모리 압박을 줄인다."""
+        if device != "mps":
+            return
+        try:
+            import torch
+
+            torch.mps.empty_cache()
+        except Exception:  # pragma: no cover - 캐시 반환 실패는 치명적이지 않다
+            logger.debug("torch.mps.empty_cache() failed", exc_info=True)
 
     def _source_video(self, match_id: str) -> tuple[Path, float]:
         assets = self.media_assets.list_by_match(match_id)
@@ -307,18 +373,26 @@ class QwenExportAssistant:
 
 
 @lru_cache(maxsize=1)
-def _load_qwen_runtime(model_id: str):
+def _load_qwen_runtime(model_id: str, min_pixels: int, max_pixels: int):
     import torch
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
+    started = time.monotonic()
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     processor = AutoProcessor.from_pretrained(
         model_id,
-        min_pixels=128 * 28 * 28,
-        max_pixels=512 * 28 * 28,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
     )
+    # MPS에서는 fp16이 안정적이고 빠르다("auto"→bf16은 MPS에서 느린 경로를 탈 수 있음).
+    # CPU 폴백은 fp16 연산이 느리거나 미지원이므로 fp32를 쓴다.
+    dtype = torch.float16 if device == "mps" else torch.float32
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        model_id, torch_dtype="auto", low_cpu_mem_usage=True
+        model_id, dtype=dtype, low_cpu_mem_usage=True
     ).to(device)
     model.eval()
+    logger.info(
+        "Qwen runtime loaded: model=%s, device=%s, dtype=%s, elapsed=%.1fs",
+        model_id, device, dtype, time.monotonic() - started,
+    )
     return model, processor, device

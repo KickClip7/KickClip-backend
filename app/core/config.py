@@ -90,8 +90,14 @@ class Settings(BaseSettings):
     # Qwen
     # -------------------------------------------------------------------------
     QWEN_MODEL_ID: str = "Qwen/Qwen2.5-VL-3B-Instruct"
-    QWEN_EXPORT_SAMPLE_FRAMES: int = Field(default=12, ge=1)
+    # 16GB 메모리 장비에서 스왑 없이 돌 수 있는 수준으로 기본값을 잡는다.
+    # 프레임 수·이미지 해상도가 비전 토큰 수(=prefill 시간·메모리)를 결정한다.
+    QWEN_EXPORT_SAMPLE_FRAMES: int = Field(default=6, ge=1)
     QWEN_MAX_NEW_TOKENS: int = Field(default=384, ge=1)
+    QWEN_MIN_PIXELS: int = Field(default=128 * 28 * 28, ge=28 * 28)
+    QWEN_MAX_PIXELS: int = Field(default=256 * 28 * 28, ge=28 * 28)
+    # 생성 단계가 이 시간을 넘기면 중단하고 지금까지의 출력으로 응답한다(무한 대기 방지).
+    QWEN_GENERATE_TIMEOUT_SECONDS: float = Field(default=180.0, gt=0)
 
     # -------------------------------------------------------------------------
     # OpenAI / LangGraph
