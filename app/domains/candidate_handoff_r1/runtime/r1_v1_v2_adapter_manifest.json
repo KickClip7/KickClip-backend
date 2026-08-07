@@ -1,5 +1,5 @@
 {
-  "schema_version": "kickclip.backend_r1_v1_v2_adapter_manifest.v23",
+  "schema_version": "kickclip.backend_r1_v1_v2_adapter_manifest.v24",
   "integration_path": "B.ADD_THIN_BACKEND_ADAPTER_TO_V1_V2_STAGES",
   "production_r3_directory_assumed": false,
   "global_id_v7_aliased_to_v6": false,
@@ -8,13 +8,15 @@
   "automatic_target_confirmation": false,
   "selection_aware_video_adapter": true,
   "reviewed_shot_boundary_translation": true,
+  "automatic_shot_boundary_input_supported": true,
+  "shot_boundary_provenance_policy": "EXPLICIT_AUTO_OR_HUMAN_REVIEWED_R1",
   "runtime_candidate_evidence_materialization": true,
   "confirmed_memory_revision_scoring_safety_gate": true,
   "live_frozen_runtime_verified": true,
   "source_files": [
     {
       "path": "app/domains/candidate_handoff_r1/r3_adapter.py",
-      "sha256": "19c8aeddc41d532c2bd4592c93e41003c613f80d1c92c0ccfcf063e87ee8fb31"
+      "sha256": "97f4d43ca304025f0b36293534d58b016be10678e0938f2709538c8a883c28e9"
     },
     {
       "path": "app/domains/candidate_handoff_r1/runtime/r1_v1_v2_adapter_cli.py",
@@ -22,7 +24,7 @@
     },
     {
       "path": "app/domains/candidate_handoff_r1/runtime/phase1_compatibility_executor.py",
-      "sha256": "d2df02c35eeab46a1e1c8fd0862269c09b1abe625e4664f324a408c3d2f8f6fb"
+      "sha256": "7d2e099b6a41783ad1506ef650f7fed935c42416cbc191892a1b3ecf301ef957"
     },
     {
       "path": "app/domains/candidate_handoff_r1/runtime/verify_r1_v1_v2_adapter.py",
@@ -30,7 +32,7 @@
     },
     {
       "path": "app/domains/candidate_handoff_r1/runtime/verify_scene_target_selection_source.py",
-      "sha256": "e1170eb73185cf7df5a1dc00a3219c12a3f01d33c1e3e3c507ffee64651f4a44"
+      "sha256": "5c072dc026e59f335689e03a598138d0c5e01fef642d84dd4466777baf2f1afe"
     },
     {
       "path": "app/domains/candidate_handoff_r1/runtime_sync.py",
@@ -38,7 +40,7 @@
     },
     {
       "path": "app/domains/tracking/r1_executor.py",
-      "sha256": "d596b9285485bfd6a4754163564392dc13090667737d9bafed43380792d64408"
+      "sha256": "0aa96c272f0242deb9efc72c11a4b0f2d0ee9bf12e3677a4655de40aa53bac0f"
     },
     {
       "path": "app/domains/tracking/process_runner.py",
@@ -46,15 +48,15 @@
     },
     {
       "path": "app/domains/tracking/verifier.py",
-      "sha256": "8147ece09ea80397c58127f6c819182de424586d31b4cc3195c0fb9e77630b45"
+      "sha256": "b9f5252e067dda4c6b02e9959417bcb175320c60b5d08bcd13a19732a3a3c82c"
     },
     {
       "path": "app/domains/candidate_handoff_r1/schema.py",
-      "sha256": "0b8d66b9e1ab34b9c55e1f4e17e2bb3183f2cf5f635ed34a8040e9a18eaab1ff"
+      "sha256": "bb7ca198f5fc99f27bc03d84315b69bced46c6347a4f8f669a7317149c60430a"
     },
     {
       "path": "app/domains/candidate_handoff_r1/service.py",
-      "sha256": "8d8322ed814aafda37c9b51a3853a3691b88a4fae152ace5266723b0f11b759b"
+      "sha256": "591c75d14427c16060936a35890f9a632be281059ced15ca66d47419dffb9a3e"
     },
     {
       "path": "app/domains/tracking/schema.py",

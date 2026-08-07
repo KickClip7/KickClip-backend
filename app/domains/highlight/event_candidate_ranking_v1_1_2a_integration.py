@@ -222,23 +222,25 @@ class IntegratedSceneTargetTrackingInstallationVerifier(
             ranking_verified
         )
         components["EVENT_RANKING_RUNTIME_VERIFIED"] = ranking_verified
-        components["R3_TRACKING_RUNTIME_VERIFIED"] = bool(
+        components["CANONICAL_TRACKING_RUNTIME_VERIFIED"] = bool(
             base.available
-            and components.get("R3_WRAPPER_VERIFIED", False)
+            and components.get("CANONICAL_E2E_RUNTIME_VERIFIED", False)
         )
+        # Compatibility key only; no R3 algorithm is part of product tracking.
+        components["R3_TRACKING_RUNTIME_VERIFIED"] = False
         components["FULL_EVENT_RECOMMENDATION_E2E_VERIFIED"] = False
         if (
             discovery_verified
             and ranking_verified
-            and not components.get("R3_TRACKING_RUNTIME_VERIFIED", False)
+            and not components.get("CANONICAL_TRACKING_RUNTIME_VERIFIED", False)
         ):
             return replace(
                 base,
                 code="EVENT_RANKING_SHADOW_RUNTIME_VERIFIED",
                 message=(
                     "Scene discovery and V1.1.2a event ranking shadow "
-                    "runtimes passed; R3 tracking remains independently "
-                    "unavailable."
+                    "runtimes passed; canonical target-centric tracking "
+                    "remains independently unavailable."
                 ),
                 components=components,
             )

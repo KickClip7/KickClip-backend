@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import json
 import signal
 import subprocess
 import threading
@@ -113,7 +114,7 @@ class TrackingProcessRunner:
             "--output-root",
             str(self._output_root()),
         ]
-        self._append_scene_target_arguments(command, job)
+        self._append_scene_launch_arguments(command, job)
         if overwrite:
             command.append("--overwrite")
         if not self.settings.TRACKING_PREVIEW_ENABLED:
@@ -140,7 +141,6 @@ class TrackingProcessRunner:
             "--output-root",
             str(self._output_root()),
         ]
-        self._append_scene_target_arguments(command, job)
         kind = str(action.get("kind") or "")
         if kind == "review":
             stage = str(action["stage"])
@@ -338,95 +338,167 @@ class TrackingProcessRunner:
         value = (job.runtime_metadata or {}).get("scene_target_selection")
         return value if isinstance(value, Mapping) else None
 
-    def _append_scene_target_arguments(
+    @staticmethod
+    def _read_json_object(path: Path, label: str) -> dict[str, Any]:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TrackingValidationError(f"{label} is unreadable.") from exc
+        if not isinstance(value, dict):
+            raise TrackingValidationError(f"{label} must contain a JSON object.")
+        return value
+
+    @staticmethod
+    def _bbox_matches(
+        left: Sequence[float],
+        right: Sequence[float],
+        *,
+        tolerance: float = 1.5,
+    ) -> bool:
+        if len(left) != 4 or len(right) != 4:
+            return False
+        return all(
+            abs(float(a) - float(b)) <= tolerance
+            for a, b in zip(left, right)
+        )
+
+    def _verified_scene_context(
         self,
-        command: list[str],
         job: TrackingJob,
-    ) -> None:
+    ) -> tuple[Mapping[str, Any], dict[str, Path]] | None:
         scene_context = self._scene_target_context(job)
         if scene_context is None:
-            return
+            return None
+
         selection_root_value = scene_context.get("selection_artifact_root")
         if not selection_root_value:
             raise TrackingValidationError(
                 "Scene target selection artifact root is missing."
             )
         selection_root = Path(str(selection_root_value)).resolve()
-        required_paths = {
-            "--tracking-launch-manifest": "tracking_launch_manifest_path",
-            "--shot-boundaries": "shot_boundaries_path",
-            "--target-selection": "target_selection_path",
-            "--target-reference-set": "target_reference_set_path",
-            "--earlier-anchor-decision": "earlier_anchor_decision_path",
+        if not selection_root.is_dir():
+            raise TrackingValidationError(
+                "Scene target selection artifact root is missing."
+            )
+
+        required = {
+            "tracking_launch_manifest_path": "tracking_launch_manifest_sha256",
+            "shot_boundaries_path": "shot_boundaries_sha256",
+            "target_selection_path": "target_selection_sha256",
+            "target_reference_set_path": "target_reference_set_sha256",
+            "earlier_anchor_decision_path": "earlier_anchor_decision_sha256",
         }
-        for flag, key in required_paths.items():
+        resolved: dict[str, Path] = {}
+        for key, sha_key in required.items():
             value = scene_context.get(key)
             if not value:
                 raise TrackingValidationError(
                     f"Scene target selection is missing {key}."
                 )
-            resolved = Path(str(value)).resolve()
-            if not resolved.is_file():
+            path = Path(str(value)).resolve()
+            if not path.is_file():
                 raise TrackingValidationError(
                     f"Scene target selection file is missing: {key}."
                 )
-            sha_key = {
-                "tracking_launch_manifest_path": "tracking_launch_manifest_sha256",
-                "shot_boundaries_path": "shot_boundaries_sha256",
-                "target_selection_path": "target_selection_sha256",
-                "target_reference_set_path": "target_reference_set_sha256",
-                "earlier_anchor_decision_path": "earlier_anchor_decision_sha256",
-            }[key]
-            if key != "shot_boundaries_path" and not resolved.is_relative_to(selection_root):
+            if key != "shot_boundaries_path" and not path.is_relative_to(selection_root):
                 raise TrackingValidationError(
                     "Scene target artifact escapes immutable root."
                 )
-            expected = str(scene_context.get(sha_key) or "")
-            actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
+            expected = str(scene_context.get(sha_key) or "").strip().lower()
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
             if len(expected) != 64 or actual != expected:
                 raise TrackingValidationError(
                     f"Scene target artifact hash mismatch: {key}."
                 )
-            command.extend([flag, str(resolved)])
-        memory_value = scene_context.get("current_target_memory_path")
-        if memory_value:
-            memory = Path(str(memory_value)).resolve()
-            expected = str(
-                scene_context.get("current_target_memory_sha256") or ""
-            )
-            actual = hashlib.sha256(memory.read_bytes()).hexdigest() if memory.is_file() else ""
-            if len(expected) != 64 or actual != expected:
-                raise TrackingValidationError(
-                    "Current target memory artifact hash mismatch."
-                )
-            command.extend(
-                [
-                    "--target-memory-revision",
-                    str(memory),
-                    "--target-memory-sha256",
-                    expected,
-                ]
-            )
-        command.extend(
-            [
-                "--candidate-scoring-generation",
-                str(int(scene_context.get("candidate_scoring_generation") or 1)),
-            ]
+            resolved[key] = path
+
+        return scene_context, resolved
+
+    @staticmethod
+    def _reviewed_cut_frames(
+        boundaries: Mapping[str, Any],
+        *,
+        initial_frame: int,
+    ) -> list[int]:
+        rows = boundaries.get("shots")
+        if not isinstance(rows, list):
+            rows = boundaries.get("boundaries")
+        if not isinstance(rows, list):
+            rows = []
+
+        cuts: set[int] = set()
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            candidate: int | None = None
+            for key in ("start_frame", "cut_frame", "frame"):
+                raw = row.get(key)
+                if raw is None:
+                    continue
+                try:
+                    candidate = int(raw)
+                except (TypeError, ValueError):
+                    candidate = None
+                if candidate is not None:
+                    break
+            if candidate is not None and candidate > initial_frame:
+                cuts.add(candidate)
+        return sorted(cuts)
+
+    def _append_scene_launch_arguments(
+        self,
+        command: list[str],
+        job: TrackingJob,
+    ) -> None:
+        """Bridge immutable scene selection into the canonical E2E runner.
+
+        This method intentionally does not route to the legacy R1/R3 tracking
+        adapter and does not pass R2/R3/V7 runtime arguments.
+        """
+
+        verified = self._verified_scene_context(job)
+        if verified is None:
+            return
+        _, paths = verified
+
+        anchor = self._read_json_object(
+            paths["earlier_anchor_decision_path"],
+            "Earlier anchor decision",
         )
+        try:
+            initial_frame = int(anchor["anchor_frame"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TrackingValidationError(
+                "Earlier anchor decision has no valid anchor_frame."
+            ) from exc
+
+        anchor_bbox = anchor.get("anchor_bbox_xyxy")
+        if not isinstance(anchor_bbox, list) or len(anchor_bbox) != 4:
+            raise TrackingValidationError(
+                "Earlier anchor decision has no valid anchor_bbox_xyxy."
+            )
+        if not self._bbox_matches(job.initial_bbox, anchor_bbox):
+            raise TrackingValidationError(
+                "Tracking job bbox does not match the immutable selected anchor."
+            )
+
+        boundaries = self._read_json_object(
+            paths["shot_boundaries_path"],
+            "Shot boundaries",
+        )
+        cut_frames = self._reviewed_cut_frames(
+            boundaries,
+            initial_frame=initial_frame,
+        )
+        command.extend(["--initial-frame", str(initial_frame)])
+        command.append("--allow-prestaged-output")
+        if cut_frames:
+            command.extend(["--cut-frames", *[str(value) for value in cut_frames]])
 
     def _runner_script(self, job: TrackingJob) -> Path:
-        if self._scene_target_context(job) is not None:
-            configured = self.settings.TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH
-            if not configured:
-                raise TrackingValidationError(
-                    "TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH must explicitly point "
-                    "to the backend-owned R1 V1/V2 adapter; no production_r3 "
-                    "directory is assumed."
-                )
-            return configured_absolute_path(
-                configured,
-                "TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH",
-            )
+        # Every new/resume job uses the single canonical target-centric E2E
+        # runtime. Scene selection contributes immutable input evidence only;
+        # it never selects a different tracking algorithm.
         return configured_absolute_path(
             self.settings.TRACKING_E2E_SCRIPT_PATH,
             "TRACKING_E2E_SCRIPT_PATH",

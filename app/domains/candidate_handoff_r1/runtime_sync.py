@@ -25,13 +25,22 @@ from app.domains.tracking.status import TrackingBackendStatus
 from app.storage.local_storage import LocalStorage
 
 
-BBOX_STATES = {"ACTIVE", "REACQUIRED"}
+BBOX_STATES = {
+    "INITIALIZING",
+    "ACTIVE",
+    "ACTIVE_LOW_CONFIDENCE",
+    "OCCLUDED",
+    "REACQUIRED",
+    "USER_CONFIRMED",
+}
 NULL_BBOX_STATES = {"LOST", "SEARCHING", "AMBIGUOUS", "ABSENT", "TERMINATED"}
 VISIBLE_TERMINAL_SHOT_STATES = {
     "ACCEPTED",
     "TRACKED",
     "ACTIVE",
     "REACQUIRED",
+    "TARGET_CONFIRMED_AND_TRACKED",
+    "SAFE_REJECTED_SEARCHING",
     "ABSENT_CONFIRMED",
     "TARGET_ABSENT",
     "SEARCH_EXHAUSTED_NO_REVIEWABLE_CANDIDATE",
@@ -450,8 +459,21 @@ class R1RuntimeStateSynchronizer:
         if pending.get("type") != "MEMORY_REVIEW":
             return
         runtime = _object(state.get("runtime"))
-        path = Path(str(runtime.get("memory_revision_path") or "")).resolve()
+        memory_path_value = runtime.get("memory_revision_path")
         expected_sha = str(runtime.get("memory_revision_sha256") or "")
+
+        # Canonical target_centric_tracking_e2e_v1 reviews the real frozen
+        # Stage-3A2 target/negative memory in-place. It intentionally does not
+        # manufacture a backend memory revision before that human review.
+        # A legacy runtime may still provide an immutable backend revision;
+        # preserve verification for that case without making it a prerequisite.
+        if not memory_path_value and not expected_sha:
+            return
+        if not memory_path_value or len(expected_sha) != 64:
+            raise R1RuntimeSyncError(
+                "Initial target memory provenance is incomplete."
+            )
+        path = Path(str(memory_path_value)).resolve()
         if not path.is_file() or sha256_file(path) != expected_sha:
             raise R1RuntimeSyncError("Initial immutable target memory is missing or changed.")
         document = json.loads(path.read_text(encoding="utf-8-sig"))

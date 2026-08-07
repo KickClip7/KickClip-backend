@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.domains.candidate_handoff_r1.artifacts import sha256_file, write_json_atomic
@@ -14,11 +15,11 @@ from app.domains.candidate_handoff_r1.model import (
 from app.domains.tracking.model import TrackingJob
 from app.storage.local_storage import LocalStorage
 
+SELECTED_SHOT_TRACKING_POLICY = "CONFIRMED_ANCHOR_FORWARD_CANONICAL_E2E_V1"
 
-SELECTED_SHOT_TRACKING_POLICY = "SELECTED_SHOT_ANCHOR_BIDIRECTIONAL_R1"
 
 class R1R3AdapterError(ValueError):
-    """Raised when immutable R1 selection artifacts cannot form an R3 launch."""
+    """Raised when immutable selection artifacts cannot form a canonical E2E launch."""
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,7 @@ class R1R3AdapterResult:
     tracking_launch_manifest_sha256: str
     shot_boundaries_path: Path
     shot_boundaries_sha256: str
+    shot_boundaries_provenance: dict[str, Any]
     target_selection_path: Path
     target_selection_sha256: str
     target_reference_set_path: Path
@@ -46,6 +48,7 @@ class R1R3AdapterResult:
             "tracking_launch_manifest_sha256": self.tracking_launch_manifest_sha256,
             "shot_boundaries_path": str(self.shot_boundaries_path),
             "shot_boundaries_sha256": self.shot_boundaries_sha256,
+            "shot_boundaries_provenance": self.shot_boundaries_provenance,
             "target_selection_path": str(self.target_selection_path),
             "target_selection_sha256": self.target_selection_sha256,
             "target_reference_set_path": str(self.target_reference_set_path),
@@ -62,11 +65,12 @@ class R1R3AdapterResult:
 
 
 class R1R3InputAdapter:
-    """Build immutable R1 -> provided V1/V2 runtime launch artifacts.
+    """Build immutable scene-selection -> canonical E2E launch artifacts.
 
-    The adapter intentionally does not invent a production_r3 package. The configured
-    subprocess entry point is a backend-owned CLI that validates these files and then
-    calls the supplied frozen V1/V2 research stages.
+    The class name is retained for database/import compatibility only. It does
+    not route to an R3 tracking algorithm. Tracking execution is always owned by
+    ``target_centric_tracking_e2e_v1``; these artifacts provide only the
+    user-confirmed anchor, references, and reviewed shot boundaries.
     """
 
     def __init__(
@@ -97,7 +101,9 @@ class R1R3InputAdapter:
         return actual
 
     @staticmethod
-    def _configured_manifest(path_value: str, sha_value: str, label: str) -> dict[str, str]:
+    def _configured_manifest(
+        path_value: str, sha_value: str, label: str
+    ) -> dict[str, str]:
         if not path_value or not sha_value:
             raise R1R3AdapterError(f"{label} manifest configuration is missing.")
         path = Path(path_value).expanduser().resolve()
@@ -111,19 +117,37 @@ class R1R3InputAdapter:
         selection: EventCandidateSelectionR1,
         candidate_manifest_path: Path,
         source_video_path: Path,
-        reviewed_shot_boundaries_path: Path,
+        shot_boundaries_path: Path | None = None,
+        shot_boundaries_provenance: Mapping[str, Any] | None = None,
+        reviewed_shot_boundaries_path: Path | None = None,
         current_memory: EventCandidateMemoryRevisionR1 | None = None,
         candidate_scoring_generation: int = 1,
     ) -> R1R3AdapterResult:
         candidate_manifest_path = candidate_manifest_path.resolve()
         source_video_path = source_video_path.resolve()
-        reviewed_shot_boundaries_path = reviewed_shot_boundaries_path.resolve()
+        if shot_boundaries_path is None:
+            if reviewed_shot_boundaries_path is None:
+                raise R1R3AdapterError("Shot-boundary artifact path is required.")
+            shot_boundaries_path = reviewed_shot_boundaries_path
+            shot_boundaries_provenance = {
+                "artifact_id": None,
+                "artifact_type": "REVIEWED_SHOT_BOUNDARIES",
+                "sha256": selection.reviewed_shot_boundaries_sha256,
+                "boundary_origin": "HUMAN_REVIEWED",
+                "human_reviewed": True,
+                "automatic_target_confirmation": False,
+            }
+        if shot_boundaries_provenance is None:
+            raise R1R3AdapterError("Shot-boundary artifact provenance is required.")
+        shot_boundaries_path = shot_boundaries_path.resolve()
         self._require_sha(
             candidate_manifest_path,
             selection.candidate_media_bundle_sha256,
             "candidate review bundle",
         )
-        self._require_sha(source_video_path, selection.source_video_sha256, "source video")
+        self._require_sha(
+            source_video_path, selection.source_video_sha256, "source video"
+        )
         manifest = self._load_object(candidate_manifest_path)
 
         identities = {
@@ -143,29 +167,50 @@ class R1R3InputAdapter:
             raise R1R3AdapterError("Selected candidate best observation is missing.")
         anchor_frame = int(anchor.get("frame", -1))
         anchor_bbox = anchor.get("bbox_xyxy")
-        if anchor_frame < 0 or not isinstance(anchor_bbox, list) or len(anchor_bbox) != 4:
+        if (
+            anchor_frame < 0
+            or not isinstance(anchor_bbox, list)
+            or len(anchor_bbox) != 4
+        ):
             raise R1R3AdapterError("Selected candidate anchor is invalid.")
 
         bundle_root = candidate_manifest_path.parent
-        self._require_sha(
-            reviewed_shot_boundaries_path,
-            selection.reviewed_shot_boundaries_sha256,
-            "reviewed shot boundaries",
+        boundary_sha = str(shot_boundaries_provenance.get("sha256") or "")
+        boundary_artifact_type = str(
+            shot_boundaries_provenance.get("artifact_type") or ""
         )
-        boundaries = self._load_object(reviewed_shot_boundaries_path)
+        boundary_origin = str(shot_boundaries_provenance.get("boundary_origin") or "")
+        human_reviewed = shot_boundaries_provenance.get("human_reviewed")
+        valid_boundary_contract = (
+            boundary_artifact_type == "AUTO_SHOT_BOUNDARIES"
+            and boundary_origin == "AUTO_DETECTED"
+            and human_reviewed is False
+        ) or (
+            boundary_artifact_type == "REVIEWED_SHOT_BOUNDARIES"
+            and boundary_origin == "HUMAN_REVIEWED"
+            and human_reviewed is True
+        )
+        if (
+            not valid_boundary_contract
+            or shot_boundaries_provenance.get("automatic_target_confirmation")
+            is not False
+        ):
+            raise R1R3AdapterError("Shot-boundary artifact provenance is invalid.")
+        self._require_sha(shot_boundaries_path, boundary_sha, "shot boundaries")
+        boundaries = self._load_object(shot_boundaries_path)
         shots = list(boundaries.get("shots") or boundaries.get("boundaries") or [])
         selected_shot = next(
             (row for row in shots if str(row.get("shot_id")) == selection.shot_id),
             None,
         )
         if selected_shot is None:
-            raise R1R3AdapterError("Selected shot is absent from reviewed boundaries.")
+            raise R1R3AdapterError("Selected shot is absent from shot boundaries.")
         shot_start = int(selected_shot.get("start_frame", -1))
         shot_end = int(
             selected_shot.get("end_frame_inclusive", selected_shot.get("end_frame", -1))
         )
         if not shot_start <= anchor_frame <= shot_end:
-            raise R1R3AdapterError("Selected anchor is outside its reviewed shot.")
+            raise R1R3AdapterError("Selected anchor is outside its selected shot.")
 
         reference_rows: list[dict[str, Any]] = []
         for row in manifest.get("reference_gallery") or []:
@@ -186,11 +231,15 @@ class R1R3InputAdapter:
                 }
             )
         if len(reference_rows) < 3:
-            raise R1R3AdapterError("At least three immutable target references are required.")
+            raise R1R3AdapterError(
+                "At least three immutable target references are required."
+            )
 
         root = (Path(job.output_directory) / "r3_inputs").resolve()
         root.mkdir(parents=True, exist_ok=True)
-        selection_record_path = self.storage.resolve_path(selection.selection_artifact_path)
+        selection_record_path = self.storage.resolve_path(
+            selection.selection_artifact_path
+        )
         self._require_sha(
             selection_record_path,
             selection.selection_artifact_sha256,
@@ -201,16 +250,6 @@ class R1R3InputAdapter:
             self.settings.SCENE_TARGET_SELECTION_MANIFEST_PATH,
             self.settings.SCENE_TARGET_SELECTION_MANIFEST_SHA256,
             "Scene Target Selection",
-        )
-        r2_manifest = self._configured_manifest(
-            self.settings.TRACKING_R2_MANIFEST_PATH,
-            self.settings.TRACKING_R2_MANIFEST_SHA256,
-            "R2",
-        )
-        r3_manifest = self._configured_manifest(
-            self.settings.TRACKING_R3_MANIFEST_PATH,
-            self.settings.TRACKING_R3_MANIFEST_SHA256,
-            "R3 adapter",
         )
 
         provenance = {
@@ -224,14 +263,16 @@ class R1R3InputAdapter:
             "best_anchor_frame": anchor_frame,
             "best_anchor_bbox_xyxy": [float(value) for value in anchor_bbox],
             "selected_shot_tracking_policy": SELECTED_SHOT_TRACKING_POLICY,
-            "selected_shot_bidirectional_required": True,
+            "selected_shot_bidirectional_required": False,
+            "tracking_direction": "FORWARD_FROM_CONFIRMED_ANCHOR",
             "selected_shot_forward_frame_count": shot_end - anchor_frame + 1,
-            "selected_shot_backward_frame_count": anchor_frame - shot_start + 1,
+            "selected_shot_backward_frame_count": 0,
             "source_video_sha256": selection.source_video_sha256,
-            "reviewed_shot_boundaries_sha256": selection.reviewed_shot_boundaries_sha256,
+            "shot_boundaries": dict(shot_boundaries_provenance),
+            "shot_boundaries_sha256": boundary_sha,
             "scene_target_selection_manifest": scene_manifest,
-            "r2_manifest": r2_manifest,
-            "r3_adapter_manifest": r3_manifest,
+            "canonical_tracking_runtime": "target_centric_tracking_e2e_v1",
+            "v7_runtime_dependency": False,
             "automatic_target_confirmation": False,
         }
         target_selection = {
@@ -243,8 +284,9 @@ class R1R3InputAdapter:
             "selected_shot_frame_count": shot_end - shot_start + 1,
             "anchor_offset_from_shot_start": anchor_frame - shot_start,
             "selected_shot_forward_frame_count": shot_end - anchor_frame + 1,
-            "selected_shot_backward_frame_count": anchor_frame - shot_start + 1,
-            "selected_shot_bidirectional_required": True,
+            "selected_shot_backward_frame_count": 0,
+            "selected_shot_bidirectional_required": False,
+            "tracking_direction": "FORWARD_FROM_CONFIRMED_ANCHOR",
             "selection_record": {
                 "path": str(selection_record_path),
                 "sha256": selection.selection_artifact_sha256,
@@ -255,7 +297,9 @@ class R1R3InputAdapter:
             },
         }
         target_selection_path = root / "target_selection.json"
-        target_selection_sha = write_json_atomic(target_selection_path, target_selection)
+        target_selection_sha = write_json_atomic(
+            target_selection_path, target_selection
+        )
 
         target_reference_set = {
             "schema_version": "kickclip.r1_target_reference_set.v1",
@@ -309,8 +353,8 @@ class R1R3InputAdapter:
         cache_key_path = root / "tracking_cache_material.json"
         tracking_cache_key = write_json_atomic(cache_key_path, cache_material)
         launch_manifest = {
-            "schema_version": "kickclip.r1_v1_v2_launch_manifest.v2",
-            "integration_path": "B.ADD_THIN_BACKEND_ADAPTER_TO_V1_V2_STAGES",
+            "schema_version": "kickclip.canonical_target_centric_e2e_launch.v1",
+            "integration_path": "CANONICAL_TARGET_CENTRIC_E2E_V1",
             "tracking_job_id": job.tracking_job_id,
             "test_name": job.test_name,
             "source_video": {
@@ -318,8 +362,8 @@ class R1R3InputAdapter:
                 "sha256": selection.source_video_sha256,
             },
             "shot_boundaries": {
-                "path": str(reviewed_shot_boundaries_path),
-                "sha256": selection.reviewed_shot_boundaries_sha256,
+                "path": str(shot_boundaries_path),
+                **dict(shot_boundaries_provenance),
             },
             "target_selection": {
                 "path": str(target_selection_path),
@@ -341,7 +385,10 @@ class R1R3InputAdapter:
             "candidate_scoring_generation": candidate_scoring_generation,
             "tracking_cache_key": tracking_cache_key,
             "selected_shot_tracking_policy": SELECTED_SHOT_TRACKING_POLICY,
-            "selected_shot_bidirectional_required": True,
+            "selected_shot_bidirectional_required": False,
+            "tracking_direction": "FORWARD_FROM_CONFIRMED_ANCHOR",
+            "canonical_tracking_runtime": "target_centric_tracking_e2e_v1",
+            "v7_runtime_dependency": False,
             "automatic_target_confirmation": False,
         }
         tracking_launch_manifest_path = root / "tracking_launch_manifest.json"
@@ -353,8 +400,9 @@ class R1R3InputAdapter:
             selection_artifact_root=root,
             tracking_launch_manifest_path=tracking_launch_manifest_path,
             tracking_launch_manifest_sha256=tracking_launch_manifest_sha,
-            shot_boundaries_path=reviewed_shot_boundaries_path,
-            shot_boundaries_sha256=selection.reviewed_shot_boundaries_sha256,
+            shot_boundaries_path=shot_boundaries_path,
+            shot_boundaries_sha256=boundary_sha,
+            shot_boundaries_provenance=dict(shot_boundaries_provenance),
             target_selection_path=target_selection_path,
             target_selection_sha256=target_selection_sha,
             target_reference_set_path=target_reference_set_path,
@@ -371,10 +419,12 @@ class R1R3InputAdapter:
         metadata = dict(job.runtime_metadata or {})
         metadata["scene_target_selection"] = result.runtime_metadata()
         metadata["r1_runtime_integration"] = {
-            "integration_path": "B.ADD_THIN_BACKEND_ADAPTER_TO_V1_V2_STAGES",
+            "integration_path": "CANONICAL_TARGET_CENTRIC_E2E_V1",
             "selected_shot_tracking_policy": SELECTED_SHOT_TRACKING_POLICY,
-            "selected_shot_bidirectional_required": True,
-            "reverse_phase1_execution_complete": False,
+            "selected_shot_bidirectional_required": False,
+            "tracking_direction": "FORWARD_FROM_CONFIRMED_ANCHOR",
+            "canonical_tracking_runtime": "target_centric_tracking_e2e_v1",
+            "v7_runtime_dependency": False,
             "timeline_merge_complete": False,
             "frame_zero_fallback_used": False,
             "automatic_target_confirmation": False,

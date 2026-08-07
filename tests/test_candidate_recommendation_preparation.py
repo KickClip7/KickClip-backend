@@ -20,10 +20,14 @@ from app.api.v1 import event_candidate_handoff_r1 as handoff_api
 from app.domains.candidate_handoff_r1.errors import (
     CandidatePreparationError,
     CandidateRecommendationNotPrepared,
+    CandidateSelectionProvenanceMismatch,
 )
 from app.domains.candidate_handoff_r1.preparation import (
     EventCandidateRecommendationPreparationService,
     PREPARATION_TASK_TYPE,
+)
+from app.domains.candidate_handoff_r1.review_bundle import (
+    MEDIA_MATERIALIZATION_POLICY,
 )
 from app.domains.candidate_handoff_r1.schema import (
     CandidateRecommendationPrepareRequest,
@@ -122,6 +126,155 @@ def add_artifact(
     db.add(artifact)
     db.flush()
     return artifact
+
+
+@pytest.mark.parametrize(
+    (
+        "artifact_type",
+        "boundary_origin",
+        "human_reviewed",
+        "status",
+    ),
+    [
+        (
+            "AUTO_SHOT_BOUNDARIES",
+            "AUTO_DETECTED",
+            False,
+            "STRUCTURALLY_VALID",
+        ),
+        (
+            "REVIEWED_SHOT_BOUNDARIES",
+            "HUMAN_REVIEWED",
+            True,
+            "REVIEWED_PASS",
+        ),
+    ],
+)
+def test_tracking_boundary_provenance_accepts_auto_and_reviewed_without_aliasing(
+    db: Session,
+    tmp_path: Path,
+    artifact_type: str,
+    boundary_origin: str,
+    human_reviewed: bool,
+    status: str,
+) -> None:
+    video_sha = "a" * 64
+    shot = {
+        "shot_index": 0,
+        "shot_id": "shot_0000",
+        "start_frame": 0,
+        "end_frame_inclusive": 9,
+        "review_status": "REVIEWED_PASS" if human_reviewed else None,
+    }
+    document = {
+        "artifact_type": artifact_type,
+        "boundary_origin": boundary_origin,
+        "human_reviewed": human_reviewed,
+        "automatic_target_confirmation": False,
+        "automatic_confirmation": False,
+        "video": {"sha256": video_sha, "frame_count": 10},
+        "shots": [shot],
+        "structural_validation": {
+            "status": "PASS",
+            "complete_event_window_coverage": True,
+            "gap_count": 0,
+            "overlap_count": 0,
+        },
+    }
+    artifact = add_artifact(
+        db,
+        tmp_path,
+        artifact_id="boundaries",
+        artifact_type=artifact_type,
+        metadata={
+            "revision_id": "revision",
+            "event_id": "event",
+            "scene_id": "scene",
+            "status": status,
+            "boundary_origin": boundary_origin,
+            "human_reviewed": human_reviewed,
+            "automatic_target_confirmation": False,
+            "automatic_confirmation": False,
+        },
+        document=document,
+    )
+    db.commit()
+    service = CandidateHandoffR1Service(db)
+    service.storage = TempStorage(tmp_path)
+    provenance = service._resolve_boundary_provenance(
+        project=db.get(Project, "project"),
+        revision_id="revision",
+        event_id="event",
+        scene_id="scene",
+        source_video_sha256=video_sha,
+        manifest={
+            # Exercise legacy immutable selections as well as new manifests.
+            "reviewed_shot_boundaries_sha256": artifact.metadata_["sha256"],
+        },
+    )
+    assert provenance.artifact_type == artifact_type
+    assert provenance.boundary_origin == boundary_origin
+    assert provenance.human_reviewed is human_reviewed
+    assert provenance.as_dict()["automatic_target_confirmation"] is False
+
+
+def test_tracking_boundary_provenance_rejects_invalid_auto_structure(
+    db: Session,
+    tmp_path: Path,
+) -> None:
+    video_sha = "a" * 64
+    artifact = add_artifact(
+        db,
+        tmp_path,
+        artifact_id="invalid-auto-boundaries",
+        artifact_type="AUTO_SHOT_BOUNDARIES",
+        metadata={
+            "revision_id": "revision",
+            "event_id": "event",
+            "scene_id": "scene",
+            "status": "STRUCTURALLY_VALID",
+            "boundary_origin": "AUTO_DETECTED",
+            "human_reviewed": False,
+            "automatic_target_confirmation": False,
+        },
+        document={
+            "artifact_type": "AUTO_SHOT_BOUNDARIES",
+            "boundary_origin": "AUTO_DETECTED",
+            "human_reviewed": False,
+            "automatic_target_confirmation": False,
+            "automatic_confirmation": False,
+            "video": {"sha256": video_sha, "frame_count": 10},
+            "shots": [
+                {
+                    "shot_index": 0,
+                    "shot_id": "shot_0000",
+                    "start_frame": 1,
+                    "end_frame_inclusive": 9,
+                }
+            ],
+            "structural_validation": {
+                "status": "PASS",
+                "complete_event_window_coverage": True,
+                "gap_count": 0,
+                "overlap_count": 0,
+            },
+        },
+    )
+    db.commit()
+    service = CandidateHandoffR1Service(db)
+    service.storage = TempStorage(tmp_path)
+    with pytest.raises(
+        CandidateSelectionProvenanceMismatch,
+        match="not contiguous full-frame coverage",
+    ):
+        service._resolve_boundary_provenance(
+            project=db.get(Project, "project"),
+            revision_id="revision",
+            event_id="event",
+            scene_id="scene",
+            source_video_sha256=video_sha,
+            manifest={"shot_boundaries_sha256": artifact.metadata_["sha256"]},
+        )
 
 
 def test_v12_cache_is_scoped_to_exact_event_scene_and_inputs(
@@ -382,9 +535,18 @@ def preparation_fixture(
             "tracklet_id": candidate["tracklet_id"],
             "source_video_sha256": kwargs["source_video_sha256"],
             "candidate_manifest_sha256": kwargs["candidate_manifest_sha256"],
-            "reviewed_shot_boundaries_sha256": kwargs[
-                "reviewed_shot_boundaries_sha256"
-            ],
+            "shot_boundaries_artifact_id": kwargs["shot_boundaries_artifact_id"],
+            "shot_boundaries_sha256": kwargs["shot_boundaries_sha256"],
+            "shot_boundary_artifact_type": kwargs["shot_boundary_artifact_type"],
+            "boundary_origin": kwargs["boundary_origin"],
+            "human_reviewed": kwargs["human_reviewed"],
+            "media_materialization_policy": MEDIA_MATERIALIZATION_POLICY,
+            "candidate_grouping_policy": candidate["candidate_grouping_policy"],
+            "candidate_grouping_sha256": candidate["candidate_grouping_sha256"],
+            "candidate_group_id": candidate["candidate_group_id"],
+            "group_member_fingerprint": candidate["group_member_fingerprint"],
+            "group_member_candidate_ids": candidate["group_member_candidate_ids"],
+            "grouping_is_identity_confirmation": False,
             "quality": {
                 "reviewability": "USABLE",
                 "selected_best_frame": 10,
@@ -452,7 +614,15 @@ def test_prepare_builds_every_bundle_registers_artifacts_and_get_is_read_only(
         scene_id="scene",
         shortlist_size=5,
     )
-    assert repeated == result
+    assert {
+        key: value
+        for key, value in repeated.items()
+        if key not in {"work_metrics", "work_metrics_path", "work_metrics_sha256"}
+    } == {
+        key: value
+        for key, value in result.items()
+        if key not in {"work_metrics", "work_metrics_path", "work_metrics_sha256"}
+    }
     assert offsets == [8, 8]
     assert db.scalar(select(func.count()).select_from(Artifact)) == artifact_count
     before = db.scalar(select(func.count()).select_from(Artifact))
@@ -496,7 +666,9 @@ def test_prepare_is_not_ready_when_one_bundle_fails(
             event_id="event",
             scene_id="scene",
         )
-    assert caught.value.reason.startswith("REVIEW_BUNDLE_MISSING")
+    assert caught.value.reason.startswith(
+        ("REVIEW_BUNDLE_MISSING", "REVIEW_BUNDLE_PROVENANCE_MISMATCH")
+    )
     retried = service.prepare(
         project=project,
         user=user,
@@ -645,6 +817,21 @@ def test_prepare_api_enqueues_scene_ai_task_and_get_returns_prepare_contract(
 
     executor = FakeExecutor()
     monkeypatch.setattr(handoff_api, "get_scene_ai_task_executor", lambda: executor)
+
+    class FakeBoundaryService:
+        def __init__(self, _db: Session) -> None:
+            pass
+
+        @staticmethod
+        def prepare_candidate_discovery_inputs(**_kwargs):
+            return {
+                "shot_boundaries_artifact_id": "auto-boundaries",
+                "shot_boundaries_sha256": "a" * 64,
+                "detections_artifact_id": "sampled-detections",
+                "boundary_origin": "AUTO_DETECTED",
+            }
+
+    monkeypatch.setattr(handoff_api, "ShotBoundaryReviewService", FakeBoundaryService)
     user = db.get(User, "user")
     assert user is not None
     response = handoff_api.prepare_event_candidate_recommendations(
@@ -666,6 +853,11 @@ def test_prepare_api_enqueues_scene_ai_task_and_get_returns_prepare_contract(
         "event_id": "event",
         "scene_id": "scene",
         "shortlist_size": 5,
+        "shot_boundaries_artifact_id": "auto-boundaries",
+        "shot_boundaries_sha256": "a" * 64,
+        "detections_artifact_id": "sampled-detections",
+        "boundary_origin": "AUTO_DETECTED",
+        "automatic_target_confirmation": False,
     }
     prepare_route = next(
         route
@@ -755,7 +947,7 @@ def test_prepare_api_enqueues_scene_ai_task_and_get_returns_prepare_contract(
     assert running_error.value.detail["preparation_task"]["status"] == "RUNNING"
 
 
-def test_scene_selection_automatically_enqueues_exact_child_revision_preparation(
+def test_scene_selection_exposes_automatic_discovery_readiness_without_review_gate(
     db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     revision = HighlightRevision(
@@ -793,9 +985,7 @@ def test_scene_selection_automatically_enqueues_exact_child_revision_preparation
 
     executor = FakeExecutor()
     monkeypatch.setattr(handoff_api, "HighlightWorkflowService", FakeWorkflow)
-    monkeypatch.setattr(
-        handoff_api, "get_scene_ai_task_executor", lambda: executor
-    )
+    monkeypatch.setattr(handoff_api, "get_scene_ai_task_executor", lambda: executor)
     user = db.get(User, "user")
     assert user is not None
     returned = handoff_api.select_highlight_scenes_and_prepare(
@@ -806,24 +996,18 @@ def test_scene_selection_automatically_enqueues_exact_child_revision_preparation
     )
     assert returned is revision
     task = db.scalar(
-        select(SceneAITask).where(
-            SceneAITask.task_type == PREPARATION_TASK_TYPE
-        )
+        select(SceneAITask).where(SceneAITask.task_type == PREPARATION_TASK_TYPE)
     )
-    assert task is not None
-    assert task.payload == {
-        "revision_id": "child-revision",
-        "event_id": "event-scene",
-        "scene_id": "event-scene",
-        "shortlist_size": 5,
-    }
-    assert executor.submitted == [task.task_id]
-    assert revision.options["candidate_discovery"][
-        "recommendation_preparation"
-    ][0]["task_id"] == task.task_id
-    assert revision.options["candidate_discovery"][
-        "automatic_target_confirmation"
-    ] is False
+    assert task is None
+    assert executor.submitted == []
+    readiness = revision.options["candidate_discovery"]["shot_boundary_readiness"][0]
+    assert readiness["status"] == "READY_FOR_AUTOMATIC_CANDIDATE_DISCOVERY"
+    assert readiness["boundary_origin"] == "AUTO_DETECTED"
+    assert readiness["human_reviewed"] is False
+    assert (
+        revision.options["candidate_discovery"]["automatic_target_confirmation"]
+        is False
+    )
 
 
 def test_selection_uses_revision_canonical_video_instead_of_stale_match_video(

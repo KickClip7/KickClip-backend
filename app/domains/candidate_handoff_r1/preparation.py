@@ -15,11 +15,11 @@ from app.domains.auth.model import User
 from app.domains.highlight.event_candidate_ranking_v1_1.contract import (
     ImmutableCandidateInput,
 )
-from app.domains.highlight.event_candidate_ranking_v1_2.backend_adapter import (
-    EventCandidateRankingV12BackendAdapter,
-)
 from app.domains.highlight.event_candidate_ranking_v1_1_2a.backend_adapter import (
     EventCandidateRankingV112aBackendAdapter,
+)
+from app.domains.highlight.event_candidate_ranking_v1_2.backend_adapter import (
+    EventCandidateRankingV12BackendAdapter,
 )
 from app.domains.highlight.model import HighlightRevision, SceneAITask
 from app.domains.highlight.scene_target_selection import (
@@ -38,6 +38,7 @@ from .candidate_grouping import (
     build_candidate_grouping,
 )
 from .errors import CandidatePreparationError
+from .media_cache import SharedFrameCache
 from .review_bundle import (
     MEDIA_MATERIALIZATION_POLICY,
     build_candidate_review_bundle,
@@ -51,12 +52,11 @@ from .service import (
     GROUPING_ARTIFACT_TYPE,
     public_candidate_id,
 )
-from .media_cache import SharedFrameCache
 from .work_metrics import CandidatePreparationWorkMetrics
-
 
 SOURCE_ARTIFACT_TYPE = "EVENT_CANDIDATE_RANKING_V1_1_2A_SHADOW"
 REVIEWED_SHOTS_ARTIFACT_TYPE = "REVIEWED_SHOT_BOUNDARIES"
+AUTO_SHOTS_ARTIFACT_TYPE = "AUTO_SHOT_BOUNDARIES"
 PREPARATION_TASK_TYPE = "EVENT_CANDIDATE_RECOMMENDATION_PREPARE_R1C"
 USABLE_RANKING_STATES = {
     "AVAILABLE",
@@ -75,9 +75,7 @@ USABLE_REVIEW_STATES = {
 _integration_installed = False
 
 
-class _CandidatePipelineSceneTargetSelectionService(
-    SceneTargetSelectionService
-):
+class _CandidatePipelineSceneTargetSelectionService(SceneTargetSelectionService):
     """Use a Windows-safe immutable root for generated candidate media."""
 
     def _output_root(
@@ -194,6 +192,7 @@ class EventCandidateRecommendationPreparationService:
         revision_id: str,
         event_id: str,
         scene_id: str,
+        reviewed_shot_boundaries_sha256: str | None = None,
     ) -> bool:
         expected = {
             "revision_id": revision_id,
@@ -203,6 +202,16 @@ class EventCandidateRecommendationPreparationService:
         return any(
             row.match_id == project.match_id
             and self._metadata_matches(row, expected)
+            and (
+                reviewed_shot_boundaries_sha256 is None
+                or str(
+                    ((row.metadata_ or {}).get("freeze_material") or {}).get(
+                        "shot_boundaries_sha256"
+                    )
+                    or ""
+                )
+                == reviewed_shot_boundaries_sha256
+            )
             for row in self.db.scalars(
                 select(Artifact).where(
                     Artifact.project_id == project.project_id,
@@ -227,7 +236,7 @@ class EventCandidateRecommendationPreparationService:
             self._windows_access_path(destination),
         )
 
-    def _materialize_reviewed_inputs(
+    def _materialize_candidate_inputs(
         self,
         *,
         project: Project,
@@ -235,11 +244,12 @@ class EventCandidateRecommendationPreparationService:
         event: TimelineEvent,
         scene_id: str,
     ) -> tuple[MediaAsset, Artifact, Artifact]:
-        """Copy content-addressed, human-reviewed inputs into this revision.
+        """Resolve exact automatic-or-reviewed candidate discovery inputs.
 
-        A donor is accepted only for the same Match, TimelineEvent, source
-        Action Spotting job, raw MediaAsset, scene interval and scene-video
-        digest.  Ranking and discovery outputs are deliberately not copied.
+        Fresh revisions consume their materialized automatic artifact directly.
+        The donor/recovery branch below is retained only for R12-R14 reviewed
+        bundles and still requires the same Match, event, source asset, scene
+        interval and scene-video digest.
         """
         existing = (revision.options or {}).get("candidate_pipeline_inputs") or {}
         if existing.get("scene_id") == scene_id:
@@ -247,14 +257,25 @@ class EventCandidateRecommendationPreparationService:
                 MediaAsset, str(existing.get("scene_video_asset_id") or "")
             )
             reviewed = self.db.get(
-                Artifact, str(existing.get("reviewed_shots_artifact_id") or "")
+                Artifact,
+                str(
+                    existing.get("shot_boundaries_artifact_id")
+                    or existing.get("reviewed_shots_artifact_id")
+                    or ""
+                ),
             )
             detections = self.db.get(
                 Artifact, str(existing.get("detections_artifact_id") or "")
             )
-            if scene_video is not None and reviewed is not None and detections is not None:
+            if (
+                scene_video is not None
+                and reviewed is not None
+                and detections is not None
+                and reviewed.artifact_type
+                in {AUTO_SHOTS_ARTIFACT_TYPE, REVIEWED_SHOTS_ARTIFACT_TYPE}
+            ):
                 self._verified_artifact_path(
-                    reviewed, code="REVIEWED_SHOT_BOUNDARIES_NOT_READY"
+                    reviewed, code="SHOT_BOUNDARY_DISCOVERY_INPUT_NOT_READY"
                 )
                 self._verified_artifact_path(
                     detections, code="INPUT_PROVENANCE_MISMATCH"
@@ -314,7 +335,8 @@ class EventCandidateRecommendationPreparationService:
         if (
             not source_path.is_file()
             or not source_asset.sha256
-            or sha256_file(self._windows_access_path(source_path)) != source_asset.sha256
+            or sha256_file(self._windows_access_path(source_path))
+            != source_asset.sha256
         ):
             raise CandidatePreparationError(
                 "SOURCE_VIDEO_NOT_READY",
@@ -336,10 +358,10 @@ class EventCandidateRecommendationPreparationService:
         donors: list[tuple[Artifact, MediaAsset, Artifact]] = []
         for reviewed_candidate in reviewed_rows:
             metadata = reviewed_candidate.metadata_ or {}
-            if (
-                metadata.get("scene_id") != scene_id
-                or metadata.get("event_id") not in {None, event.timeline_event_id}
-            ):
+            if metadata.get("scene_id") != scene_id or metadata.get("event_id") not in {
+                None,
+                event.timeline_event_id,
+            }:
                 continue
             donor_revision = self.db.get(
                 HighlightRevision, str(metadata.get("revision_id") or "")
@@ -372,9 +394,7 @@ class EventCandidateRecommendationPreparationService:
                 <= 1e-6
             ):
                 scene_asset_id = candidate_inputs.get("scene_video_asset_id")
-                detections_artifact_id = candidate_inputs.get(
-                    "detections_artifact_id"
-                )
+                detections_artifact_id = candidate_inputs.get("detections_artifact_id")
             elif (
                 representative_goal.get("event_id") == event.timeline_event_id
                 and representative_goal.get("source_job_id")
@@ -409,9 +429,7 @@ class EventCandidateRecommendationPreparationService:
                 or (detection_artifact.metadata_ or {}).get("scene_id") != scene_id
             ):
                 continue
-            donors.append(
-                (reviewed_candidate, scene_asset, detection_artifact)
-            )
+            donors.append((reviewed_candidate, scene_asset, detection_artifact))
 
         donor_reviewed: Artifact | None = None
         donor_detections: Artifact | None = None
@@ -452,9 +470,7 @@ class EventCandidateRecommendationPreparationService:
                     "Frozen detection file is missing or its SHA-256 changed.",
                 )
             video_sha = (
-                sha256_file(donor_video_path)
-                if donor_video_path.is_file()
-                else ""
+                sha256_file(donor_video_path) if donor_video_path.is_file() else ""
             )
             boundaries = self._load_json(reviewed_path)
             if (
@@ -493,15 +509,9 @@ class EventCandidateRecommendationPreparationService:
                 )
             except ReviewedInputRecoveryError as exc:
                 raise CandidatePreparationError(exc.code, str(exc)) from exc
-            donor_video_path = self._windows_access_path(
-                recovered.scene_video_path
-            )
-            reviewed_path = self._windows_access_path(
-                recovered.reviewed_shots_path
-            )
-            detections_path = self._windows_access_path(
-                recovered.detections_path
-            )
+            donor_video_path = self._windows_access_path(recovered.scene_video_path)
+            reviewed_path = self._windows_access_path(recovered.reviewed_shots_path)
+            detections_path = self._windows_access_path(recovered.detections_path)
             video_sha = recovered.scene_video_sha256
             duration_sec = recovered.duration_sec
             scene_fps = recovered.fps
@@ -568,9 +578,9 @@ class EventCandidateRecommendationPreparationService:
             **recovery_metadata,
         }
         if materialized_from_artifact_id:
-            reviewed_artifact_metadata[
-                "materialized_from_artifact_id"
-            ] = materialized_from_artifact_id
+            reviewed_artifact_metadata["materialized_from_artifact_id"] = (
+                materialized_from_artifact_id
+            )
         reviewed = self.artifacts.create(
             match_id=project.match_id,
             project_id=project.project_id,
@@ -590,15 +600,13 @@ class EventCandidateRecommendationPreparationService:
             "action_spotting_source_video_sha256": source_asset.sha256,
             "event_source_start_sec": float(event.start_sec),
             "event_source_end_sec": float(event.end_sec),
-            "detections_sha256": sha256_file(
-                self._windows_access_path(frozen_path)
-            ),
+            "detections_sha256": sha256_file(self._windows_access_path(frozen_path)),
             **recovery_metadata,
         }
         if materialized_from_detections_artifact_id:
-            detection_artifact_metadata[
-                "materialized_from_artifact_id"
-            ] = materialized_from_detections_artifact_id
+            detection_artifact_metadata["materialized_from_artifact_id"] = (
+                materialized_from_detections_artifact_id
+            )
         detections = self.artifacts.create(
             match_id=project.match_id,
             project_id=project.project_id,
@@ -615,6 +623,10 @@ class EventCandidateRecommendationPreparationService:
                 "scene_id": scene_id,
                 "scene_video_asset_id": scene_video.asset_id,
                 "reviewed_shots_artifact_id": reviewed.artifact_id,
+                "shot_boundaries_artifact_id": reviewed.artifact_id,
+                "shot_boundaries_sha256": reviewed_artifact_metadata["sha256"],
+                "boundary_origin": "HUMAN_REVIEWED",
+                "human_reviewed": True,
                 "detections_artifact_id": detections.artifact_id,
                 "source_video_sha256": video_sha,
                 "action_spotting_source_video_sha256": source_asset.sha256,
@@ -645,37 +657,49 @@ class EventCandidateRecommendationPreparationService:
         scene_id: str,
         shortlist_size: int,
     ) -> None:
+        revision = self.db.get(HighlightRevision, revision_id)
+        mapping = (
+            (revision.options or {}).get("candidate_pipeline_inputs") or {}
+            if revision is not None
+            else {}
+        )
+        reviewed = self.db.get(
+            Artifact,
+            str(
+                mapping.get("shot_boundaries_artifact_id")
+                or mapping.get("reviewed_shots_artifact_id")
+                or ""
+            ),
+        )
+        reviewed_sha = (
+            str((reviewed.metadata_ or {}).get("sha256") or "")
+            if reviewed is not None
+            else ""
+        )
         if self._has_source(
             project=project,
             revision_id=revision_id,
             event_id=event_id,
             scene_id=scene_id,
+            reviewed_shot_boundaries_sha256=reviewed_sha or None,
         ):
-            revision = self.db.get(HighlightRevision, revision_id)
             event = self.db.get(TimelineEvent, event_id)
-            mapping = (
-                (revision.options or {}).get("candidate_pipeline_inputs") or {}
-                if revision is not None
-                else {}
-            )
             if (
                 revision is not None
                 and event is not None
                 and (
                     mapping.get("source_start_frame") is None
-                    or mapping.get("candidate_source_to_video_frame_offset")
-                    is None
+                    or mapping.get("candidate_source_to_video_frame_offset") is None
                 )
                 and mapping.get("scene_id") == scene_id
             ):
-                self._materialize_reviewed_inputs(
+                self._materialize_candidate_inputs(
                     project=project,
                     revision=revision,
                     event=event,
                     scene_id=scene_id,
                 )
             return
-        revision = self.db.get(HighlightRevision, revision_id)
         event = self.db.get(TimelineEvent, event_id)
         if (
             revision is None
@@ -690,8 +714,13 @@ class EventCandidateRecommendationPreparationService:
                 "The selected revision, event, scene and Action Spotting source do not match.",
             )
         discovery = (revision.options or {}).get("scene_target_selection") or {}
-        if discovery.get("scene_id") != scene_id or not discovery.get("discovery_id"):
-            scene_video, reviewed, detections = self._materialize_reviewed_inputs(
+        if (
+            discovery.get("scene_id") != scene_id
+            or not discovery.get("discovery_id")
+            or (discovery.get("discovery_inputs") or {}).get("shot_boundaries_sha256")
+            != reviewed_sha
+        ):
+            scene_video, reviewed, detections = self._materialize_candidate_inputs(
                 project=project,
                 revision=revision,
                 event=event,
@@ -856,17 +885,20 @@ class EventCandidateRecommendationPreparationService:
         self.db.commit()
         return True
 
-    def _latest_reviewed_shots(
+    def _latest_shot_boundaries(
         self,
         *,
         project: Project,
         revision_id: str,
         scene_id: str,
+        expected_artifact_id: str | None = None,
     ) -> tuple[Artifact, Path]:
         rows = self.db.scalars(
             select(Artifact).where(
                 Artifact.project_id == project.project_id,
-                Artifact.artifact_type == REVIEWED_SHOTS_ARTIFACT_TYPE,
+                Artifact.artifact_type.in_(
+                    {AUTO_SHOTS_ARTIFACT_TYPE, REVIEWED_SHOTS_ARTIFACT_TYPE}
+                ),
             )
         ).all()
         expected = {"revision_id": revision_id, "scene_id": scene_id}
@@ -874,22 +906,59 @@ class EventCandidateRecommendationPreparationService:
         for row in rows:
             metadata = row.metadata_ or {}
             state = str(metadata.get("review_state") or metadata.get("status") or "")
+            usable_state = (
+                row.artifact_type == AUTO_SHOTS_ARTIFACT_TYPE
+                and state == "STRUCTURALLY_VALID"
+                and metadata.get("boundary_origin") == "AUTO_DETECTED"
+                and metadata.get("human_reviewed") is False
+                and metadata.get("automatic_target_confirmation") is False
+            ) or (
+                row.artifact_type == REVIEWED_SHOTS_ARTIFACT_TYPE
+                and state in USABLE_REVIEW_STATES
+            )
             if (
                 row.match_id == project.match_id
                 and self._metadata_matches(row, expected)
-                and state in USABLE_REVIEW_STATES
+                and usable_state
+                and (
+                    expected_artifact_id is None
+                    or row.artifact_id == expected_artifact_id
+                )
             ):
                 matches.append(row)
         if not matches:
             raise CandidatePreparationError(
-                "REVIEWED_SHOT_BOUNDARIES_NOT_READY",
-                "Reviewed shot boundaries for this revision and scene are not ready.",
+                "SHOT_BOUNDARY_DISCOVERY_INPUT_NOT_READY",
+                "Structurally valid shot boundaries for this revision and scene are not ready.",
             )
         matches.sort(key=lambda row: row.created_at, reverse=True)
         shots = matches[0]
         return shots, self._verified_artifact_path(
-            shots, code="REVIEWED_SHOT_BOUNDARIES_NOT_READY"
+            shots, code="SHOT_BOUNDARY_DISCOVERY_INPUT_NOT_READY"
         )
+
+    def _latest_reviewed_shots(
+        self,
+        *,
+        project: Project,
+        revision_id: str,
+        scene_id: str,
+        expected_artifact_id: str | None = None,
+    ) -> tuple[Artifact, Path]:
+        """Compatibility alias for R12-R14 callers and tests."""
+        try:
+            return self._latest_shot_boundaries(
+                project=project,
+                revision_id=revision_id,
+                scene_id=scene_id,
+                expected_artifact_id=expected_artifact_id,
+            )
+        except CandidatePreparationError as exc:
+            if exc.code != "SHOT_BOUNDARY_DISCOVERY_INPUT_NOT_READY":
+                raise
+            raise CandidatePreparationError(
+                "REVIEWED_SHOT_BOUNDARIES_NOT_READY", str(exc)
+            ) from exc
 
     def _freeze_material(self, source: Artifact) -> dict[str, Any]:
         direct = (source.metadata_ or {}).get("freeze_material")
@@ -1188,7 +1257,34 @@ class EventCandidateRecommendationPreparationService:
         event_id: str,
         scene_id: str,
         shortlist_size: int,
+        shot_boundaries_artifact_id: str | None = None,
+        shot_boundaries_sha256: str | None = None,
+        detections_artifact_id: str | None = None,
     ) -> dict[str, Any]:
+        revision = self.db.get(HighlightRevision, revision_id)
+        mapping = (
+            (revision.options or {}).get("candidate_pipeline_inputs") or {}
+            if revision is not None
+            else {}
+        )
+        if shot_boundaries_artifact_id is not None and (
+            (
+                mapping.get("shot_boundaries_artifact_id")
+                or mapping.get("reviewed_shots_artifact_id")
+            )
+            != shot_boundaries_artifact_id
+        ):
+            raise CandidatePreparationError(
+                "INPUT_PROVENANCE_MISMATCH",
+                "The candidate shot-boundary artifact changed after task creation.",
+            )
+        if detections_artifact_id is not None and (
+            mapping.get("detections_artifact_id") != detections_artifact_id
+        ):
+            raise CandidatePreparationError(
+                "INPUT_PROVENANCE_MISMATCH",
+                "The sampled detection artifact changed after task creation.",
+            )
         self._ensure_upstream(
             project=project,
             user=user,
@@ -1203,18 +1299,30 @@ class EventCandidateRecommendationPreparationService:
             event_id=event_id,
             scene_id=scene_id,
         )
-        reviewed, reviewed_path = self._latest_reviewed_shots(
+        reviewed, reviewed_path = self._latest_shot_boundaries(
             project=project,
             revision_id=revision_id,
             scene_id=scene_id,
+            expected_artifact_id=shot_boundaries_artifact_id,
         )
         immutable, material = self._immutable_input(source)
         reviewed_sha = sha256_file(reviewed_path)
+        shot_boundary_artifact_type = reviewed.artifact_type
+        human_reviewed = shot_boundary_artifact_type == REVIEWED_SHOTS_ARTIFACT_TYPE
+        boundary_origin = "HUMAN_REVIEWED" if human_reviewed else "AUTO_DETECTED"
+        if (
+            shot_boundaries_sha256 is not None
+            and reviewed_sha != shot_boundaries_sha256
+        ):
+            raise CandidatePreparationError(
+                "INPUT_PROVENANCE_MISMATCH",
+                "The candidate shot-boundary SHA-256 changed after task creation.",
+            )
         ranking_artifact = EventCandidateRankingV12BackendAdapter(self.db).run(
             project=project,
             user=user,
             source_ranking_artifact_id=source.artifact_id,
-            reviewed_shots_artifact_id=reviewed.artifact_id,
+            shot_boundaries_artifact_id=reviewed.artifact_id,
             shortlist_size=shortlist_size,
         )
         ranking_metadata = ranking_artifact.metadata_ or {}
@@ -1263,8 +1371,7 @@ class EventCandidateRecommendationPreparationService:
         work_metrics = CandidatePreparationWorkMetrics()
 
         shared_frame_cache = SharedFrameCache(
-            self.storage.storage_root
-            / "shared_frame_cache_r1"
+            self.storage.storage_root / "shared_frame_cache_r1"
         )
 
         shortlist_rows = list(ranking.get("shortlist") or [])
@@ -1293,9 +1400,7 @@ class EventCandidateRecommendationPreparationService:
             shortlist_rows,
             start=1,
         ):
-            source_candidate_id = str(
-                shortlist_row.get("candidate_id") or ""
-            )
+            source_candidate_id = str(shortlist_row.get("candidate_id") or "")
             raw = source_candidates.get(source_candidate_id)
             if raw is None:
                 raise CandidatePreparationError(
@@ -1363,13 +1468,13 @@ class EventCandidateRecommendationPreparationService:
             "revision_id": revision_id,
             "event_id": event_id,
             "scene_id": scene_id,
-            "candidate_manifest_sha256": (
-                immutable.candidate_manifest_sha256
-            ),
-            "reviewed_shot_boundaries_sha256": reviewed_sha,
-            "media_materialization_policy": (
-                MEDIA_MATERIALIZATION_POLICY
-            ),
+            "candidate_manifest_sha256": (immutable.candidate_manifest_sha256),
+            "shot_boundaries_artifact_id": reviewed.artifact_id,
+            "shot_boundaries_sha256": reviewed_sha,
+            "shot_boundary_artifact_type": shot_boundary_artifact_type,
+            "boundary_origin": boundary_origin,
+            "human_reviewed": human_reviewed,
+            "media_materialization_policy": (MEDIA_MATERIALIZATION_POLICY),
         }
         grouping_fingerprint = canonical_sha256(grouping_document)
         grouping_root = (
@@ -1403,13 +1508,14 @@ class EventCandidateRecommendationPreparationService:
             "event_id": event_id,
             "scene_id": scene_id,
             "shortlist_patch_id": patch_id,
-            "candidate_grouping_policy": (
-                CANDIDATE_GROUPING_POLICY_VERSION
-            ),
+            "candidate_grouping_policy": (CANDIDATE_GROUPING_POLICY_VERSION),
             "source_video_sha256": immutable.source_video_sha256,
-            "candidate_manifest_sha256": (
-                immutable.candidate_manifest_sha256
-            ),
+            "candidate_manifest_sha256": (immutable.candidate_manifest_sha256),
+            "shot_boundaries_artifact_id": reviewed.artifact_id,
+            "shot_boundaries_sha256": reviewed_sha,
+            "shot_boundary_artifact_type": shot_boundary_artifact_type,
+            "boundary_origin": boundary_origin,
+            "human_reviewed": human_reviewed,
             "sha256": grouping_sha256,
         }
         grouping_rows = self.db.scalars(
@@ -1455,21 +1561,13 @@ class EventCandidateRecommendationPreparationService:
                 },
             )
             self.db.commit()
-            work_metrics.increment(
-                "candidate_grouping_artifact_records_created"
-            )
+            work_metrics.increment("candidate_grouping_artifact_records_created")
         else:
-            work_metrics.increment(
-                "candidate_grouping_artifact_cache_hits"
-            )
+            work_metrics.increment("candidate_grouping_artifact_cache_hits")
 
         for group in grouping_document["groups"]:
-            representative_candidate_id = str(
-                group["representative_candidate_id"]
-            )
-            prepared = prepared_by_candidate_id.get(
-                representative_candidate_id
-            )
+            representative_candidate_id = str(group["representative_candidate_id"])
+            prepared = prepared_by_candidate_id.get(representative_candidate_id)
             if prepared is None:
                 raise CandidatePreparationError(
                     "INPUT_PROVENANCE_MISMATCH",
@@ -1477,41 +1575,27 @@ class EventCandidateRecommendationPreparationService:
                 )
 
             member_candidate_ids = [
-                str(value)
-                for value in group["member_candidate_ids"]
+                str(value) for value in group["member_candidate_ids"]
             ]
             member_source_candidate_ids = [
-                str(value)
-                for value in group[
-                    "member_source_candidate_ids"
-                ]
+                str(value) for value in group["member_source_candidate_ids"]
             ]
             group_member_fingerprint = canonical_sha256(
                 {
-                    "candidate_grouping_policy": (
-                        CANDIDATE_GROUPING_POLICY_VERSION
-                    ),
+                    "candidate_grouping_policy": (CANDIDATE_GROUPING_POLICY_VERSION),
                     "member_candidate_ids": member_candidate_ids,
                 }
             )
             candidate = {
                 **prepared["candidate"],
-                "candidate_grouping_policy": (
-                    CANDIDATE_GROUPING_POLICY_VERSION
-                ),
+                "candidate_grouping_policy": (CANDIDATE_GROUPING_POLICY_VERSION),
                 "candidate_grouping_sha256": grouping_sha256,
                 "candidate_group_id": group["candidate_group_id"],
                 "group_member_candidate_ids": member_candidate_ids,
-                "group_member_source_candidate_ids": (
-                    member_source_candidate_ids
-                ),
+                "group_member_source_candidate_ids": (member_source_candidate_ids),
                 "group_member_fingerprint": group_member_fingerprint,
-                "grouping_reason_codes": list(
-                    group.get("grouping_reason_codes") or []
-                ),
-                "grouping_evidence": list(
-                    group.get("evidence") or []
-                ),
+                "grouping_reason_codes": list(group.get("grouping_reason_codes") or []),
+                "grouping_evidence": list(group.get("evidence") or []),
                 "possible_fragment_duplicate": bool(
                     group.get("possible_fragment_duplicate", False)
                 ),
@@ -1521,16 +1605,14 @@ class EventCandidateRecommendationPreparationService:
                 "shortlist_patch_id": patch_id,
                 "candidate_id": representative_candidate_id,
                 "source_video_sha256": immutable.source_video_sha256,
-                "candidate_manifest_sha256": (
-                    immutable.candidate_manifest_sha256
-                ),
-                "reviewed_shot_boundaries_sha256": reviewed_sha,
-                "media_materialization_policy": (
-                    MEDIA_MATERIALIZATION_POLICY
-                ),
-                "candidate_grouping_policy": (
-                    CANDIDATE_GROUPING_POLICY_VERSION
-                ),
+                "candidate_manifest_sha256": (immutable.candidate_manifest_sha256),
+                "shot_boundaries_artifact_id": reviewed.artifact_id,
+                "shot_boundaries_sha256": reviewed_sha,
+                "shot_boundary_artifact_type": shot_boundary_artifact_type,
+                "boundary_origin": boundary_origin,
+                "human_reviewed": human_reviewed,
+                "media_materialization_policy": (MEDIA_MATERIALIZATION_POLICY),
+                "candidate_grouping_policy": (CANDIDATE_GROUPING_POLICY_VERSION),
                 "candidate_grouping_sha256": grouping_sha256,
                 "candidate_group_id": str(group["candidate_group_id"]),
                 "group_member_fingerprint": group_member_fingerprint,
@@ -1540,9 +1622,7 @@ class EventCandidateRecommendationPreparationService:
                 contract=contract,
             )
             if existing is not None:
-                work_metrics.increment(
-                    "review_bundle_cache_hits"
-                )
+                work_metrics.increment("review_bundle_cache_hits")
                 bundle_count += 1
                 continue
             bundle_key = canonical_sha256(contract)
@@ -1559,27 +1639,18 @@ class EventCandidateRecommendationPreparationService:
                     "Candidate review bundle path escapes immutable storage.",
                 )
             if output_root.exists():
-                work_metrics.increment(
-                    "review_bundle_directory_reuse_count"
-                )
-                with work_metrics.stage(
-                    "review_bundle_integrity_verification"
-                ):
-                    manifest, manifest_sha = (
-                        self._verify_bundle_directory(
-                            output_root,
-                            contract=contract,
-                        )
+                work_metrics.increment("review_bundle_directory_reuse_count")
+                with work_metrics.stage("review_bundle_integrity_verification"):
+                    manifest, manifest_sha = self._verify_bundle_directory(
+                        output_root,
+                        contract=contract,
                     )
             else:
                 staging_root = (
-                    output_root.parent
-                    / f".tmp_{generate_prefixed_id('bld')}"
+                    output_root.parent / f".tmp_{generate_prefixed_id('bld')}"
                 ).resolve()
                 try:
-                    with work_metrics.stage(
-                        "review_bundle_build"
-                    ):
+                    with work_metrics.stage("review_bundle_build"):
                         build_candidate_review_bundle(
                             video_path=immutable.source_video_path,
                             candidate=candidate,
@@ -1589,32 +1660,26 @@ class EventCandidateRecommendationPreparationService:
                             candidate_manifest_sha256=(
                                 immutable.candidate_manifest_sha256
                             ),
-                            source_video_sha256=(
-                                immutable.source_video_sha256
-                            ),
-                            reviewed_shot_boundaries_sha256=(
-                                reviewed_sha
-                            ),
+                            source_video_sha256=(immutable.source_video_sha256),
+                            shot_boundaries_artifact_id=reviewed.artifact_id,
+                            shot_boundaries_sha256=reviewed_sha,
+                            shot_boundary_artifact_type=(shot_boundary_artifact_type),
+                            boundary_origin=boundary_origin,
+                            human_reviewed=human_reviewed,
                             frame_offset=frame_offset,
                             shared_frame_cache=shared_frame_cache,
                             metrics=work_metrics,
                         )
-                    with work_metrics.stage(
-                        "review_bundle_integrity_verification"
-                    ):
-                        manifest, manifest_sha = (
-                            self._verify_bundle_directory(
-                                staging_root,
-                                contract=contract,
-                            )
+                    with work_metrics.stage("review_bundle_integrity_verification"):
+                        manifest, manifest_sha = self._verify_bundle_directory(
+                            staging_root,
+                            contract=contract,
                         )
                     staging_root.rename(output_root)
                 except Exception:
                     if staging_root.exists():
                         shutil.rmtree(
-                            self._windows_access_path(
-                                staging_root
-                            ),
+                            self._windows_access_path(staging_root),
                             ignore_errors=True,
                         )
                     raise
@@ -1635,13 +1700,9 @@ class EventCandidateRecommendationPreparationService:
                     "scene_id": scene_id,
                     "shot_id": candidate["shot_id"],
                     "tracklet_id": candidate["tracklet_id"],
-                    "source_candidate_id": candidate[
-                        "source_candidate_id"
-                    ],
+                    "source_candidate_id": candidate["source_candidate_id"],
                     "group_member_candidate_ids": member_candidate_ids,
-                    "group_member_source_candidate_ids": (
-                        member_source_candidate_ids
-                    ),
+                    "group_member_source_candidate_ids": (member_source_candidate_ids),
                     "possible_fragment_duplicate": bool(
                         group.get("possible_fragment_duplicate", False)
                     ),
@@ -1652,17 +1713,11 @@ class EventCandidateRecommendationPreparationService:
                 },
             )
             self.db.commit()
-            work_metrics.increment(
-                "review_bundle_artifact_records_created"
-            )
+            work_metrics.increment("review_bundle_artifact_records_created")
             bundle_count += 1
 
-        source_candidate_count = int(
-            grouping_document["source_candidate_count"]
-        )
-        candidate_count = int(
-            grouping_document["display_candidate_count"]
-        )
+        source_candidate_count = int(grouping_document["source_candidate_count"])
+        candidate_count = int(grouping_document["display_candidate_count"])
         if bundle_count != candidate_count:
             raise CandidatePreparationError(
                 "REVIEW_BUNDLES_INCOMPLETE",
@@ -1685,15 +1740,10 @@ class EventCandidateRecommendationPreparationService:
             / f"{scene_id}.json"
         ).resolve()
 
-        if not metrics_path.is_relative_to(
-            self.storage.storage_root
-        ):
+        if not metrics_path.is_relative_to(self.storage.storage_root):
             raise CandidatePreparationError(
                 "INPUT_PROVENANCE_MISMATCH",
-                (
-                    "Candidate preparation metrics path "
-                    "escapes immutable storage."
-                ),
+                ("Candidate preparation metrics path escapes immutable storage."),
             )
 
         metrics_snapshot = work_metrics.snapshot()
@@ -1711,28 +1761,20 @@ class EventCandidateRecommendationPreparationService:
         return {
             "ready": True,
             "ranking_version": "v1.2",
-            "ranking_artifact_id": (
-                ranking_artifact.artifact_id
-            ),
+            "ranking_artifact_id": (ranking_artifact.artifact_id),
             "ranking_id": source_ranking_id,
             "shortlist_patch_id": patch_id,
             "source_candidate_count": source_candidate_count,
             "candidate_count": candidate_count,
             "display_candidate_count": candidate_count,
-            "candidate_grouping_policy": (
-                CANDIDATE_GROUPING_POLICY_VERSION
-            ),
+            "candidate_grouping_policy": (CANDIDATE_GROUPING_POLICY_VERSION),
             "candidate_grouping_path": (
-                grouping_path.relative_to(
-                    self.storage.project_root
-                ).as_posix()
+                grouping_path.relative_to(self.storage.project_root).as_posix()
             ),
             "candidate_grouping_sha256": grouping_sha256,
             "review_bundle_count": bundle_count,
             "work_metrics_path": (
-                metrics_path.relative_to(
-                    self.storage.project_root
-                ).as_posix()
+                metrics_path.relative_to(self.storage.project_root).as_posix()
             ),
             "work_metrics_sha256": metrics_sha256,
             "work_metrics": metrics_snapshot,
@@ -1765,6 +1807,9 @@ def install_candidate_preparation_integration() -> None:
             event_id=payload["event_id"],
             scene_id=payload["scene_id"],
             shortlist_size=int(payload["shortlist_size"]),
+            shot_boundaries_artifact_id=payload.get("shot_boundaries_artifact_id"),
+            shot_boundaries_sha256=payload.get("shot_boundaries_sha256"),
+            detections_artifact_id=payload.get("detections_artifact_id"),
         )
 
     scene_task_module.SceneAITaskExecutor._dispatch = dispatch

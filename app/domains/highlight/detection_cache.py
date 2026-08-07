@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import threading
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ from app.domains.highlight.player_detector import (
 
 
 DETECTION_CACHE_SCHEMA_VERSION = "kickclip.player_detection_cache.r1"
-DETECTION_CACHE_POLICY_VERSION = "VIDEO_FRAME_DETECTOR_CONTRACT_R1"
+DETECTION_CACHE_POLICY_VERSION = "VIDEO_FRAME_DETECTOR_CONTRACT_R2_ROLE_AWARE"
 
 
 @dataclass(frozen=True)
@@ -107,11 +108,16 @@ def _detector_contract(runtime_metadata: dict[str, Any]) -> dict[str, Any]:
         "model_class",
         "checkpoint_sha256",
         "confidence_threshold",
+        "inference_threshold",
+        "output_confidence_threshold",
+        "detector_profile",
         "class_mapping",
         "candidate_class_ids",
+        "output_class_ids",
         "input_color",
         "preprocessing",
         "bbox_semantics",
+        "bbox_bounds_policy",
         "additional_nms",
         "strict_checkpoint_audit",
     )
@@ -219,9 +225,17 @@ class PlayerDetectionCache:
         bbox = payload.get("bbox_xyxy")
         if not isinstance(bbox, list) or len(bbox) != 4:
             raise ValueError("Cached detection bbox_xyxy is invalid.")
+        values = [float(value) for value in bbox]
+        confidence = float(payload["confidence"])
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("Cached detection bbox_xyxy contains non-finite values.")
+        if not math.isfinite(confidence):
+            raise ValueError("Cached detection confidence is non-finite.")
+        if values[2] <= values[0] or values[3] <= values[1]:
+            raise ValueError("Cached detection bbox_xyxy is degenerate.")
         return PlayerDetection(
-            bbox_xyxy=[float(value) for value in bbox],
-            confidence=float(payload["confidence"]),
+            bbox_xyxy=values,
+            confidence=confidence,
             class_id=int(payload["class_id"]),
             class_name=str(payload["class_name"]),
         )

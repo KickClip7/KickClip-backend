@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,19 @@ def audit_shot_contract_v112a(
     candidates: tuple[CandidateSequence, ...],
     frame_count: int,
 ) -> tuple[dict[str, Any], tuple[ShotInterval, ...]]:
+    document = (
+        json.loads(path.read_text(encoding="utf-8"))
+        if path.suffix.lower() == ".json"
+        else {}
+    )
+    automatic = (
+        isinstance(document, dict)
+        and document.get("artifact_type") == "AUTO_SHOT_BOUNDARIES"
+        and document.get("boundary_origin") == "AUTO_DETECTED"
+        and document.get("human_reviewed") is False
+        and document.get("automatic_target_confirmation") is False
+        and (document.get("structural_validation") or {}).get("status") == "PASS"
+    )
     rows = _load_shots(path)
     shots: dict[str, ShotInterval] = {}
     unapproved_shot_ids: list[str] = []
@@ -52,7 +66,13 @@ def audit_shot_contract_v112a(
             )
             or ""
         ).strip().upper()
-        if review_state not in APPROVED_SHOT_REVIEW_STATES:
+        if automatic and int(row.get("shot_index", -1)) != index:
+            raise ValueError("Shot indexes are not contiguous.")
+        if automatic and review_state in APPROVED_SHOT_REVIEW_STATES:
+            raise ValueError(
+                "Automatic shot boundaries must not impersonate review approval."
+            )
+        if not automatic and review_state not in APPROVED_SHOT_REVIEW_STATES:
             unapproved_shot_ids.append(shot_id)
         shots[shot_id] = ShotInterval(shot_id, start, end)
     intervals = sorted(shots.values(), key=lambda item: item.start_frame)
@@ -93,6 +113,10 @@ def audit_shot_contract_v112a(
         {
             "status": "PASS" if passed else "FAIL",
             "approved_review_states": sorted(APPROVED_SHOT_REVIEW_STATES),
+            "boundary_origin": (
+                "AUTO_DETECTED" if automatic else "HUMAN_REVIEWED"
+            ),
+            "human_reviewed": not automatic,
             "shot_count": len(shots),
             "unapproved_review_count": len(unapproved_shot_ids),
             "unapproved_shot_ids": unapproved_shot_ids,
@@ -106,4 +130,3 @@ def audit_shot_contract_v112a(
         },
         tuple(intervals),
     )
-

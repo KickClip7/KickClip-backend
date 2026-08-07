@@ -32,6 +32,10 @@ from app.domains.project.model import Project
 from app.domains.render.model import RenderJob
 from app.domains.timeline.model import TimelineEvent
 from app.domains.tracking.model import TrackingJob
+from app.domains.shot_boundary.model import (
+    ShotBoundaryReviewDecision,
+    ShotBoundaryReviewSession,
+)
 
 __all__ = [
     "AnalysisJob",
@@ -61,6 +65,8 @@ __all__ = [
     "SceneTrackingBinding",
     "SceneTargetSelection",
     "SceneTargetSelectionReference",
+    "ShotBoundaryReviewDecision",
+    "ShotBoundaryReviewSession",
     "EarlierAnchorProposal",
     "EventCandidateRanking",
     "EventCandidateScore",

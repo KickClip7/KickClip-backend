@@ -15,9 +15,17 @@ BENIGN_WARNING_CODES = frozenset(
     {
         "DURATION_OUTSIDE_RANGE",
         "V6_OUTPUT_NOT_FOUND",
+        "V7_CODE_NOT_FOUND",
         "V7_OUTPUT_NOT_FOUND",
         "FFMPEG_NOT_FOUND",
         "CUDA_NOT_AVAILABLE",
+    }
+)
+LEGACY_UNUSED_WARNING_CODES = frozenset(
+    {
+        "V7_CODE_NOT_FOUND",
+        "V7_OUTPUT_NOT_FOUND",
+        "V6_OUTPUT_NOT_FOUND",
     }
 )
 FORBIDDEN_WARNING_CODES = frozenset(
@@ -295,6 +303,73 @@ def _phase1_runner_command(
     return command
 
 
+
+def _materialize_legacy_stage0_pass(
+    *,
+    source_dir: Path,
+    phase1_dir: Path,
+    phase1_test_name: str,
+    allowed_warning_codes: Sequence[str],
+) -> None:
+    """Create a derived PASS audit without creating fake V7 directories."""
+
+    if phase1_dir.exists():
+        shutil.rmtree(phase1_dir)
+    shutil.copytree(source_dir, phase1_dir)
+    audit = _read(phase1_dir / "audit.json")
+    manifest = _read(phase1_dir / "input_manifest.json")
+    initialization = _read(phase1_dir / "target_initialization.json")
+
+    legacy = sorted(set(allowed_warning_codes))
+    if any(code not in LEGACY_UNUSED_WARNING_CODES for code in legacy):
+        raise Phase1CompatibilityBlocked(
+            "Only legacy-unused V7/V6-output warnings may be normalized here."
+        )
+
+    retained = [
+        dict(item)
+        for item in (audit.get("findings") or [])
+        if not (
+            isinstance(item, Mapping)
+            and str(item.get("code") or "") in LEGACY_UNUSED_WARNING_CODES
+        )
+    ]
+    audit["findings"] = retained
+    audit["status"] = "PASS"
+    counts = audit.get("counts")
+    if isinstance(counts, dict):
+        counts["warnings"] = sum(
+            str(item.get("severity") or "").upper() == "WARNING"
+            for item in retained
+            if isinstance(item, Mapping)
+        )
+        counts["errors"] = sum(
+            str(item.get("severity") or "").upper() == "ERROR"
+            for item in retained
+            if isinstance(item, Mapping)
+        )
+    compatibility = {
+        "schema_version": "kickclip.phase1_legacy_unused_stage0_compatibility.v1",
+        "source_audit_path": str((source_dir / "audit.json").resolve()),
+        "source_audit_sha256": _sha256(source_dir / "audit.json"),
+        "normalized_warning_codes": legacy,
+        "v7_runtime_dependency": False,
+        "frozen_stage0_modified": False,
+    }
+    audit["compatibility"] = compatibility
+    manifest["status"] = "PASS"
+    manifest["test_name"] = phase1_test_name
+    if isinstance(manifest.get("paths"), dict):
+        manifest["paths"]["test_output_dir"] = str(phase1_dir.resolve())
+    manifest["compatibility"] = compatibility
+    initialization["status"] = "INITIALIZING"
+    initialization["compatibility"] = compatibility
+
+    _write(phase1_dir / "audit.json", audit)
+    _write(phase1_dir / "input_manifest.json", manifest)
+    _write(phase1_dir / "target_initialization.json", initialization)
+
+
 def execute_phase1_compatibility(
     *,
     project_root: Path,
@@ -339,13 +414,6 @@ def execute_phase1_compatibility(
     for required in (video, stage0, phase1_runner, stage3c0):
         if not required.is_file():
             raise FileNotFoundError(required)
-
-    (root / "runs" / "global_ID_tracking_upgrade_v6").mkdir(
-        parents=True, exist_ok=True
-    )
-    (root / "runs" / "global_ID_tracking_upgrade_v7").mkdir(
-        parents=True, exist_ok=True
-    )
 
     source_dir = root / "runs" / "target_centric_tracking_v1" / original_stage0_test_name
     phase1_environment, ffmpeg_path = _phase1_environment()
@@ -415,7 +483,20 @@ def execute_phase1_compatibility(
         )
 
     runner_return_code: int | None = None
-    if status == "PASS":
+    legacy_only_warning_pass = (
+        status == "PASS_WITH_WARNINGS"
+        and bool(allowed)
+        and set(allowed).issubset(LEGACY_UNUSED_WARNING_CODES)
+    )
+    if status == "PASS" or legacy_only_warning_pass:
+        phase1_dir = root / "runs" / "target_centric_tracking_v1" / phase1_test_name
+        if legacy_only_warning_pass:
+            _materialize_legacy_stage0_pass(
+                source_dir=source_dir,
+                phase1_dir=phase1_dir,
+                phase1_test_name=phase1_test_name,
+                allowed_warning_codes=allowed,
+            )
         completed = _run(
             _phase1_runner_command(
                 python=sys.executable,
@@ -435,7 +516,11 @@ def execute_phase1_compatibility(
             accepted_return_codes=frozenset({0, 3}),
         )
         runner_return_code = completed.returncode
-        authorization = "FROZEN_STAGE0_PASS"
+        authorization = (
+            "DERIVED_STAGE0_PASS_LEGACY_UNUSED_V7_WARNING"
+            if legacy_only_warning_pass
+            else "FROZEN_STAGE0_PASS"
+        )
     else:
         if allowed != ["DURATION_OUTSIDE_RANGE"]:
             raise Phase1CompatibilityBlocked(

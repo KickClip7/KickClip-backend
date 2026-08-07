@@ -18,6 +18,7 @@ from app.api.v1 import (
     renders,
     scene_target_reviewability,
     session,
+    shot_boundaries,
     studio,
     timelines,
     tracking,
@@ -57,6 +58,11 @@ api_router.include_router(
 api_router.include_router(
     scene_target_reviewability.router,
     tags=["scene-target-reviewability"],
+    dependencies=authenticated,
+)
+api_router.include_router(
+    shot_boundaries.router,
+    tags=["shot-boundaries"],
     dependencies=authenticated,
 )
 api_router.include_router(

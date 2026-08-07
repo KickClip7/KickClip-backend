@@ -2,26 +2,32 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import cv2
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.domains.artifact.model import Artifact
 from app.domains.artifact.repository import ArtifactRepository
 from app.domains.auth.model import User
 from app.domains.candidate_handoff_r1 import ANCHOR_MODE, RANKING_VERSION
-from app.core.config import get_settings
-from app.domains.media.model import MediaAsset
 from app.domains.highlight.model import HighlightRevision
+from app.domains.media.model import MediaAsset
 from app.domains.project.model import Project
+from app.domains.tracking.execution import (
+    R1_EXECUTION_KIND,
+    R1PipelineStage,
+    R1ProcessingStatus,
+)
 from app.domains.tracking.model import TrackingJob
-from app.domains.tracking.execution import R1_EXECUTION_KIND, R1PipelineStage, R1ProcessingStatus
-from app.domains.tracking.status import TERMINAL_STATUSES, TrackingBackendStatus
 from app.domains.tracking.r1_executor import get_r1_tracking_executor
+from app.domains.tracking.status import TERMINAL_STATUSES, TrackingBackendStatus
 from app.storage.local_storage import LocalStorage
 from app.utils.id_generator import generate_prefixed_id
 
@@ -38,6 +44,9 @@ from .candidate_grouping import (
 from .errors import (
     CandidateRecommendationNotPrepared,
     CandidateSelectionProvenanceMismatch,
+    CandidateTrackingConfigurationInvalid,
+    CandidateTrackingInputInvalid,
+    CandidateTrackingRuntimeContractInvalid,
     InsufficientReviewableTargetReference,
     TrackletIdentityInconsistent,
 )
@@ -54,7 +63,7 @@ from .model import (
     EventCandidateSelectionR1,
 )
 from .orchestrator import R1PipelineOrchestrator, recover_r1_pipelines
-from .r3_adapter import R1R3InputAdapter
+from .r3_adapter import R1R3AdapterError, R1R3InputAdapter
 from .schema import (
     CandidateMediaRead,
     CandidateReviewDecisionRequest,
@@ -65,15 +74,38 @@ from .schema import (
     EventCandidateTrackingCreateResponse,
 )
 
-
-RANKING_ARTIFACT_TYPE = (
-    "EVENT_CANDIDATE_RANKING_V1_2_SHADOW_SHORTLIST_PATCH"
-)
+RANKING_ARTIFACT_TYPE = "EVENT_CANDIDATE_RANKING_V1_2_SHADOW_SHORTLIST_PATCH"
 BUNDLE_ARTIFACT_TYPE = "EVENT_CANDIDATE_REVIEW_BUNDLE_R1_MANIFEST"
 GROUPING_ARTIFACT_TYPE = "EVENT_CANDIDATE_GROUPING_R1"
 SELECTION_ARTIFACT_TYPE = "EVENT_CANDIDATE_SELECTION_R1"
 PROVENANCE_ARTIFACT_TYPE = "CANDIDATE_SELECTION_INTEGRATION_PROVENANCE_R1"
 PUBLIC_ID_PATTERN = re.compile(r"(shot_\d{4}_track_\d{4})$")
+AUTO_SHOT_BOUNDARIES = "AUTO_SHOT_BOUNDARIES"
+REVIEWED_SHOT_BOUNDARIES = "REVIEWED_SHOT_BOUNDARIES"
+SUPPORTED_TRACKING_BOUNDARY_ARTIFACT_TYPES = {
+    AUTO_SHOT_BOUNDARIES,
+    REVIEWED_SHOT_BOUNDARIES,
+}
+
+
+@dataclass(frozen=True)
+class ShotBoundaryProvenance:
+    artifact: Artifact
+    path: Path
+    sha256: str
+    artifact_type: str
+    boundary_origin: str
+    human_reviewed: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "artifact_id": self.artifact.artifact_id,
+            "artifact_type": self.artifact_type,
+            "sha256": self.sha256,
+            "boundary_origin": self.boundary_origin,
+            "human_reviewed": self.human_reviewed,
+            "automatic_target_confirmation": False,
+        }
 
 
 def public_candidate_id(candidate_id: str) -> str:
@@ -105,6 +137,263 @@ class CandidateHandoffR1Service:
         if len(expected) != 64 or sha256_file(path) != expected:
             raise ValueError(f"Artifact SHA-256 mismatch: {artifact.artifact_id}")
         return path
+
+    def _tracking_output_root(self, configured_path: str) -> Path:
+        if not configured_path.strip():
+            raise CandidateTrackingConfigurationInvalid(
+                "TRACKING_OUTPUT_ROOT_MISSING",
+                "TRACKING_OUTPUT_ROOT is required for the R1 runtime.",
+            )
+        raw_path = Path(configured_path).expanduser()
+        if not raw_path.is_absolute():
+            raise CandidateTrackingConfigurationInvalid(
+                "TRACKING_OUTPUT_ROOT_NOT_ABSOLUTE",
+                "TRACKING_OUTPUT_ROOT must be absolute.",
+            )
+        output_root = raw_path.resolve()
+        if not output_root.is_relative_to(self.storage.storage_root):
+            raise CandidateTrackingConfigurationInvalid(
+                "TRACKING_OUTPUT_ROOT_OUTSIDE_STORAGE",
+                "TRACKING_OUTPUT_ROOT must be inside STORAGE_ROOT so immutable "
+                "R1 artifacts remain addressable by the backend.",
+            )
+        return output_root
+
+    @staticmethod
+    def _validate_boundary_rows(
+        document: Mapping[str, Any],
+        *,
+        human_reviewed: bool,
+    ) -> None:
+        video = document.get("video") or {}
+        if not isinstance(video, Mapping):
+            raise CandidateSelectionProvenanceMismatch(
+                "Shot-boundary video provenance is invalid."
+            )
+        try:
+            frame_count = int(
+                video.get("frame_count") or document.get("frame_count") or 0
+            )
+        except (TypeError, ValueError) as exc:
+            raise CandidateSelectionProvenanceMismatch(
+                "Shot-boundary frame count is invalid."
+            ) from exc
+        rows = document.get("shots")
+        if frame_count <= 0 or not isinstance(rows, list) or not rows:
+            raise CandidateSelectionProvenanceMismatch(
+                "Shot boundaries do not contain complete frame coverage."
+            )
+        expected_start = 0
+        seen_ids: set[str] = set()
+        for expected_index, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                raise CandidateSelectionProvenanceMismatch(
+                    "Shot-boundary rows must be objects."
+                )
+            try:
+                shot_index = int(row.get("shot_index", -1))
+                start = int(row.get("start_frame", -1))
+                end = int(row.get("end_frame_inclusive", row.get("end_frame", -1)))
+            except (TypeError, ValueError) as exc:
+                raise CandidateSelectionProvenanceMismatch(
+                    "Shot-boundary frame values are invalid."
+                ) from exc
+            shot_id = str(row.get("shot_id") or "")
+            if (
+                shot_index != expected_index
+                or not shot_id
+                or shot_id in seen_ids
+                or start != expected_start
+                or end < start
+                or end >= frame_count
+            ):
+                raise CandidateSelectionProvenanceMismatch(
+                    "Shot boundaries are not contiguous full-frame coverage."
+                )
+            if human_reviewed:
+                review_state = str(
+                    row.get("review_state")
+                    or row.get("review_status")
+                    or row.get("status")
+                    or ""
+                )
+                if review_state not in {"PASS", "REVIEWED_PASS"}:
+                    raise CandidateSelectionProvenanceMismatch(
+                        "Human-reviewed shot boundaries contain an unreviewed shot."
+                    )
+            seen_ids.add(shot_id)
+            expected_start = end + 1
+        if expected_start != frame_count:
+            raise CandidateSelectionProvenanceMismatch(
+                "Shot boundaries do not cover the complete scene."
+            )
+
+    def _resolve_boundary_provenance(
+        self,
+        *,
+        project: Project,
+        revision_id: str,
+        event_id: str,
+        scene_id: str,
+        source_video_sha256: str,
+        manifest: Mapping[str, Any],
+        selection_metadata: Mapping[str, Any] | None = None,
+        legacy_selection_sha256: str | None = None,
+    ) -> ShotBoundaryProvenance:
+        selection_metadata = selection_metadata or {}
+        nested = manifest.get("shot_boundaries") or {}
+        if not isinstance(nested, Mapping):
+            raise CandidateSelectionProvenanceMismatch(
+                "Candidate shot-boundary provenance must be an object."
+            )
+        declared_sha_values = {
+            str(value)
+            for value in (
+                nested.get("sha256"),
+                manifest.get("shot_boundaries_sha256"),
+                manifest.get("reviewed_shot_boundaries_sha256"),
+                selection_metadata.get("shot_boundaries_sha256"),
+                legacy_selection_sha256,
+            )
+            if value
+        }
+        if len(declared_sha_values) != 1:
+            raise CandidateSelectionProvenanceMismatch(
+                "Candidate shot-boundary SHA-256 provenance is missing or inconsistent."
+            )
+        expected_sha = next(iter(declared_sha_values))
+        if len(expected_sha) != 64:
+            raise CandidateSelectionProvenanceMismatch(
+                "Candidate shot-boundary SHA-256 provenance is invalid."
+            )
+
+        declared_type = str(
+            nested.get("artifact_type")
+            or manifest.get("shot_boundary_artifact_type")
+            or selection_metadata.get("shot_boundary_artifact_type")
+            or ""
+        )
+        declared_artifact_id = str(
+            nested.get("artifact_id")
+            or manifest.get("shot_boundaries_artifact_id")
+            or selection_metadata.get("shot_boundaries_artifact_id")
+            or ""
+        )
+        rows = self.db.scalars(
+            select(Artifact).where(
+                Artifact.project_id == project.project_id,
+                Artifact.artifact_type.in_(SUPPORTED_TRACKING_BOUNDARY_ARTIFACT_TYPES),
+            )
+        ).all()
+        matches = []
+        for artifact in rows:
+            metadata = artifact.metadata_ or {}
+            if (
+                artifact.match_id == project.match_id
+                and metadata.get("revision_id") == revision_id
+                and metadata.get("scene_id") == scene_id
+                and metadata.get("event_id") in {None, "", event_id}
+                and metadata.get("sha256") == expected_sha
+                and (not declared_type or artifact.artifact_type == declared_type)
+                and (
+                    not declared_artifact_id
+                    or artifact.artifact_id == declared_artifact_id
+                )
+            ):
+                matches.append(artifact)
+        if len(matches) != 1:
+            raise CandidateSelectionProvenanceMismatch(
+                "The immutable candidate shot-boundary artifact is missing or ambiguous."
+            )
+        artifact = matches[0]
+        metadata = artifact.metadata_ or {}
+        path = self._artifact_path(artifact)
+        document = self._load_json(path)
+        artifact_type = artifact.artifact_type
+
+        if document.get("automatic_target_confirmation") is not False:
+            raise CandidateSelectionProvenanceMismatch(
+                "Shot boundaries attempted automatic target confirmation."
+            )
+        if str((document.get("video") or {}).get("sha256") or "") != str(
+            source_video_sha256
+        ):
+            raise CandidateSelectionProvenanceMismatch(
+                "Shot boundaries target a different immutable scene video."
+            )
+
+        if artifact_type == AUTO_SHOT_BOUNDARIES:
+            structural = document.get("structural_validation") or {}
+            try:
+                gap_count = int(structural.get("gap_count", -1))
+                overlap_count = int(structural.get("overlap_count", -1))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise CandidateSelectionProvenanceMismatch(
+                    "Automatic shot-boundary structural metrics are invalid."
+                ) from exc
+            if (
+                metadata.get("status") != "STRUCTURALLY_VALID"
+                or metadata.get("boundary_origin") != "AUTO_DETECTED"
+                or metadata.get("human_reviewed") is not False
+                or metadata.get("automatic_target_confirmation") is not False
+                or document.get("artifact_type") != AUTO_SHOT_BOUNDARIES
+                or document.get("boundary_origin") != "AUTO_DETECTED"
+                or document.get("human_reviewed") is not False
+                or not isinstance(structural, Mapping)
+                or structural.get("status") != "PASS"
+                or structural.get("complete_event_window_coverage") is not True
+                or gap_count != 0
+                or overlap_count != 0
+            ):
+                raise CandidateSelectionProvenanceMismatch(
+                    "Automatic shot boundaries failed the structural tracking gate."
+                )
+            boundary_origin = "AUTO_DETECTED"
+            human_reviewed = False
+        else:
+            if (
+                document.get("automatic_confirmation") is not False
+                or metadata.get("automatic_confirmation") is True
+            ):
+                raise CandidateSelectionProvenanceMismatch(
+                    "Reviewed shot boundaries lack an explicit human confirmation."
+                )
+            boundary_origin = "HUMAN_REVIEWED"
+            human_reviewed = True
+
+        declared_origin = str(
+            nested.get("boundary_origin")
+            or manifest.get("boundary_origin")
+            or selection_metadata.get("boundary_origin")
+            or ""
+        )
+        declared_human_reviewed = (
+            nested.get("human_reviewed")
+            if "human_reviewed" in nested
+            else manifest.get("human_reviewed")
+            if "human_reviewed" in manifest
+            else selection_metadata.get("human_reviewed")
+        )
+        if declared_origin and declared_origin != boundary_origin:
+            raise CandidateSelectionProvenanceMismatch(
+                "Candidate boundary-origin provenance does not match its artifact."
+            )
+        if (
+            declared_human_reviewed is not None
+            and declared_human_reviewed is not human_reviewed
+        ):
+            raise CandidateSelectionProvenanceMismatch(
+                "Candidate human-review provenance does not match its artifact."
+            )
+        self._validate_boundary_rows(document, human_reviewed=human_reviewed)
+        return ShotBoundaryProvenance(
+            artifact=artifact,
+            path=path,
+            sha256=expected_sha,
+            artifact_type=artifact_type,
+            boundary_origin=boundary_origin,
+            human_reviewed=human_reviewed,
+        )
 
     @staticmethod
     def _catalog_candidate_is_safe(candidate: Mapping[str, Any]) -> bool:
@@ -168,7 +457,9 @@ class CandidateHandoffR1Service:
             expected = str(row.get(sha_key) or "")
             actual = sha256_file(path)
             if expected and expected != actual:
-                raise ValueError(f"Review catalog artifact SHA mismatch: {candidate_id}/{key}")
+                raise ValueError(
+                    f"Review catalog artifact SHA mismatch: {candidate_id}/{key}"
+                )
             row[key] = path.relative_to(self.storage.project_root).as_posix()
             row[sha_key] = actual
         row["candidate_id"] = candidate_id
@@ -187,7 +478,9 @@ class CandidateHandoffR1Service:
         if not state_path.is_file():
             return None
         state = self._load_json(state_path)
-        result = dict((state.get("shot_search_results") or {}).get(ambiguity.shot_id) or {})
+        result = dict(
+            (state.get("shot_search_results") or {}).get(ambiguity.shot_id) or {}
+        )
         catalog = [
             dict(item)
             for item in result.get("review_catalog_candidates") or []
@@ -214,12 +507,11 @@ class CandidateHandoffR1Service:
         }
         exposed_ids: set[str] = set()
         for row in self.db.scalars(
-                select(EventCandidateAmbiguityR1).where(
-                    EventCandidateAmbiguityR1.tracking_job_id
-                    == job.tracking_job_id,
-                    EventCandidateAmbiguityR1.shot_id == ambiguity.shot_id,
-                )
-            ).all():
+            select(EventCandidateAmbiguityR1).where(
+                EventCandidateAmbiguityR1.tracking_job_id == job.tracking_job_id,
+                EventCandidateAmbiguityR1.shot_id == ambiguity.shot_id,
+            )
+        ).all():
             # candidate_ids is intentionally only the active pointer set.  The
             # immutable candidates payload is the exposure history and must be
             # used to prevent a just-rejected (or earlier-generation) candidate
@@ -378,21 +670,16 @@ class CandidateHandoffR1Service:
                 "V1_2_RANKING_PROVENANCE_MISMATCH"
             ) from exc
         if (
-            document.get("schema_version")
-            != "kickclip.event_candidate_ranking.v1_2"
+            document.get("schema_version") != "kickclip.event_candidate_ranking.v1_2"
             or document.get("automatic_target_confirmation") is not False
         ):
-            raise CandidateRecommendationNotPrepared(
-                "V1_2_RANKING_PROVENANCE_MISMATCH"
-            )
+            raise CandidateRecommendationNotPrepared("V1_2_RANKING_PROVENANCE_MISMATCH")
         source_artifact_id = str(
             (artifact.metadata_ or {}).get("source_ranking_artifact_id") or ""
         )
         source = self.db.get(Artifact, source_artifact_id)
         if source is None:
-            raise CandidateRecommendationNotPrepared(
-                "V1_2_RANKING_PROVENANCE_MISMATCH"
-            )
+            raise CandidateRecommendationNotPrepared("V1_2_RANKING_PROVENANCE_MISMATCH")
         source_metadata = source.metadata_ or {}
         if (
             source.project_id != project.project_id
@@ -401,12 +688,12 @@ class CandidateHandoffR1Service:
             or source_metadata.get("event_id") != event_id
             or source_metadata.get("scene_id") != scene_id
         ):
-            raise CandidateRecommendationNotPrepared(
-                "INPUT_PROVENANCE_MISMATCH"
-            )
+            raise CandidateRecommendationNotPrepared("INPUT_PROVENANCE_MISMATCH")
         self._prepared_artifact_path(source, kind="SOURCE_RANKING")
         reviewed_id = str(
-            (artifact.metadata_ or {}).get("reviewed_shots_artifact_id") or ""
+            (artifact.metadata_ or {}).get("shot_boundaries_artifact_id")
+            or (artifact.metadata_ or {}).get("reviewed_shots_artifact_id")
+            or ""
         )
         reviewed = self.db.get(Artifact, reviewed_id)
         reviewed_metadata = reviewed.metadata_ if reviewed is not None else {}
@@ -417,18 +704,12 @@ class CandidateHandoffR1Service:
             or (reviewed_metadata or {}).get("revision_id") != revision_id
             or (reviewed_metadata or {}).get("scene_id") != scene_id
         ):
-            raise CandidateRecommendationNotPrepared(
-                "INPUT_PROVENANCE_MISMATCH"
-            )
+            raise CandidateRecommendationNotPrepared("INPUT_PROVENANCE_MISMATCH")
         self._prepared_artifact_path(reviewed, kind="REVIEWED_SHOTS")
         ranking_id = str(source_metadata.get("ranking_id") or "")
-        shortlist_patch_id = str(
-            (artifact.metadata_ or {}).get("ranking_id") or ""
-        )
+        shortlist_patch_id = str((artifact.metadata_ or {}).get("ranking_id") or "")
         if not ranking_id or not shortlist_patch_id:
-            raise CandidateRecommendationNotPrepared(
-                "V1_2_RANKING_PROVENANCE_MISMATCH"
-            )
+            raise CandidateRecommendationNotPrepared("V1_2_RANKING_PROVENANCE_MISMATCH")
         return artifact, document, ranking_id, shortlist_patch_id
 
     def _grouping_context(
@@ -455,16 +736,13 @@ class CandidateHandoffR1Service:
             and (row.metadata_ or {}).get("revision_id") == revision_id
             and (row.metadata_ or {}).get("event_id") == event_id
             and (row.metadata_ or {}).get("scene_id") == scene_id
-            and (row.metadata_ or {}).get("shortlist_patch_id")
-            == shortlist_patch_id
+            and (row.metadata_ or {}).get("shortlist_patch_id") == shortlist_patch_id
             and (row.metadata_ or {}).get("candidate_grouping_policy")
             == CANDIDATE_GROUPING_POLICY_VERSION
             and (row.metadata_ or {}).get("status") == "READY"
         ]
         if not matches:
-            raise CandidateRecommendationNotPrepared(
-                "CANDIDATE_GROUPING_MISSING"
-            )
+            raise CandidateRecommendationNotPrepared("CANDIDATE_GROUPING_MISSING")
         matches.sort(key=lambda row: row.created_at, reverse=True)
         artifact = matches[0]
         try:
@@ -483,13 +761,10 @@ class CandidateHandoffR1Service:
 
         groups = document.get("groups")
         if (
-            document.get("schema_version")
-            != CANDIDATE_GROUPING_SCHEMA_VERSION
-            or document.get("policy_version")
-            != CANDIDATE_GROUPING_POLICY_VERSION
+            document.get("schema_version") != CANDIDATE_GROUPING_SCHEMA_VERSION
+            or document.get("policy_version") != CANDIDATE_GROUPING_POLICY_VERSION
             or document.get("ranking_id") != ranking_id
-            or document.get("shortlist_patch_id")
-            != shortlist_patch_id
+            or document.get("shortlist_patch_id") != shortlist_patch_id
             or document.get("revision_id") != revision_id
             or document.get("event_id") != event_id
             or document.get("scene_id") != scene_id
@@ -513,13 +788,8 @@ class CandidateHandoffR1Service:
                 raise CandidateRecommendationNotPrepared(
                     "CANDIDATE_GROUPING_PROVENANCE_MISMATCH"
                 )
-            representative = str(
-                group.get("representative_candidate_id") or ""
-            )
-            members = [
-                str(value)
-                for value in group.get("member_candidate_ids") or []
-            ]
+            representative = str(group.get("representative_candidate_id") or "")
+            members = [str(value) for value in group.get("member_candidate_ids") or []]
             if (
                 not representative
                 or representative not in members
@@ -538,8 +808,7 @@ class CandidateHandoffR1Service:
             seen_members != expected_candidate_ids
             or int(document.get("source_candidate_count", -1))
             != len(expected_candidate_ids)
-            or int(document.get("display_candidate_count", -1))
-            != len(groups)
+            or int(document.get("display_candidate_count", -1)) != len(groups)
         ):
             raise CandidateRecommendationNotPrepared(
                 "CANDIDATE_GROUPING_PROVENANCE_MISMATCH"
@@ -562,8 +831,7 @@ class CandidateHandoffR1Service:
         matches = [
             row
             for row in rows
-            if (row.metadata_ or {}).get("shortlist_patch_id")
-            == shortlist_patch_id
+            if (row.metadata_ or {}).get("shortlist_patch_id") == shortlist_patch_id
             and (row.metadata_ or {}).get("candidate_id") == candidate_id
             and (row.metadata_ or {}).get("status") != "INCOMPLETE"
         ]
@@ -589,13 +857,9 @@ class CandidateHandoffR1Service:
             if revision is not None
             else {}
         )
-        source_video_asset_id = str(
-            pipeline_inputs.get("scene_video_asset_id") or ""
-        )
+        source_video_asset_id = str(pipeline_inputs.get("scene_video_asset_id") or "")
         if revision is not None and not source_video_asset_id:
-            raise CandidateRecommendationNotPrepared(
-                "SOURCE_VIDEO_ASSET_MISSING"
-            )
+            raise CandidateRecommendationNotPrepared("SOURCE_VIDEO_ASSET_MISSING")
         _, ranking, ranking_id, patch_id = self._ranking_context(
             project=project,
             revision_id=revision_id,
@@ -611,9 +875,7 @@ class CandidateHandoffR1Service:
             ranking_id=ranking_id,
             shortlist_patch_id=patch_id,
         )
-        grouping_sha256 = str(
-            (grouping_artifact.metadata_ or {}).get("sha256") or ""
-        )
+        grouping_sha256 = str((grouping_artifact.metadata_ or {}).get("sha256") or "")
         ranking_by_candidate_id = {
             public_candidate_id(str(row["candidate_id"])): row
             for row in ranking["shortlist"]
@@ -622,14 +884,10 @@ class CandidateHandoffR1Service:
         candidates: list[EventCandidateRecommendationRead] = []
         groups = sorted(
             grouping["groups"],
-            key=lambda row: int(
-                row["representative_shortlist_rank"]
-            ),
+            key=lambda row: int(row["representative_shortlist_rank"]),
         )
         for group in groups:
-            candidate_id = str(
-                group["representative_candidate_id"]
-            )
+            candidate_id = str(group["representative_candidate_id"])
             row = ranking_by_candidate_id.get(candidate_id)
             if row is None:
                 raise CandidateRecommendationNotPrepared(
@@ -655,8 +913,7 @@ class CandidateHandoffR1Service:
                 ) from exc
 
             member_candidate_ids = [
-                str(value)
-                for value in group["member_candidate_ids"]
+                str(value) for value in group["member_candidate_ids"]
             ]
             if (
                 manifest.get("candidate_id") != candidate_id
@@ -665,14 +922,11 @@ class CandidateHandoffR1Service:
                 or manifest.get("shortlist_patch_id") != patch_id
                 or manifest.get("candidate_grouping_policy")
                 != CANDIDATE_GROUPING_POLICY_VERSION
-                or manifest.get("candidate_grouping_sha256")
-                != grouping_sha256
-                or manifest.get("candidate_group_id")
-                != group["candidate_group_id"]
+                or manifest.get("candidate_grouping_sha256") != grouping_sha256
+                or manifest.get("candidate_group_id") != group["candidate_group_id"]
                 or list(manifest.get("group_member_candidate_ids") or [])
                 != member_candidate_ids
-                or manifest.get("grouping_is_identity_confirmation")
-                is not False
+                or manifest.get("grouping_is_identity_confirmation") is not False
             ):
                 raise CandidateRecommendationNotPrepared(
                     f"REVIEW_BUNDLE_PROVENANCE_MISMATCH:{candidate_id}"
@@ -684,9 +938,7 @@ class CandidateHandoffR1Service:
                 f"/candidates/{candidate_id}/media"
             )
             project_query = f"?project_id={project.project_id}"
-            grouping_reason_codes = list(
-                group.get("grouping_reason_codes") or []
-            )
+            grouping_reason_codes = list(group.get("grouping_reason_codes") or [])
             risk_codes = list(
                 quality.get("purity_diagnostics", {}).get(
                     "reason_codes",
@@ -696,9 +948,7 @@ class CandidateHandoffR1Service:
             if len(member_candidate_ids) > 1:
                 risk_codes.append("POSSIBLE_FRAGMENT_DUPLICATE_GROUP")
 
-            reason_codes = list(
-                row.get("shortlist_patch_reason_codes") or []
-            )
+            reason_codes = list(row.get("shortlist_patch_reason_codes") or [])
             if len(member_candidate_ids) > 1:
                 reason_codes.append("FRAGMENT_GROUP_REPRESENTATIVE")
 
@@ -708,12 +958,8 @@ class CandidateHandoffR1Service:
                     ranking_id=ranking_id,
                     shortlist_patch_id=patch_id,
                     candidate_id=candidate_id,
-                    shortlist_rank=int(
-                        group["representative_shortlist_rank"]
-                    ),
-                    global_rank=int(
-                        row.get("original_global_rank", row.get("rank"))
-                    ),
+                    shortlist_rank=int(group["representative_shortlist_rank"]),
+                    global_rank=int(row.get("original_global_rank", row.get("rank"))),
                     shot_id=str(row["shot_id"]),
                     tracklet_id=str(manifest["tracklet_id"]),
                     reviewability=str(quality["reviewability"]),
@@ -731,9 +977,7 @@ class CandidateHandoffR1Service:
                         first_middle_last_url=(
                             f"{base}/first_middle_last{project_query}"
                         ),
-                        tracklet_video_url=(
-                            f"{base}/tracklet_video{project_query}"
-                        ),
+                        tracklet_video_url=(f"{base}/tracklet_video{project_query}"),
                         reference_gallery_url=(
                             f"{base}/reference_gallery{project_query}"
                         ),
@@ -744,9 +988,7 @@ class CandidateHandoffR1Service:
                     group_member_candidate_ids=member_candidate_ids,
                     grouped_candidate_count=len(member_candidate_ids),
                     grouping_reason_codes=grouping_reason_codes,
-                    possible_fragment_duplicate=(
-                        len(member_candidate_ids) > 1
-                    ),
+                    possible_fragment_duplicate=(len(member_candidate_ids) > 1),
                     automatic_target_confirmation=False,
                 )
             )
@@ -758,15 +1000,9 @@ class CandidateHandoffR1Service:
             event_id=event_id,
             scene_id=scene_id,
             source_video_asset_id=source_video_asset_id,
-            source_candidate_count=int(
-                grouping["source_candidate_count"]
-            ),
-            display_candidate_count=int(
-                grouping["display_candidate_count"]
-            ),
-            candidate_grouping_policy=(
-                CANDIDATE_GROUPING_POLICY_VERSION
-            ),
+            source_candidate_count=int(grouping["source_candidate_count"]),
+            display_candidate_count=int(grouping["display_candidate_count"]),
+            candidate_grouping_policy=(CANDIDATE_GROUPING_POLICY_VERSION),
             candidates=candidates,
             automatic_target_confirmation=False,
             production_recommendation_ui="BLOCKED",
@@ -831,14 +1067,8 @@ class CandidateHandoffR1Service:
                 or not path.is_file()
                 or sha256_file(path) != record.get("sha256")
             ):
-                raise ValueError(
-                    "Candidate media integrity validation failed."
-                )
-            mime = (
-                "video/mp4"
-                if path.suffix.lower() == ".mp4"
-                else "image/jpeg"
-            )
+                raise ValueError("Candidate media integrity validation failed.")
+            mime = "video/mp4" if path.suffix.lower() == ".mp4" else "image/jpeg"
             return path, mime
 
         lazy_spec = (manifest.get("lazy_media") or {}).get(media_name)
@@ -852,13 +1082,9 @@ class CandidateHandoffR1Service:
         }:
             source_video_path = self._lazy_source_video_path(
                 project=project,
-                source_video_sha256=str(
-                    manifest.get("source_video_sha256") or ""
-                ),
+                source_video_sha256=str(manifest.get("source_video_sha256") or ""),
             )
-        manifest_sha256 = str(
-            (artifact.metadata_ or {}).get("sha256") or ""
-        )
+        manifest_sha256 = str((artifact.metadata_ or {}).get("sha256") or "")
         try:
             return self.lazy_media.materialize(
                 bundle_root=root,
@@ -889,10 +1115,7 @@ class CandidateHandoffR1Service:
             event_id=event_id,
             scene_id=scene_id,
         )
-        if (
-            ranking_id != actual_ranking_id
-            or shortlist_patch_id != actual_patch_id
-        ):
+        if ranking_id != actual_ranking_id or shortlist_patch_id != actual_patch_id:
             raise CandidateSelectionProvenanceMismatch(
                 "The submitted ranking identity is not the served V1.2 ranking."
             )
@@ -909,8 +1132,7 @@ class CandidateHandoffR1Service:
             (
                 group
                 for group in grouping["groups"]
-                if str(group["representative_candidate_id"])
-                == candidate_id
+                if str(group["representative_candidate_id"]) == candidate_id
             ),
             None,
         )
@@ -918,9 +1140,7 @@ class CandidateHandoffR1Service:
             raise CandidateSelectionProvenanceMismatch(
                 "The selected candidate is not a served group representative."
             )
-        grouping_sha256 = str(
-            (grouping_artifact.metadata_ or {}).get("sha256") or ""
-        )
+        grouping_sha256 = str((grouping_artifact.metadata_ or {}).get("sha256") or "")
         ranking_row = next(
             (
                 row
@@ -947,15 +1167,21 @@ class CandidateHandoffR1Service:
             raise CandidateSelectionProvenanceMismatch(
                 "The selected candidate bundle targets a different source video."
             )
+        boundary = self._resolve_boundary_provenance(
+            project=project,
+            revision_id=revision_id,
+            event_id=event_id,
+            scene_id=scene_id,
+            source_video_sha256=str(source_video.sha256),
+            manifest=manifest,
+        )
         expected_group_members = [
-            str(value)
-            for value in selected_group["member_candidate_ids"]
+            str(value) for value in selected_group["member_candidate_ids"]
         ]
         if (
             manifest.get("candidate_grouping_policy")
             != CANDIDATE_GROUPING_POLICY_VERSION
-            or manifest.get("candidate_grouping_sha256")
-            != grouping_sha256
+            or manifest.get("candidate_grouping_sha256") != grouping_sha256
             or manifest.get("candidate_group_id")
             != selected_group["candidate_group_id"]
             or list(manifest.get("group_member_candidate_ids") or [])
@@ -992,15 +1218,11 @@ class CandidateHandoffR1Service:
                 or existing.shortlist_patch_id != shortlist_patch_id
                 or existing.candidate_id != candidate_id
                 or existing.source_video_sha256 != source_video.sha256
-                or existing.candidate_media_bundle_sha256
-                != manifest_sha256
-                or (existing.metadata_ or {}).get(
-                    "candidate_grouping_sha256"
-                )
+                or existing.candidate_media_bundle_sha256 != manifest_sha256
+                or existing.reviewed_shot_boundaries_sha256 != boundary.sha256
+                or (existing.metadata_ or {}).get("candidate_grouping_sha256")
                 != grouping_sha256
-                or (existing.metadata_ or {}).get(
-                    "candidate_group_id"
-                )
+                or (existing.metadata_ or {}).get("candidate_group_id")
                 != selected_group["candidate_group_id"]
             ):
                 continue
@@ -1012,20 +1234,17 @@ class CandidateHandoffR1Service:
                 continue
             if (
                 selection_path.is_file()
-                and sha256_file(selection_path)
-                == existing.selection_artifact_sha256
+                and sha256_file(selection_path) == existing.selection_artifact_sha256
             ):
                 return existing
 
         selection_id = generate_prefixed_id("ecselr1")
         selected_at = datetime.now(timezone.utc)
-        root = (
-            manifest_path.parents[1] / "selections" / selection_id
-        ).resolve()
+        root = (manifest_path.parents[1] / "selections" / selection_id).resolve()
         root.mkdir(parents=True, exist_ok=False)
         document = {
             "schema_version": (
-                "kickclip.event_candidate_selection_tracking_handoff.r1"
+                "kickclip.event_candidate_selection_tracking_handoff.r1_1"
             ),
             "immutable": True,
             "selection_id": selection_id,
@@ -1037,26 +1256,25 @@ class CandidateHandoffR1Service:
             "shortlist_patch_id": shortlist_patch_id,
             "discovery_id": str(manifest["discovery_id"]),
             "candidate_id": candidate_id,
-            "candidate_group_id": str(
-                selected_group["candidate_group_id"]
-            ),
+            "candidate_group_id": str(selected_group["candidate_group_id"]),
             "group_member_candidate_ids": expected_group_members,
-            "candidate_grouping_policy": (
-                CANDIDATE_GROUPING_POLICY_VERSION
-            ),
+            "candidate_grouping_policy": (CANDIDATE_GROUPING_POLICY_VERSION),
             "candidate_grouping_sha256": grouping_sha256,
             "grouping_is_identity_confirmation": False,
             "shot_id": str(manifest["shot_id"]),
             "tracklet_id": str(manifest["tracklet_id"]),
             "user_id": user.user_id,
             "selected_at": selected_at.isoformat(),
-            "candidate_manifest_sha256": str(
-                manifest["candidate_manifest_sha256"]
-            ),
+            "candidate_manifest_sha256": str(manifest["candidate_manifest_sha256"]),
             "candidate_media_bundle_sha256": manifest_sha256,
             "source_video_sha256": str(source_video.sha256),
-            "reviewed_shot_boundaries_sha256": str(
-                manifest["reviewed_shot_boundaries_sha256"]
+            "shot_boundaries": boundary.as_dict(),
+            "shot_boundaries_sha256": boundary.sha256,
+            "shot_boundary_artifact_type": boundary.artifact_type,
+            "boundary_origin": boundary.boundary_origin,
+            "human_reviewed": boundary.human_reviewed,
+            "reviewed_shot_boundaries_sha256": (
+                boundary.sha256 if boundary.human_reviewed else None
             ),
             "automatic_target_confirmation": False,
         }
@@ -1077,14 +1295,12 @@ class CandidateHandoffR1Service:
                 shot_id=str(manifest["shot_id"]),
                 tracklet_id=str(manifest["tracklet_id"]),
                 selected_at=selected_at,
-                candidate_manifest_sha256=str(
-                    manifest["candidate_manifest_sha256"]
-                ),
+                candidate_manifest_sha256=str(manifest["candidate_manifest_sha256"]),
                 candidate_media_bundle_sha256=manifest_sha256,
                 source_video_sha256=str(source_video.sha256),
-                reviewed_shot_boundaries_sha256=str(
-                    manifest["reviewed_shot_boundaries_sha256"]
-                ),
+                # Backward-compatible storage column. Generic provenance is
+                # explicit in metadata and the immutable selection record.
+                reviewed_shot_boundaries_sha256=boundary.sha256,
                 selection_artifact_path=selection_path.relative_to(
                     self.storage.project_root
                 ).as_posix(),
@@ -1094,14 +1310,15 @@ class CandidateHandoffR1Service:
                 ).as_posix(),
                 metadata_={
                     "automatic_target_confirmation": False,
+                    "shot_boundaries_artifact_id": boundary.artifact.artifact_id,
+                    "shot_boundaries_sha256": boundary.sha256,
+                    "shot_boundary_artifact_type": boundary.artifact_type,
+                    "boundary_origin": boundary.boundary_origin,
+                    "human_reviewed": boundary.human_reviewed,
                     "frozen_source_candidate_id": ranking_row["candidate_id"],
-                    "candidate_group_id": str(
-                        selected_group["candidate_group_id"]
-                    ),
+                    "candidate_group_id": str(selected_group["candidate_group_id"]),
                     "group_member_candidate_ids": expected_group_members,
-                    "candidate_grouping_policy": (
-                        CANDIDATE_GROUPING_POLICY_VERSION
-                    ),
+                    "candidate_grouping_policy": (CANDIDATE_GROUPING_POLICY_VERSION),
                     "candidate_grouping_sha256": grouping_sha256,
                     "grouping_is_identity_confirmation": False,
                 },
@@ -1118,13 +1335,14 @@ class CandidateHandoffR1Service:
                     "selection_id": selection_id,
                     "sha256": selection_sha,
                     "candidate_id": candidate_id,
-                    "candidate_group_id": str(
-                        selected_group["candidate_group_id"]
-                    ),
+                    "shot_boundaries_artifact_id": boundary.artifact.artifact_id,
+                    "shot_boundaries_sha256": boundary.sha256,
+                    "shot_boundary_artifact_type": boundary.artifact_type,
+                    "boundary_origin": boundary.boundary_origin,
+                    "human_reviewed": boundary.human_reviewed,
+                    "candidate_group_id": str(selected_group["candidate_group_id"]),
                     "group_member_candidate_ids": expected_group_members,
-                    "candidate_grouping_policy": (
-                        CANDIDATE_GROUPING_POLICY_VERSION
-                    ),
+                    "candidate_grouping_policy": (CANDIDATE_GROUPING_POLICY_VERSION),
                     "candidate_grouping_sha256": grouping_sha256,
                     "shortlist_patch_id": shortlist_patch_id,
                     "owner_id": user.user_id,
@@ -1141,6 +1359,8 @@ class CandidateHandoffR1Service:
     def selection_read(
         selection: EventCandidateSelectionR1,
     ) -> EventCandidateSelectionRead:
+        metadata = selection.metadata_ or {}
+        human_reviewed = metadata.get("human_reviewed")
         return EventCandidateSelectionRead(
             selection_id=selection.selection_id,
             project_id=selection.project_id,
@@ -1156,12 +1376,20 @@ class CandidateHandoffR1Service:
             user_id=selection.owner_id,
             selected_at=selection.selected_at,
             candidate_manifest_sha256=selection.candidate_manifest_sha256,
-            candidate_media_bundle_sha256=(
-                selection.candidate_media_bundle_sha256
-            ),
+            candidate_media_bundle_sha256=(selection.candidate_media_bundle_sha256),
             source_video_sha256=selection.source_video_sha256,
+            shot_boundaries_artifact_id=metadata.get("shot_boundaries_artifact_id"),
+            shot_boundaries_sha256=str(
+                metadata.get("shot_boundaries_sha256")
+                or selection.reviewed_shot_boundaries_sha256
+            ),
+            shot_boundary_artifact_type=metadata.get("shot_boundary_artifact_type"),
+            boundary_origin=metadata.get("boundary_origin"),
+            human_reviewed=human_reviewed,
             reviewed_shot_boundaries_sha256=(
                 selection.reviewed_shot_boundaries_sha256
+                if human_reviewed is True
+                else None
             ),
             selection_artifact_sha256=selection.selection_artifact_sha256,
             tracking_job_id=selection.tracking_job_id,
@@ -1187,31 +1415,15 @@ class CandidateHandoffR1Service:
                 "Candidate media bundle changed after selection."
             )
         manifest = self._load_json(manifest_path)
-        reviewed_rows = self.db.scalars(
-            select(Artifact).where(
-                Artifact.project_id == project.project_id,
-                Artifact.artifact_type == "REVIEWED_SHOT_BOUNDARIES",
-            )
-        ).all()
-        reviewed_matches = [
-            artifact
-            for artifact in reviewed_rows
-            if (artifact.metadata_ or {}).get("revision_id")
-            == selection.revision_id
-            and (artifact.metadata_ or {}).get("scene_id")
-            == selection.scene_id
-            and (artifact.metadata_ or {}).get("sha256")
-            == selection.reviewed_shot_boundaries_sha256
-        ]
-        reviewed_matches.sort(
-            key=lambda artifact: artifact.created_at, reverse=True
-        )
-        if not reviewed_matches:
-            raise CandidateSelectionProvenanceMismatch(
-                "The immutable reviewed shot-boundary artifact is missing."
-            )
-        reviewed_shot_boundaries_path = self._artifact_path(
-            reviewed_matches[0]
+        boundary = self._resolve_boundary_provenance(
+            project=project,
+            revision_id=selection.revision_id,
+            event_id=selection.event_id,
+            scene_id=selection.scene_id,
+            source_video_sha256=selection.source_video_sha256,
+            manifest=manifest,
+            selection_metadata=selection.metadata_,
+            legacy_selection_sha256=(selection.reviewed_shot_boundaries_sha256),
         )
         quality = dict(manifest.get("quality") or {})
         references = list(manifest.get("reference_gallery") or [])
@@ -1241,17 +1453,12 @@ class CandidateHandoffR1Service:
                     "Selection references a missing tracking job."
                 )
             handoff_metadata = dict(
-                (existing_job.runtime_metadata or {}).get(
-                    "event_candidate_handoff_r1"
-                )
+                (existing_job.runtime_metadata or {}).get("event_candidate_handoff_r1")
                 or {}
             )
-            provenance_sha = str(
-                handoff_metadata.get("provenance_sha256") or ""
-            )
+            provenance_sha = str(handoff_metadata.get("provenance_sha256") or "")
             provenance_path = (
-                Path(existing_job.output_directory)
-                / "integration_provenance.json"
+                Path(existing_job.output_directory) / "integration_provenance.json"
             )
             if (
                 not provenance_sha
@@ -1279,9 +1486,7 @@ class CandidateHandoffR1Service:
                     selected_candidate_id=selection.candidate_id,
                     selected_shot_id=selection.shot_id,
                     selected_reference_frame=int(anchor["frame"]),
-                    selected_bbox=[
-                        float(value) for value in anchor["bbox_xyxy"]
-                    ],
+                    selected_bbox=[float(value) for value in anchor["bbox_xyxy"]],
                     anchor_mode=ANCHOR_MODE,
                     provenance_artifact_sha256=provenance_sha,
                     status=existing_job.status,
@@ -1300,16 +1505,13 @@ class CandidateHandoffR1Service:
                 }
                 for value in references
             ],
-            "reviewed_shot_boundaries": {
-                "sha256": selection.reviewed_shot_boundaries_sha256,
-                "source": "IMMUTABLE_HUMAN_REVIEWED_SHOT_BOUNDARIES",
-            },
+            "shot_boundaries": boundary.as_dict(),
             "anchor_mode": ANCHOR_MODE,
             "frame_zero_fallback_used": False,
             "automatic_target_confirmation": False,
         }
         provenance = {
-            "schema_version": "kickclip.selection_provenance.r1_2",
+            "schema_version": "kickclip.selection_provenance.r1_3",
             "selection_id": selection.selection_id,
             "ranking_version": RANKING_VERSION,
             "ranking_id": selection.ranking_id,
@@ -1323,6 +1525,7 @@ class CandidateHandoffR1Service:
             "tracking_anchor_frame": payload["selected_reference_frame"],
             "tracking_anchor_bbox": payload["selected_bbox"],
             "tracking_anchor_shot": payload["selected_shot_id"],
+            "shot_boundaries": boundary.as_dict(),
             "anchor_mode": ANCHOR_MODE,
             "frame_zero_fallback_used": False,
             "automatic_target_confirmation": False,
@@ -1345,7 +1548,10 @@ class CandidateHandoffR1Service:
         video_path = self.storage.resolve_path(source_video.file_path)
         capture = cv2.VideoCapture(str(video_path))
         if not capture.isOpened():
-            raise ValueError("Tracking source video cannot be opened.")
+            raise CandidateTrackingInputInvalid(
+                "SOURCE_VIDEO_UNREADABLE",
+                "Tracking source video cannot be opened.",
+            )
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = float(capture.get(cv2.CAP_PROP_FPS))
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -1355,16 +1561,7 @@ class CandidateHandoffR1Service:
         job_id = generate_prefixed_id("trk")
         test_name = f"event_candidate_handoff_r1_{job_id}"
         settings = get_settings()
-        if not settings.TRACKING_OUTPUT_ROOT:
-            raise ValueError("TRACKING_OUTPUT_ROOT is required for the R1 runtime.")
-        output_root = Path(settings.TRACKING_OUTPUT_ROOT).expanduser().resolve()
-        if not output_root.is_absolute():
-            raise ValueError("TRACKING_OUTPUT_ROOT must be absolute.")
-        if not output_root.is_relative_to(self.storage.storage_root):
-            raise ValueError(
-                "TRACKING_OUTPUT_ROOT must be inside STORAGE_ROOT so immutable "
-                "R1 artifacts remain addressable by the backend."
-            )
+        output_root = self._tracking_output_root(settings.TRACKING_OUTPUT_ROOT)
         output = output_root / test_name
         output.mkdir(parents=True, exist_ok=False)
         payload_sha = write_json_atomic(output / "tracking_payload.json", payload)
@@ -1444,6 +1641,7 @@ class CandidateHandoffR1Service:
                     "selected_candidate_id": selection.candidate_id,
                     "candidate_manifest_path": str(manifest_path),
                     "candidate_manifest_sha256": selection.candidate_media_bundle_sha256,
+                    "shot_boundaries": boundary.as_dict(),
                     "payload_sha256": payload_sha,
                     "provenance_sha256": provenance_sha,
                     "bootstrap_reference_timeline_path": str(
@@ -1487,13 +1685,20 @@ class CandidateHandoffR1Service:
             self.db.flush()
             selection.tracking_job_id = job_id
             adapter = R1R3InputAdapter(settings=settings, storage=self.storage)
-            adapter_result = adapter.build(
-                job=job,
-                selection=selection,
-                candidate_manifest_path=manifest_path,
-                source_video_path=video_path,
-                reviewed_shot_boundaries_path=reviewed_shot_boundaries_path,
-            )
+            try:
+                adapter_result = adapter.build(
+                    job=job,
+                    selection=selection,
+                    candidate_manifest_path=manifest_path,
+                    source_video_path=video_path,
+                    shot_boundaries_path=boundary.path,
+                    shot_boundaries_provenance=boundary.as_dict(),
+                )
+            except R1R3AdapterError as exc:
+                raise CandidateTrackingRuntimeContractInvalid(
+                    "R1_R3_ADAPTER_CONTRACT_INVALID",
+                    str(exc),
+                ) from exc
             adapter.attach_to_job(job, adapter_result)
             R1PipelineOrchestrator(self.db).initialize(
                 job=job,
@@ -1506,14 +1711,19 @@ class CandidateHandoffR1Service:
                 project_id=project.project_id,
                 analysis_job_id=None,
                 artifact_type=PROVENANCE_ARTIFACT_TYPE,
-                file_path=(output / "integration_provenance.json").relative_to(
-                    self.storage.project_root
-                ).as_posix(),
+                file_path=(output / "integration_provenance.json")
+                .relative_to(self.storage.project_root)
+                .as_posix(),
                 mime_type="application/json",
                 metadata_={
                     "tracking_job_id": job_id,
                     "selection_id": selection.selection_id,
                     "sha256": provenance_sha,
+                    "shot_boundaries_artifact_id": (boundary.artifact.artifact_id),
+                    "shot_boundaries_sha256": boundary.sha256,
+                    "shot_boundary_artifact_type": boundary.artifact_type,
+                    "boundary_origin": boundary.boundary_origin,
+                    "human_reviewed": boundary.human_reviewed,
                 },
             )
             # Register the immutable R1 selection as a pending highlight
@@ -1625,7 +1835,8 @@ class CandidateHandoffR1Service:
                     if request.state == CandidateReviewState.NONE_OF_THESE
                     else "SEARCH_EXHAUSTED_NON_PLAYER_ROLE"
                 )
-                if request.state in {
+                if request.state
+                in {
                     CandidateReviewState.NONE_OF_THESE,
                     CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE,
                 }
@@ -1642,7 +1853,8 @@ class CandidateHandoffR1Service:
             "candidate_id": request.candidate_id,
             "rejected_candidate_ids": (
                 candidate_ids
-                if request.state in {
+                if request.state
+                in {
                     CandidateReviewState.NONE_OF_THESE,
                     CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE,
                 }
@@ -1684,7 +1896,8 @@ class CandidateHandoffR1Service:
                 "resulting_tracking_state": result_state,
                 "rejected_candidate_ids": (
                     candidate_ids
-                    if request.state in {
+                    if request.state
+                    in {
                         CandidateReviewState.NONE_OF_THESE,
                         CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE,
                     }
@@ -1731,7 +1944,9 @@ class CandidateHandoffR1Service:
                     CandidateReviewState.SAME_PLAYER: "CONFIRMED",
                     CandidateReviewState.DIFFERENT_PLAYER: "EXCLUDED",
                     CandidateReviewState.UNREVIEWABLE_LOW_RESOLUTION: "UNREVIEWABLE_LOW_RESOLUTION",
-                    CandidateReviewState.TARGET_ABSENT: candidate.get("status", "PENDING"),
+                    CandidateReviewState.TARGET_ABSENT: candidate.get(
+                        "status", "PENDING"
+                    ),
                     CandidateReviewState.NONE_OF_THESE: "EXCLUDED_BY_USER_NONE_OF_THESE",
                     CandidateReviewState.NONE_OF_THESE_NON_PLAYER_ROLE: "EXCLUDED_BY_USER_NON_PLAYER_ROLE",
                 }[request.state]
@@ -1776,7 +1991,9 @@ class CandidateHandoffR1Service:
             self.db.flush()
             pipeline.current_memory_revision_id = memory_row.memory_revision_id
             job.current_memory_revision_id = memory_row.memory_revision_id
-            scene = dict((job.runtime_metadata or {}).get("scene_target_selection") or {})
+            scene = dict(
+                (job.runtime_metadata or {}).get("scene_target_selection") or {}
+            )
             memory_path = self.storage.resolve_path(memory_row.artifact_path)
             scene.update(
                 {
@@ -1802,7 +2019,9 @@ class CandidateHandoffR1Service:
             pipeline.pending_ambiguity_id = None
             pipeline.last_completed_ambiguity_id = ambiguity_id
             pipeline.pipeline_stage = R1PipelineStage.BUILDING_TARGET_MEMORY.value
-            summary["memory_revision_count"] = int(summary.get("memory_revision_count") or 0) + 1
+            summary["memory_revision_count"] = (
+                int(summary.get("memory_revision_count") or 0) + 1
+            )
             summary["last_memory_sha256"] = memory_row.artifact_sha256
             summary["last_memory_reference_count"] = len(memory_row.reference_frame_ids)
             submit_runtime = True
@@ -1811,7 +2030,9 @@ class CandidateHandoffR1Service:
                 str(candidate_id) for candidate_id in candidate_ids if candidate_id
             ]
             if not rejected_candidate_ids:
-                raise ValueError("NONE_OF_THESE requires a non-empty pending candidate set.")
+                raise ValueError(
+                    "NONE_OF_THESE requires a non-empty pending candidate set."
+                )
             job.queued_action = {
                 "kind": "none_of_these",
                 "ambiguity_id": ambiguity_id,
@@ -1880,7 +2101,9 @@ class CandidateHandoffR1Service:
             ambiguity.candidates = remaining
             ambiguity.status = "WAITING"
             pipeline.pending_ambiguity_id = ambiguity_id
-            pipeline.pipeline_stage = R1PipelineStage.WAITING_CROSS_SHOT_CONFIRMATION.value
+            pipeline.pipeline_stage = (
+                R1PipelineStage.WAITING_CROSS_SHOT_CONFIRMATION.value
+            )
             pipeline.processing_status = R1ProcessingStatus.WAITING.value
             job.status = TrackingBackendStatus.WAITING_CROSS_SHOT_CONFIRMATION.value
             job.pipeline_status = "NEEDS_CONFIRMATION"
@@ -1912,7 +2135,9 @@ class CandidateHandoffR1Service:
                 job.pending_action_type = "CROSS_SHOT_CONFIRMATION"
                 job.pending_ambiguity_id = next_batch.ambiguity_id
                 pipeline.pending_ambiguity_id = next_batch.ambiguity_id
-                pipeline.pipeline_stage = R1PipelineStage.WAITING_CROSS_SHOT_CONFIRMATION.value
+                pipeline.pipeline_stage = (
+                    R1PipelineStage.WAITING_CROSS_SHOT_CONFIRMATION.value
+                )
                 pipeline.processing_status = R1ProcessingStatus.WAITING.value
                 outbox.status = "COMPLETED"
                 outbox.completed_at = datetime.now(timezone.utc)
@@ -2012,10 +2237,17 @@ class CandidateHandoffR1Service:
             .with_for_update()
         )
         if job is None or pipeline is None or not job.latest_decision_id:
-            raise ValueError("R14 recovery requires an R1 job, pipeline, and latest decision.")
+            raise ValueError(
+                "R14 recovery requires an R1 job, pipeline, and latest decision."
+            )
         decision = self.db.get(EventCandidateReviewDecisionR1, job.latest_decision_id)
-        if decision is None or decision.decision_state != CandidateReviewState.DIFFERENT_PLAYER.value:
-            raise ValueError("R14 recovery requires a durable DIFFERENT_PLAYER decision.")
+        if (
+            decision is None
+            or decision.decision_state != CandidateReviewState.DIFFERENT_PLAYER.value
+        ):
+            raise ValueError(
+                "R14 recovery requires a durable DIFFERENT_PLAYER decision."
+            )
         ambiguity = self.db.scalar(
             select(EventCandidateAmbiguityR1)
             .where(
@@ -2043,7 +2275,9 @@ class CandidateHandoffR1Service:
             if str(item.get("status") or "").upper() == "PENDING"
         ]
         if active:
-            raise ValueError("R14 recovery is only valid after the active batch is exhausted.")
+            raise ValueError(
+                "R14 recovery is only valid after the active batch is exhausted."
+            )
         artifact = self.storage.resolve_path(decision.confirmation_artifact_path)
         if (
             not artifact.is_file()
@@ -2081,7 +2315,11 @@ class CandidateHandoffR1Service:
             and runtime.get("phase4a_initial_memory_review_status") == "PASS"
             and runtime.get("phase4b_cross_shot_scoring_authorized") is True
             and str(runtime_state.get("status") or "").upper()
-            in {"RUNNING", "COMPLETE_WITH_UNRESOLVED_GAPS", "COMPLETED_WITH_UNRESOLVED_GAPS"}
+            in {
+                "RUNNING",
+                "COMPLETE_WITH_UNRESOLVED_GAPS",
+                "COMPLETED_WITH_UNRESOLVED_GAPS",
+            }
         )
 
         ambiguity.candidate_ids = []
@@ -2144,6 +2382,7 @@ class CandidateHandoffR1Service:
         if submit_runtime:
             get_r1_tracking_executor().submit(tracking_job_id)
         return job
+
 
 def recover_candidate_handoff_state(db: Session) -> dict[str, Any]:
     """Recover from authoritative R1 DB state; never scan legacy pointers."""

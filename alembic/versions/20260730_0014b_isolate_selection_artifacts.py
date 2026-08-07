@@ -1,7 +1,7 @@
 """isolate scene target selection artifacts
 
-Revision ID: 20260730_0014
-Revises: 20260730_0013
+Revision ID: 20260730_0014b
+Revises: 20260730_0014
 Create Date: 2026-07-30
 """
 
@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = "20260730_0014"
-down_revision: Union[str, None] = "20260730_0013"
+revision: str = "20260730_0014b"
+down_revision: Union[str, None] = "20260730_0014"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

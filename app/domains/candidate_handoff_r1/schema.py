@@ -115,7 +115,14 @@ class EventCandidateSelectionRead(BaseModel):
     candidate_manifest_sha256: str
     candidate_media_bundle_sha256: str
     source_video_sha256: str
-    reviewed_shot_boundaries_sha256: str
+    shot_boundaries_sha256: str
+    shot_boundaries_artifact_id: str | None = None
+    shot_boundary_artifact_type: Literal[
+        "AUTO_SHOT_BOUNDARIES", "REVIEWED_SHOT_BOUNDARIES"
+    ] | None = None
+    boundary_origin: Literal["AUTO_DETECTED", "HUMAN_REVIEWED"] | None = None
+    human_reviewed: bool | None = None
+    reviewed_shot_boundaries_sha256: str | None = None
     selection_artifact_sha256: str
     tracking_job_id: str | None = None
 

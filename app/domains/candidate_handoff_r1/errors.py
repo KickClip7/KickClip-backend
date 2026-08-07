@@ -6,6 +6,30 @@ class CandidateSelectionProvenanceMismatch(CandidateHandoffR1Error):
     code = "CANDIDATE_SELECTION_PROVENANCE_MISMATCH"
 
 
+class CandidateTrackingConfigurationInvalid(CandidateHandoffR1Error):
+    code = "CANDIDATE_TRACKING_CONFIGURATION_INVALID"
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
+
+
+class CandidateTrackingInputInvalid(CandidateHandoffR1Error):
+    code = "CANDIDATE_TRACKING_INPUT_INVALID"
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
+
+
+class CandidateTrackingRuntimeContractInvalid(CandidateHandoffR1Error):
+    code = "CANDIDATE_TRACKING_RUNTIME_CONTRACT_INVALID"
+
+    def __init__(self, reason: str, message: str) -> None:
+        self.reason = reason
+        super().__init__(message)
+
+
 class InsufficientReviewableTargetReference(CandidateHandoffR1Error):
     code = "INSUFFICIENT_REVIEWABLE_TARGET_REFERENCE"
 

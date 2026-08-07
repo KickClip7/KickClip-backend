@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import cv2
 import numpy as np
@@ -14,8 +15,7 @@ from .media_cache import SharedFrameCache
 from .schema import CandidateQuality
 from .work_metrics import CandidatePreparationWorkMetrics
 
-
-MEDIA_MATERIALIZATION_POLICY = "CORE_EAGER_DETAIL_LAZY_R1"
+MEDIA_MATERIALIZATION_POLICY = "CORE_EAGER_DETAIL_LAZY_R2_BOUNDARY_PROVENANCE"
 CORE_MEDIA_FILENAMES = {
     "full_frame_context": "full_frame_context.jpg",
     "best_crop_native": "best_crop_native.jpg",
@@ -604,7 +604,11 @@ def build_candidate_review_bundle(
     shortlist_patch_id: str,
     candidate_manifest_sha256: str,
     source_video_sha256: str,
-    reviewed_shot_boundaries_sha256: str,
+    shot_boundaries_artifact_id: str,
+    shot_boundaries_sha256: str,
+    shot_boundary_artifact_type: str,
+    boundary_origin: str,
+    human_reviewed: bool,
     frame_offset: int = 0,
     force_identity_pure: bool | None = None,
     shared_frame_cache: SharedFrameCache | None = None,
@@ -959,8 +963,21 @@ def build_candidate_review_bundle(
         ),
         "candidate_manifest_sha256": candidate_manifest_sha256,
         "source_video_sha256": source_video_sha256,
+        "shot_boundaries": {
+            "artifact_id": shot_boundaries_artifact_id,
+            "artifact_type": shot_boundary_artifact_type,
+            "sha256": shot_boundaries_sha256,
+            "boundary_origin": boundary_origin,
+            "human_reviewed": human_reviewed,
+            "automatic_target_confirmation": False,
+        },
+        "shot_boundaries_artifact_id": shot_boundaries_artifact_id,
+        "shot_boundaries_sha256": shot_boundaries_sha256,
+        "shot_boundary_artifact_type": shot_boundary_artifact_type,
+        "boundary_origin": boundary_origin,
+        "human_reviewed": human_reviewed,
         "reviewed_shot_boundaries_sha256": (
-            reviewed_shot_boundaries_sha256
+            shot_boundaries_sha256 if human_reviewed else None
         ),
         "frame_mapping": {
             "candidate_source_to_tracking_offset": frame_offset,

@@ -18,7 +18,6 @@ from app.utils.id_generator import generate_prefixed_id
 from .contract import canonical_sha256, sha256_file
 from .service import EventCandidateRankingV12ShortlistPatch
 
-
 ARTIFACT_TYPE = "EVENT_CANDIDATE_RANKING_V1_2_SHADOW_SHORTLIST_PATCH"
 
 
@@ -50,21 +49,24 @@ class EventCandidateRankingV12BackendAdapter:
         self,
         *,
         artifact_id: str,
-        artifact_type: str,
+        artifact_type: str | set[str],
         project: Project,
         user: User,
     ) -> Artifact:
         artifact = self.db.get(Artifact, artifact_id)
+        allowed_types = (
+            {artifact_type} if isinstance(artifact_type, str) else artifact_type
+        )
         if (
             artifact is None
-            or artifact.artifact_type != artifact_type
+            or artifact.artifact_type not in allowed_types
             or artifact.project_id != project.project_id
             or artifact.match_id != project.match_id
         ):
-            raise ValueError(f"Required artifact is missing: {artifact_type}")
+            raise ValueError(f"Required artifact is missing: {sorted(allowed_types)}")
         metadata = artifact.metadata_ or {}
         if (
-            artifact_type == "EVENT_CANDIDATE_RANKING_V1_1_2A_SHADOW"
+            "EVENT_CANDIDATE_RANKING_V1_1_2A_SHADOW" in allowed_types
             and metadata.get("owner_id") != user.user_id
             and not user.developer_mode_enabled
         ):
@@ -81,7 +83,8 @@ class EventCandidateRankingV12BackendAdapter:
         project: Project,
         user: User,
         source_ranking_artifact_id: str,
-        reviewed_shots_artifact_id: str,
+        shot_boundaries_artifact_id: str | None = None,
+        reviewed_shots_artifact_id: str | None = None,
         shortlist_size: int = 5,
     ) -> Artifact:
         source = self._owned_source(
@@ -91,8 +94,10 @@ class EventCandidateRankingV12BackendAdapter:
             user=user,
         )
         shots = self._owned_source(
-            artifact_id=reviewed_shots_artifact_id,
-            artifact_type="REVIEWED_SHOT_BOUNDARIES",
+            artifact_id=str(
+                shot_boundaries_artifact_id or reviewed_shots_artifact_id or ""
+            ),
+            artifact_type={"AUTO_SHOT_BOUNDARIES", "REVIEWED_SHOT_BOUNDARIES"},
             project=project,
             user=user,
         )
@@ -107,6 +112,7 @@ class EventCandidateRankingV12BackendAdapter:
                 "source_ranking_artifact_id": source.artifact_id,
                 "source_ranking_sha256": source_sha,
                 "reviewed_shots_artifact_id": shots.artifact_id,
+                "shot_boundaries_artifact_id": shots.artifact_id,
                 "reviewed_shots_sha256": shots_sha,
                 "shortlist_size": shortlist_size,
                 "source_manifest_sha256": sha256_file(
@@ -131,6 +137,7 @@ class EventCandidateRankingV12BackendAdapter:
             "scene_id": source_metadata.get("scene_id"),
             "source_ranking_artifact_id": source.artifact_id,
             "reviewed_shots_artifact_id": shots.artifact_id,
+            "shot_boundaries_artifact_id": shots.artifact_id,
         }
         matching = [
             row
@@ -215,6 +222,7 @@ class EventCandidateRankingV12BackendAdapter:
                 "source_ranking_artifact_id": source.artifact_id,
                 "source_ranking_sha256": source_sha,
                 "reviewed_shots_artifact_id": shots.artifact_id,
+                "shot_boundaries_artifact_id": shots.artifact_id,
                 "reviewed_shots_sha256": shots_sha,
                 "cache_key": cache_key,
                 "sha256": sha256_file(output_path),

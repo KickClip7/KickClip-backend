@@ -10,7 +10,7 @@ from typing import Any, Protocol, Sequence
 from app.ai.runtime.gpu_coordinator import claim_gpu_slot
 
 
-COMPONENT_RUNTIME_VERSION = "kickclip-player-detector-rfdetr/1.0.0"
+COMPONENT_RUNTIME_VERSION = "kickclip-player-detector-rfdetr/1.1.0"
 EXPECTED_RFDETR_VERSION = "1.8.3"
 EXPECTED_MODEL_CLASS = "RFDETRSmall"
 EXPECTED_CLASS_NAMES = [
@@ -21,6 +21,7 @@ EXPECTED_CLASS_NAMES = [
     "ball",
 ]
 PLAYER_CLASS_IDS = frozenset({0, 1})
+ALL_RFDETR_CLASS_IDS = frozenset(range(len(EXPECTED_CLASS_NAMES)))
 INSTALL_MESSAGE = (
     "RF-DETR player detector is not installed. Create or activate a Python "
     "environment compatible with the fine-tuned model and run "
@@ -382,9 +383,21 @@ class RFDETRPlayerDetector:
         requested_device: str,
         confidence_threshold: float = 0.25,
         batch_size: int = 6,
+        inference_threshold: float | None = None,
+        output_class_ids: frozenset[int] | set[int] | None = None,
+        profile: str = "play",
     ):
         self.checkpoint_path = checkpoint_path.expanduser().resolve()
-        self.confidence_threshold = confidence_threshold
+        self.confidence_threshold = float(confidence_threshold)
+        self.inference_threshold = float(
+            inference_threshold
+            if inference_threshold is not None
+            else confidence_threshold
+        )
+        self.output_class_ids = frozenset(
+            PLAYER_CLASS_IDS if output_class_ids is None else output_class_ids
+        )
+        self.profile = str(profile or "play").strip().lower()
         self.batch_size = batch_size
 
         try:
@@ -401,8 +414,23 @@ class RFDETRPlayerDetector:
                 "or install the fine-tuned model.",
                 diagnostics=self.device.as_dict(),
             )
-        if not 0 < confidence_threshold <= 1:
+        if not 0 < self.confidence_threshold <= 1:
             raise ValueError("RF-DETR confidence threshold must be in (0, 1].")
+        if not 0 < self.inference_threshold <= 1:
+            raise ValueError("RF-DETR inference threshold must be in (0, 1].")
+        if self.inference_threshold > self.confidence_threshold:
+            raise ValueError(
+                "RF-DETR inference threshold cannot be greater than the "
+                "output confidence threshold."
+            )
+        if not self.output_class_ids:
+            raise ValueError("RF-DETR output_class_ids cannot be empty.")
+        unsupported = sorted(self.output_class_ids - ALL_RFDETR_CLASS_IDS)
+        if unsupported:
+            raise ValueError(
+                "RF-DETR output_class_ids contains unsupported ids: "
+                f"{unsupported}."
+            )
         if batch_size < 1:
             raise ValueError("RF-DETR batch size must be positive.")
 
@@ -504,17 +532,22 @@ class RFDETRPlayerDetector:
             "checkpoint_path": str(self.checkpoint_path),
             "checkpoint_sha256": self._loaded.checkpoint_sha256,
             "confidence_threshold": self.confidence_threshold,
+            "inference_threshold": self.inference_threshold,
+            "output_confidence_threshold": self.confidence_threshold,
+            "detector_profile": self.profile,
             "class_mapping": {
                 str(index): name
                 for index, name in enumerate(EXPECTED_CLASS_NAMES)
             },
-            "candidate_class_ids": sorted(PLAYER_CLASS_IDS),
+            "candidate_class_ids": sorted(self.output_class_ids),
+            "output_class_ids": sorted(self.output_class_ids),
             "input_color": "RGB",
             "preprocessing": (
                 "RF-DETR 1.8.3 native predict preprocessing "
                 "(checkpoint resolution=512)"
             ),
             "bbox_semantics": "original-frame xyxy",
+            "bbox_bounds_policy": "inclusive_width_minus_1_height_minus_1_v1",
             "additional_nms": False,
             "batch_size": self.batch_size,
             "strict_checkpoint_audit": True,
@@ -553,7 +586,7 @@ class RFDETRPlayerDetector:
                         with self._torch.inference_mode():
                             raw = self._loaded.model.predict(
                                 rgb_images,
-                                threshold=self.confidence_threshold,
+                                threshold=self.inference_threshold,
                             )
                         raw_rows = list(raw) if isinstance(raw, list) else [raw]
                         if len(raw_rows) != len(chunk):
@@ -594,17 +627,23 @@ class RFDETRPlayerDetector:
             class_id = int(raw_class_id)
             confidence = float(raw_confidence)
             if (
-                class_id not in PLAYER_CLASS_IDS
+                class_id not in self.output_class_ids
                 or confidence < self.confidence_threshold
             ):
                 continue
             values = [float(value) for value in raw_box]
             if len(values) != 4:
                 continue
-            x1 = min(max(values[0], 0.0), float(width))
-            y1 = min(max(values[1], 0.0), float(height))
-            x2 = min(max(values[2], 0.0), float(width))
-            y2 = min(max(values[3], 0.0), float(height))
+            # The frozen Stage-1/Stage-2 contract uses inclusive image bounds:
+            # x/y coordinates must stay within [0, width-1] / [0, height-1].
+            # RF-DETR can return sub-pixel values such as x2=1919.74 for a
+            # 1920px frame, so clamp here before any cache/artifact is written.
+            max_x = float(max(0, width - 1))
+            max_y = float(max(0, height - 1))
+            x1 = min(max(values[0], 0.0), max_x)
+            y1 = min(max(values[1], 0.0), max_y)
+            x2 = min(max(values[2], 0.0), max_x)
+            y2 = min(max(values[3], 0.0), max_y)
             if x2 <= x1 or y2 <= y1:
                 continue
             detections.append(
@@ -663,6 +702,7 @@ class HOGPlayerDetector:
             "candidate_class_ids": [0],
             "input_color": "BGR",
             "bbox_semantics": "original-frame xyxy",
+            "bbox_bounds_policy": "inclusive_width_minus_1_height_minus_1_v1",
             "additional_nms": False,
             "batch_size": 1,
             "strict_checkpoint_audit": False,
@@ -685,15 +725,19 @@ class HOGPlayerDetector:
                 scale=1.05,
             )
             frame_rows: list[PlayerDetection] = []
+            frame_height, frame_width = frame.shape[:2]
+            max_x = float(max(0, frame_width - 1))
+            max_y = float(max(0, frame_height - 1))
             for (x, y, width, height), weight in zip(boxes, weights):
+                x1 = min(max(float(x), 0.0), max_x)
+                y1 = min(max(float(y), 0.0), max_y)
+                x2 = min(max(float(x + width), 0.0), max_x)
+                y2 = min(max(float(y + height), 0.0), max_y)
+                if x2 <= x1 or y2 <= y1:
+                    continue
                 frame_rows.append(
                     PlayerDetection(
-                        bbox_xyxy=[
-                            float(x),
-                            float(y),
-                            float(x + width),
-                            float(y + height),
-                        ],
+                        bbox_xyxy=[x1, y1, x2, y2],
                         confidence=min(1.0, max(0.0, float(weight) / 2.0)),
                         class_id=0,
                         class_name="player",
@@ -711,9 +755,24 @@ class _null_context:
         return False
 
 
-def create_player_detector(settings: Any) -> PlayerDetector:
+def create_player_detector(
+    settings: Any,
+    *,
+    profile: str = "play",
+) -> PlayerDetector:
+    """Create the fine-tuned RF-DETR adapter with an explicit inference profile.
+
+    `play` keeps only player/goalkeeper detections at the wide-shot threshold.
+    `observation` keeps all configured observation classes from the lower base
+    threshold; callers then apply close-up/role policy without losing staff or
+    referee evidence.
+    """
+
     backend = str(settings.PLAYER_DETECTOR_BACKEND).lower()
     requested_device = str(settings.PLAYER_DETECTOR_DEVICE).lower()
+    normalized_profile = str(profile or "play").strip().lower()
+    if normalized_profile not in {"play", "observation"}:
+        raise ValueError(f"Unsupported RF-DETR detector profile: {profile}.")
 
     if backend == "hog":
         return HOGPlayerDetector(
@@ -724,13 +783,36 @@ def create_player_detector(settings: Any) -> PlayerDetector:
     if backend != "rfdetr":
         raise ValueError(f"Unsupported player detector backend: {backend}.")
 
+    base_threshold = float(
+        getattr(settings, "RFDETR_BASE_CONF_THRESHOLD", 0.15)
+    )
+    if normalized_profile == "observation":
+        output_threshold = base_threshold
+        output_class_ids = frozenset(
+            getattr(settings, "observation_class_ids", ALL_RFDETR_CLASS_IDS)
+        )
+    else:
+        output_threshold = float(
+            getattr(
+                settings,
+                "TRACKING_PLAY_CONF_THRESHOLD",
+                settings.PLAYER_DETECTOR_CONFIDENCE_THRESHOLD,
+            )
+        )
+        output_class_ids = frozenset(
+            getattr(settings, "tracking_play_class_ids", PLAYER_CLASS_IDS)
+        )
+
+    inference_threshold = min(base_threshold, output_threshold)
+
     try:
         return RFDETRPlayerDetector(
             checkpoint_path=Path(settings.PLAYER_DETECTOR_CHECKPOINT),
             requested_device=requested_device,
-            confidence_threshold=float(
-                settings.PLAYER_DETECTOR_CONFIDENCE_THRESHOLD
-            ),
+            confidence_threshold=output_threshold,
+            inference_threshold=inference_threshold,
+            output_class_ids=output_class_ids,
+            profile=normalized_profile,
             batch_size=int(settings.PLAYER_DETECTOR_BATCH_SIZE),
         )
     except PlayerDetectorUnavailableError as exc:
@@ -745,6 +827,12 @@ def create_player_detector(settings: Any) -> PlayerDetector:
             fallback_used=True,
             source_diagnostics=exc.diagnostics,
         )
+
+
+def create_observation_detector(settings: Any) -> PlayerDetector:
+    """Create RF-DETR in all-class observation mode for candidate discovery."""
+
+    return create_player_detector(settings, profile="observation")
 
 
 def discovery_failure_payload(

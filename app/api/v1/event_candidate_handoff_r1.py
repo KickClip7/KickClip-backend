@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -12,22 +13,22 @@ from app.domains.auth.access import (
 )
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
-from app.domains.candidate_handoff_r1.errors import CandidateHandoffR1Error
 from app.domains.candidate_handoff_r1.errors import (
+    CandidateHandoffR1Error,
     CandidateRecommendationNotPrepared,
+)
+from app.domains.candidate_handoff_r1.model import (
+    EventCandidateAmbiguityR1,
+    EventCandidateSelectionR1,
 )
 from app.domains.candidate_handoff_r1.preparation import (
     PREPARATION_TASK_TYPE,
     install_candidate_preparation_integration,
 )
-from app.domains.candidate_handoff_r1.model import EventCandidateSelectionR1
-from app.domains.candidate_handoff_r1.model import EventCandidateAmbiguityR1
-from app.storage.local_storage import LocalStorage
-from sqlalchemy import select
 from app.domains.candidate_handoff_r1.schema import (
-    CandidateReviewResponse,
-    CandidateReviewDecisionRequest,
     CandidateRecommendationPrepareRequest,
+    CandidateReviewDecisionRequest,
+    CandidateReviewResponse,
     EventCandidateRecommendationResponse,
     EventCandidateSelectionCreateRequest,
     EventCandidateSelectionRead,
@@ -35,18 +36,19 @@ from app.domains.candidate_handoff_r1.schema import (
     EventCandidateTrackingCreateResponse,
 )
 from app.domains.candidate_handoff_r1.service import CandidateHandoffR1Service
+from app.domains.highlight.model import HighlightRevision, SceneAITask
 from app.domains.highlight.scene_ai_task import (
     SceneAITaskService,
     get_scene_ai_task_executor,
 )
-from app.domains.highlight.schema import SceneAITaskRead
-from app.domains.highlight.model import HighlightRevision, SceneAITask
 from app.domains.highlight.schema import (
     HighlightRevisionRead,
     HighlightSceneSelectionRequest,
+    SceneAITaskRead,
 )
 from app.domains.highlight.service import HighlightWorkflowService
-
+from app.domains.shot_boundary.service import ShotBoundaryReviewService
+from app.storage.local_storage import LocalStorage
 
 router = APIRouter()
 install_candidate_preparation_integration()
@@ -60,6 +62,62 @@ def _prepare_url(
         f"/events/{event_id}/candidate-recommendations/prepare"
         f"?scene_id={scene_id}"
     )
+
+
+def _shot_boundary_urls(
+    project_id: str, revision_id: str, event_id: str, scene_id: str
+) -> tuple[str, str]:
+    root = (
+        f"/api/v1/projects/{project_id}/highlight/revisions/{revision_id}"
+        f"/events/{event_id}/shot-boundaries"
+    )
+    return f"{root}/prepare?scene_id={scene_id}", f"{root}?scene_id={scene_id}"
+
+
+def _require_candidate_discovery_inputs(
+    db: Session,
+    *,
+    project,
+    user: User,
+    revision_id: str,
+    event_id: str,
+    scene_id: str,
+) -> dict[str, str]:
+    try:
+        return ShotBoundaryReviewService(db).prepare_candidate_discovery_inputs(
+            project=project,
+            user=user,
+            revision_id=revision_id,
+            event_id=event_id,
+            scene_id=scene_id,
+        )
+    except Exception as exc:
+        if getattr(exc, "code", None) != "SHOT_BOUNDARY_REVIEW_REQUIRED":
+            code = getattr(exc, "code", "CANDIDATE_DISCOVERY_INPUTS_NOT_READY")
+            raise HTTPException(
+                status_code=getattr(exc, "http_status", status.HTTP_409_CONFLICT),
+                detail={
+                    "code": code,
+                    "message": str(exc),
+                    "detail": dict(getattr(exc, "detail", {}) or {}),
+                    "automatic_target_confirmation": False,
+                },
+            ) from exc
+        prepare_url, status_url = _shot_boundary_urls(
+            project.project_id, revision_id, event_id, scene_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "SHOT_BOUNDARY_REVIEW_REQUIRED",
+                "message": "Automatic shot boundaries need human correction.",
+                "reason": "AUTOMATIC_BOUNDARY_STRUCTURAL_GATE_FAILED",
+                "prepare_review_url": prepare_url,
+                "review_status_url": status_url,
+                "detail": dict(getattr(exc, "detail", {}) or {}),
+                "automatic_target_confirmation": False,
+            },
+        ) from exc
 
 
 def _matching_preparation_task(
@@ -130,20 +188,33 @@ def _raise(exc: Exception) -> None:
     message = str(exc)
     if "INVALID_TARGET_MEMORY_REFERENCE" in message:
         code = "INVALID_TARGET_MEMORY_REFERENCE"
+    detail = {"code": code, "message": message}
+    reason = getattr(exc, "reason", None)
+    if reason:
+        detail["reason"] = reason
     raise HTTPException(
         status_code=(
-            status.HTTP_422_UNPROCESSABLE_ENTITY
-            if code == "INVALID_TARGET_MEMORY_REFERENCE"
-            else status.HTTP_409_CONFLICT
+            status.HTTP_503_SERVICE_UNAVAILABLE
+            if code == "CANDIDATE_TRACKING_CONFIGURATION_INVALID"
+            else (
+                status.HTTP_422_UNPROCESSABLE_ENTITY
+                if code
+                in {
+                    "INVALID_TARGET_MEMORY_REFERENCE",
+                    "CANDIDATE_TRACKING_INPUT_INVALID",
+                    "CANDIDATE_TRACKING_RUNTIME_CONTRACT_INVALID",
+                }
+                else status.HTTP_409_CONFLICT
+            )
         ),
-        detail={"code": code, "message": message},
+        detail=detail,
     ) from exc
 
 
 @router.post(
     "/projects/{project_id}/highlight/scenes/select",
     response_model=HighlightRevisionRead,
-    summary="Select scenes and start exact-revision recommendation preparation",
+    summary="Select scenes for automatic candidate discovery",
 )
 def select_highlight_scenes_and_prepare(
     project_id: str,
@@ -168,35 +239,23 @@ def select_highlight_scenes_and_prepare(
                 "message": str(exc),
             },
         ) from exc
-    task_service = SceneAITaskService(db)
-    preparation_tasks = []
+    readiness = []
     for scene_id in revision.selected_scene_ids or []:
-        task, _ = task_service.enqueue(
-            user=current_user,
-            project=project,
-            task_type=PREPARATION_TASK_TYPE,
-            payload={
-                "revision_id": revision.revision_id,
-                "event_id": scene_id,
-                "scene_id": scene_id,
-                "shortlist_size": 5,
-            },
-        )
-        preparation_tasks.append(
+        readiness.append(
             {
                 "scene_id": scene_id,
-                "task_id": task.task_id,
-                "status": task.status,
-                "status_url": f"/api/v1/scene-ai-tasks/{task.task_id}",
+                "status": "READY_FOR_AUTOMATIC_CANDIDATE_DISCOVERY",
+                "boundary_origin": "AUTO_DETECTED",
+                "human_reviewed": False,
+                "automatic_target_confirmation": False,
             }
         )
-        if task.status == "QUEUED":
-            get_scene_ai_task_executor().submit(task.task_id)
     revision.options = {
         **(revision.options or {}),
         "candidate_discovery": {
             **((revision.options or {}).get("candidate_discovery") or {}),
-            "recommendation_preparation": preparation_tasks,
+            "shot_boundary_readiness": readiness,
+            "recommendation_preparation": [],
             "automatic_target_confirmation": False,
         },
     }
@@ -220,6 +279,14 @@ def list_event_candidate_recommendations(
     current_user: User = Depends(get_current_user),
 ) -> EventCandidateRecommendationResponse:
     project = require_project_access(db, project_id, current_user)
+    _require_candidate_discovery_inputs(
+        db,
+        project=project,
+        user=current_user,
+        revision_id=revision_id,
+        event_id=event_id,
+        scene_id=scene_id,
+    )
     try:
         return CandidateHandoffR1Service(db).list_recommendations(
             project=project,
@@ -243,9 +310,7 @@ def list_event_candidate_recommendations(
                 if running
                 else str(exc)
             ),
-            "prepare_url": _prepare_url(
-                project_id, revision_id, event_id, scene_id
-            ),
+            "prepare_url": _prepare_url(project_id, revision_id, event_id, scene_id),
             "reason": "PREPARATION_RUNNING" if running else exc.reason,
         }
         if task is not None:
@@ -280,6 +345,14 @@ def prepare_event_candidate_recommendations(
     current_user: User = Depends(get_current_user),
 ) -> SceneAITaskRead:
     project = require_project_access(db, project_id, current_user)
+    contract = _require_candidate_discovery_inputs(
+        db,
+        project=project,
+        user=current_user,
+        revision_id=revision_id,
+        event_id=event_id,
+        scene_id=scene_id,
+    )
     task_service = SceneAITaskService(db)
     task, _ = task_service.enqueue(
         user=current_user,
@@ -290,6 +363,13 @@ def prepare_event_candidate_recommendations(
             "event_id": event_id,
             "scene_id": scene_id,
             "shortlist_size": payload.shortlist_size,
+            "shot_boundaries_artifact_id": contract[
+                "shot_boundaries_artifact_id"
+            ],
+            "shot_boundaries_sha256": contract["shot_boundaries_sha256"],
+            "detections_artifact_id": contract["detections_artifact_id"],
+            "boundary_origin": contract["boundary_origin"],
+            "automatic_target_confirmation": False,
         },
     )
     if task.status == "QUEUED":
@@ -511,5 +591,7 @@ def get_ambiguity_candidate_media(
         raise HTTPException(status_code=404, detail="Candidate media not found.")
     path = LocalStorage().resolve_path(str(candidate.get(field[0]) or ""))
     if not path.is_file():
-        raise HTTPException(status_code=404, detail="Candidate media artifact is missing.")
+        raise HTTPException(
+            status_code=404, detail="Candidate media artifact is missing."
+        )
     return FileResponse(path, media_type=field[1], filename=path.name)

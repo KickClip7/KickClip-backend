@@ -111,12 +111,15 @@ class Settings(BaseSettings):
     # 빈 경로는 "설정되지 않음"을 뜻하며 verifier가 기능을 unavailable로 표시한다.
     TRACKING_ENABLED: bool = False
     TRACKING_PROJECT_ROOT: str = ""
+    # Canonical product runtime. This must point to
+    # tracking_source/target_centric_tracking_e2e_v1/run_target_centric_pipeline.py.
     TRACKING_E2E_SCRIPT_PATH: str = ""
+    # Legacy compatibility only. New tracking jobs MUST NOT route through this.
     TRACKING_SCENE_SELECTION_R3_SCRIPT_PATH: str = ""
     TRACKING_VERIFY_SCRIPT_PATH: str = ""
     TRACKING_PYTHON_EXECUTABLE: str = ""
     TRACKING_OUTPUT_ROOT: str = ""
-    TRACKING_DEVICE: Literal["auto", "cuda", "mps", "cpu"] = "auto"
+    TRACKING_DEVICE: Literal["auto", "cuda", "cpu"] = "auto"
     TRACKING_REACQUISITION_MODE: Literal["assisted"] = "assisted"
     TRACKING_MAX_CONCURRENT_JOBS: int = Field(default=1, ge=1, le=8)
     TRACKING_PROCESS_TIMEOUT_SECONDS: int = Field(default=21600, ge=60)
@@ -157,6 +160,9 @@ class Settings(BaseSettings):
         ge=1,
         le=8,
     )
+    # Legacy R1/R2/R3 compatibility settings retained only so existing
+    # scene-selection/event-ranking modules and older .env files continue to load.
+    # They are not dependencies of the canonical target-centric tracking runtime.
     TRACKING_SCENE_SELECTION_VERIFY_SCRIPT_PATH: str = ""
     TRACKING_R2_MANIFEST_PATH: str = ""
     TRACKING_R2_MANIFEST_SHA256: str = ""
@@ -178,12 +184,44 @@ class Settings(BaseSettings):
     )
     PLAYER_DETECTOR_DEVICE: Literal["auto", "cuda", "mps", "cpu"] = "auto"
     PLAYER_DETECTOR_ALLOW_HOG_FALLBACK: bool = False
+    # Legacy compatibility setting. New RF-DETR routing uses the explicit
+    # base/play/observation thresholds below. Keep this field so older local
+    # .env files and unrelated call sites continue to load safely.
     PLAYER_DETECTOR_CONFIDENCE_THRESHOLD: float = Field(
         default=0.25,
         gt=0,
         le=1,
     )
     PLAYER_DETECTOR_BATCH_SIZE: int = Field(default=6, ge=1, le=32)
+
+    # ---------------------------------------------------------------------
+    # Fine-tuned RF-DETR soccer inference contract
+    # ---------------------------------------------------------------------
+    # Checkpoint classes are fixed to:
+    #   0 player, 1 goalkeeper, 2 referee, 3 staff, 4 ball
+    RFDETR_BASE_CONF_THRESHOLD: float = Field(default=0.15, gt=0, le=1)
+
+    # Wide / live-play candidate and tracking policy. Class lists stay as
+    # strings in Settings so .env can use the natural `0,1` syntax instead
+    # of JSON arrays. Use the parsed *_class_ids properties below in code.
+    TRACKING_PLAY_CLASSES: str = "0,1"
+    TRACKING_PLAY_CONF_THRESHOLD: float = Field(default=0.15, gt=0, le=1)
+    TRACKING_IOU_THRESHOLD: float = Field(default=0.5, ge=0, le=1)
+    TRACKING_TRACKER: str = "botsort"
+
+    # Close-up / replay / bench observation policy. All five RF-DETR classes
+    # are retained here so referee/staff labels are not thrown away before
+    # candidate-role filtering.
+    OBSERVATION_CLASSES: str = "0,1,2,3,4"
+    OBSERVATION_CONF_THRESHOLD: float = Field(default=0.25, gt=0, le=1)
+    OBSERVATION_CROP_TOP_K: int = Field(default=3, ge=1, le=20)
+
+    # Close-up classification and crop eligibility.
+    CLOSEUP_MIN_BOX_HEIGHT_RATIO: float = Field(default=0.35, gt=0, le=1)
+    CLOSEUP_MIN_BOX_AREA_RATIO: float = Field(default=0.08, gt=0, le=1)
+    CLOSEUP_CROP_MIN_CONF: float = Field(default=0.25, gt=0, le=1)
+    CLOSEUP_CROP_MIN_HEIGHT_RATIO: float = Field(default=0.20, gt=0, le=1)
+    CLOSEUP_CROP_MIN_AREA_RATIO: float = Field(default=0.03, gt=0, le=1)
 
     # -------------------------------------------------------------------------
     # Developer mode
@@ -192,6 +230,41 @@ class Settings(BaseSettings):
     # 운영 환경에서는 항상 비활성화해야 한다.
     DEVELOPER_MODE_ENABLED: bool = False
     DEVELOPER_ACCESS_KEY: str = ""
+
+    @staticmethod
+    def _parse_detector_class_ids(raw: str, *, field_name: str) -> frozenset[int]:
+        values: set[int] = set()
+        for token in str(raw or "").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                class_id = int(token)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{field_name} must be a comma-separated integer list."
+                ) from exc
+            if class_id < 0 or class_id > 4:
+                raise ValueError(
+                    f"{field_name} contains unsupported RF-DETR class id "
+                    f"{class_id}; expected ids are 0..4."
+                )
+            values.add(class_id)
+        if not values:
+            raise ValueError(f"{field_name} must contain at least one class id.")
+        return frozenset(values)
+
+    @property
+    def tracking_play_class_ids(self) -> frozenset[int]:
+        return self._parse_detector_class_ids(
+            self.TRACKING_PLAY_CLASSES, field_name="TRACKING_PLAY_CLASSES"
+        )
+
+    @property
+    def observation_class_ids(self) -> frozenset[int]:
+        return self._parse_detector_class_ids(
+            self.OBSERVATION_CLASSES, field_name="OBSERVATION_CLASSES"
+        )
 
     @property
     def cors_origins(self) -> list[str]:
