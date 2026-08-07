@@ -526,7 +526,13 @@ class R3DispatchContractTests(unittest.TestCase):
                 "tracking_launch_manifest_path": str(
                     paths["tracking_launch_manifest.json"]
                 ),
+                "tracking_launch_manifest_sha256": hashlib.sha256(
+                    paths["tracking_launch_manifest.json"].read_bytes()
+                ).hexdigest(),
                 "shot_boundaries_path": str(boundaries),
+                "shot_boundaries_sha256": hashlib.sha256(
+                    boundaries.read_bytes()
+                ).hexdigest(),
                 "target_selection_path": str(paths["target_selection.json"]),
                 "target_selection_sha256": hashlib.sha256(
                     paths["target_selection.json"].read_bytes()

@@ -11,6 +11,7 @@ from app.domains.timeline.schema import TimelineEventRead
 class ActionSpottingJobRequest(BaseModel):
     run_feature_extraction: bool = True
     feature_extraction_mode: Literal["auto", "force", "skip"] = "auto"
+    feature_batch_size: int | None = Field(default=None, ge=1, le=512)
     device: str = "auto"
     real_adapter_batch_size: int | None = Field(default=None, ge=1, le=1024)
     real_adapter_max_candidates: Literal[113] | None = None
@@ -31,6 +32,8 @@ class ActionSpottingJobRequest(BaseModel):
         }
         if self.real_adapter_batch_size is not None:
             values["real_adapter_batch_size"] = self.real_adapter_batch_size
+        if self.feature_batch_size is not None:
+            values["feature_batch_size"] = self.feature_batch_size
         if self.real_adapter_max_candidates is not None:
             values["real_adapter_max_candidates"] = self.real_adapter_max_candidates
         if self.halftime_split_sec is not None:

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.domains.tracking.model import TrackingJob
 from app.domains.tracking.status import TrackingBackendStatus
+from app.domains.tracking.execution import LEGACY_EXECUTION_KIND, R1_EXECUTION_KIND
 
 
 class TrackingJobRepository:
@@ -31,12 +32,18 @@ class TrackingJobRepository:
             .with_for_update()
         )
 
-    def claim_queued(self, tracking_job_id: str) -> bool:
+    def claim_queued(
+        self,
+        tracking_job_id: str,
+        *,
+        execution_kind: str = LEGACY_EXECUTION_KIND,
+    ) -> bool:
         result = self.db.execute(
             update(TrackingJob)
             .where(
                 TrackingJob.tracking_job_id == tracking_job_id,
                 TrackingJob.status == TrackingBackendStatus.QUEUED.value,
+                TrackingJob.execution_kind == execution_kind,
             )
             .values(
                 status=TrackingBackendStatus.RUNNING.value,
@@ -45,7 +52,11 @@ class TrackingJobRepository:
         )
         return bool(result.rowcount)
 
-    def list_recoverable(self) -> list[TrackingJob]:
+    def list_recoverable(
+        self,
+        *,
+        execution_kind: str = LEGACY_EXECUTION_KIND,
+    ) -> list[TrackingJob]:
         return list(
             self.db.scalars(
                 select(TrackingJob)
@@ -55,11 +66,29 @@ class TrackingJobRepository:
                             TrackingBackendStatus.QUEUED.value,
                             TrackingBackendStatus.RUNNING.value,
                         ]
-                    )
+                    ),
+                    TrackingJob.execution_kind == execution_kind,
                 )
                 .order_by(TrackingJob.created_at.asc())
             ).all()
         )
+
+    def quarantine_unroutable(self) -> int:
+        result = self.db.execute(
+            update(TrackingJob)
+            .where(
+                TrackingJob.execution_kind.notin_([LEGACY_EXECUTION_KIND, R1_EXECUTION_KIND]),
+                TrackingJob.status.in_([TrackingBackendStatus.QUEUED.value, TrackingBackendStatus.RUNNING.value]),
+            )
+            .values(
+                status=TrackingBackendStatus.FAILED.value,
+                processing_status="FAILED",
+                failure_code="UNROUTABLE_TRACKING_JOB",
+                error_type="UNROUTABLE_TRACKING_JOB",
+                error_message="Tracking execution kind is missing or unsupported.",
+            )
+        )
+        return int(result.rowcount or 0)
 
     def find_equivalent_reusable(
         self,
@@ -80,6 +109,7 @@ class TrackingJobRepository:
                 TrackingJob.project_id == project_id,
                 TrackingJob.bbox_format == bbox_format,
                 TrackingJob.reacquisition_mode == reacquisition_mode,
+                TrackingJob.execution_kind == LEGACY_EXECUTION_KIND,
                 TrackingJob.status.notin_(
                     [
                         TrackingBackendStatus.FAILED.value,

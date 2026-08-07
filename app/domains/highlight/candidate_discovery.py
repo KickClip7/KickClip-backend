@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,10 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.domains.artifact.repository import ArtifactRepository
+from app.domains.highlight.detection_cache import (
+    DETECTION_CACHE_POLICY_VERSION,
+    PlayerDetectionCache,
+)
 from app.domains.highlight.model import HighlightRevision, ScenePlayerCandidate
 from app.domains.highlight.player_detector import (
     PlayerDetector,
@@ -39,6 +44,9 @@ class CandidateTracklet:
 class PlayerCandidateDiscoveryService:
     """RF-DETR-backed discovery of scene-local, unnamed player candidates."""
 
+    CANDIDATE_ROLE_FILTER_POLICY_VERSION = "PLAYER_GOALKEEPER_ONLY_R1"
+    ALLOWED_CANDIDATE_CLASS_NAMES = frozenset({"player", "goalkeeper"})
+
     SAMPLE_WINDOW_COUNT = 5
     SAMPLES_PER_WINDOW = 3
     STABLE_MAX_GAP_SECONDS = 0.2
@@ -62,6 +70,9 @@ class PlayerCandidateDiscoveryService:
         self.storage = LocalStorage()
         self.repository = HighlightRepository(db)
         self.artifact_repository = ArtifactRepository(db)
+        self.detection_cache = PlayerDetectionCache(
+            self.storage.storage_root / "player_detection_cache_r1"
+        )
 
     def discover(
         self,
@@ -80,6 +91,30 @@ class PlayerCandidateDiscoveryService:
             ) from exc
 
         detector = self.detector or create_player_detector(self.settings)
+
+        source_path = self.storage.resolve_path(source_asset.file_path)
+        if not source_path.is_file():
+            raise FileNotFoundError("Source MediaAsset file is missing.")
+        source_video_sha256 = self._source_video_sha256(
+            source_asset=source_asset,
+            source_path=source_path,
+        )
+        cache_totals = {
+            "requested_frame_count": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "inference_frame_count": 0,
+            "cache_write_count": 0,
+        }
+        candidate_filter_totals = {
+            "raw_detection_count": 0,
+            "allowed_role_detection_count": 0,
+            "eligible_candidate_detection_count": 0,
+            "excluded_non_target_role_count": 0,
+            "excluded_too_small_count": 0,
+        }
+        excluded_role_totals: dict[str, int] = {}
+
         revision.options = {
             **(revision.options or {}),
             "candidate_discovery": {
@@ -87,12 +122,16 @@ class PlayerCandidateDiscoveryService:
                 "backend": detector.runtime_metadata.get("backend"),
                 "runtime": detector.runtime_metadata,
                 "selected_scene_count": len(scenes),
+                "source_video_sha256": source_video_sha256,
+                "detection_cache_policy": DETECTION_CACHE_POLICY_VERSION,
+                "candidate_role_filter": {
+                    "policy_version": self.CANDIDATE_ROLE_FILTER_POLICY_VERSION,
+                    "allowed_class_names": sorted(
+                        self.ALLOWED_CANDIDATE_CLASS_NAMES
+                    ),
+                },
             },
         }
-
-        source_path = self.storage.resolve_path(source_asset.file_path)
-        if not source_path.is_file():
-            raise FileNotFoundError("Source MediaAsset file is missing.")
 
         capture = cv2.VideoCapture(str(source_path))
         if not capture.isOpened():
@@ -105,17 +144,32 @@ class PlayerCandidateDiscoveryService:
         created: list[ScenePlayerCandidate] = []
         try:
             for scene in scenes:
-                created.extend(
-                    self._discover_scene(
-                        cv2=cv2,
-                        capture=capture,
-                        detector=detector,
-                        fps=fps,
-                        revision=revision,
-                        source_asset=source_asset,
-                        scene=scene,
-                    )
+                scene_candidates, scene_cache = self._discover_scene(
+                    cv2=cv2,
+                    capture=capture,
+                    detector=detector,
+                    fps=fps,
+                    revision=revision,
+                    source_asset=source_asset,
+                    source_video_sha256=source_video_sha256,
+                    scene=scene,
                 )
+                created.extend(scene_candidates)
+                cache_metrics = dict(scene_cache.get("detection_cache") or {})
+                filter_metrics = dict(scene_cache.get("candidate_role_filter") or {})
+                for key in cache_totals:
+                    cache_totals[key] += int(cache_metrics.get(key, 0))
+                for key in candidate_filter_totals:
+                    candidate_filter_totals[key] += int(
+                        filter_metrics.get(key, 0)
+                    )
+                for class_name, count in dict(
+                    filter_metrics.get("excluded_role_counts") or {}
+                ).items():
+                    normalized = str(class_name or "unknown")
+                    excluded_role_totals[normalized] = (
+                        excluded_role_totals.get(normalized, 0) + int(count)
+                    )
         except PlayerDetectorError:
             raise
         except TrackingInputError:
@@ -143,6 +197,22 @@ class PlayerCandidateDiscoveryService:
                         MIN_TRACKING_DURATION_SECONDS
                     ),
                     "selection_policy": "earliest_stable_anchor",
+                    "detection_cache": {
+                        "policy_version": DETECTION_CACHE_POLICY_VERSION,
+                        **cache_totals,
+                    },
+                    "candidate_role_filter": {
+                        "policy_version": (
+                            self.CANDIDATE_ROLE_FILTER_POLICY_VERSION
+                        ),
+                        "allowed_class_names": sorted(
+                            self.ALLOWED_CANDIDATE_CLASS_NAMES
+                        ),
+                        **candidate_filter_totals,
+                        "excluded_role_counts": dict(
+                            sorted(excluded_role_totals.items())
+                        ),
+                    },
                 },
             )
 
@@ -154,6 +224,30 @@ class PlayerCandidateDiscoveryService:
                 "runtime": detector.runtime_metadata,
                 "selected_scene_count": len(scenes),
                 "candidate_count": len(created),
+                "source_video_sha256": source_video_sha256,
+                "candidate_role_filter": {
+                    "policy_version": self.CANDIDATE_ROLE_FILTER_POLICY_VERSION,
+                    "allowed_class_names": sorted(
+                        self.ALLOWED_CANDIDATE_CLASS_NAMES
+                    ),
+                    **candidate_filter_totals,
+                    "excluded_role_counts": dict(
+                        sorted(excluded_role_totals.items())
+                    ),
+                },
+                "detection_cache": {
+                    "policy_version": DETECTION_CACHE_POLICY_VERSION,
+                    **cache_totals,
+                    "cache_hit_ratio": (
+                        round(
+                            cache_totals["cache_hits"]
+                            / cache_totals["requested_frame_count"],
+                            6,
+                        )
+                        if cache_totals["requested_frame_count"] > 0
+                        else 0.0
+                    ),
+                },
             },
         }
         return created
@@ -167,43 +261,95 @@ class PlayerCandidateDiscoveryService:
         fps: float,
         revision: HighlightRevision,
         source_asset: MediaAsset,
+        source_video_sha256: str,
         scene: TimelineEvent,
-    ) -> list[ScenePlayerCandidate]:
+    ) -> tuple[list[ScenePlayerCandidate], dict[str, Any]]:
         sample_times = self._sample_times(scene, fps=fps)
         tracklets: list[CandidateTracklet] = []
         sampled_frames: dict[float, Any] = {}
+        sampled_frame_indices: dict[float, int] = {}
 
         for source_time in sample_times:
-            capture.set(cv2.CAP_PROP_POS_MSEC, source_time * 1000.0)
+            frame_index = max(0, round(source_time * fps))
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
             ok, frame = capture.read()
             if not ok or frame is None:
                 continue
             sampled_frames[source_time] = frame
+            sampled_frame_indices[source_time] = frame_index
 
         ordered_times = list(sampled_frames)
         if not ordered_times:
-            return []
-        detections_by_frame = detector.detect_batch(
-            [sampled_frames[source_time] for source_time in ordered_times]
+            return [], {
+                "detection_cache": {
+                    "requested_frame_count": 0,
+                    "cache_hits": 0,
+                    "cache_misses": 0,
+                    "inference_frame_count": 0,
+                    "cache_write_count": 0,
+                },
+                "candidate_role_filter": {
+                    "policy_version": (
+                        self.CANDIDATE_ROLE_FILTER_POLICY_VERSION
+                    ),
+                    "allowed_class_names": sorted(
+                        self.ALLOWED_CANDIDATE_CLASS_NAMES
+                    ),
+                    "raw_detection_count": 0,
+                    "allowed_role_detection_count": 0,
+                    "eligible_candidate_detection_count": 0,
+                    "excluded_non_target_role_count": 0,
+                    "excluded_too_small_count": 0,
+                    "excluded_role_counts": {},
+                },
+            }
+
+        cache_result = self.detection_cache.detect_batch(
+            source_video_sha256=source_video_sha256,
+            frame_indices=[
+                sampled_frame_indices[source_time]
+                for source_time in ordered_times
+            ],
+            frames_bgr=[
+                sampled_frames[source_time]
+                for source_time in ordered_times
+            ],
+            detector=detector,
         )
+        detections_by_frame = cache_result.detections_by_frame
         if len(detections_by_frame) != len(ordered_times):
             raise RuntimeError(
                 "Player detector output count does not match sampled frames."
             )
+
+        scene_filter_totals = {
+            "raw_detection_count": 0,
+            "allowed_role_detection_count": 0,
+            "eligible_candidate_detection_count": 0,
+            "excluded_non_target_role_count": 0,
+            "excluded_too_small_count": 0,
+        }
+        scene_excluded_role_counts: dict[str, int] = {}
 
         for source_time, detections in zip(
             ordered_times,
             detections_by_frame,
         ):
             frame = sampled_frames[source_time]
-            eligible = [
-                detection
-                for detection in detections
-                if (
-                    detection.bbox_xyxy[3] - detection.bbox_xyxy[1]
+            eligible, filter_metrics = self._filter_candidate_detections(
+                detections,
+                frame_height=int(frame.shape[0]),
+            )
+            for key in scene_filter_totals:
+                scene_filter_totals[key] += int(filter_metrics.get(key, 0))
+            for class_name, count in dict(
+                filter_metrics.get("excluded_role_counts") or {}
+            ).items():
+                normalized = str(class_name or "unknown")
+                scene_excluded_role_counts[normalized] = (
+                    scene_excluded_role_counts.get(normalized, 0)
+                    + int(count)
                 )
-                >= frame.shape[0] * self.MIN_BOX_HEIGHT_RATIO
-            ]
             for detection in eligible:
                 bbox = detection.bbox_xyxy
                 score = detection.confidence
@@ -217,6 +363,7 @@ class PlayerCandidateDiscoveryService:
                 )
                 observation = {
                     "source_time": source_time,
+                    "source_frame_index": sampled_frame_indices[source_time],
                     "bbox": bbox,
                     "score": score,
                     "class_id": detection.class_id,
@@ -303,10 +450,27 @@ class PlayerCandidateDiscoveryService:
                     "detector": detector.runtime_metadata.get("backend"),
                     "detector_provenance": detector.runtime_metadata,
                     "class_id": int(anchor["class_id"]),
-                    "class_name": str(anchor["class_name"]),
+                    "class_name": self._normalize_class_name(
+                        anchor["class_name"]
+                    ),
+                    "candidate_role_filter_policy": (
+                        self.CANDIDATE_ROLE_FILTER_POLICY_VERSION
+                    ),
                     "confidence": round(float(anchor["score"]), 6),
                     "source_media_asset_id": source_asset.asset_id,
+                    "source_video_sha256": source_video_sha256,
                     "sample_support": len(tracklet.observations),
+                    "detection_cache": {
+                        "policy_version": DETECTION_CACHE_POLICY_VERSION,
+                        "detector_fingerprint": (
+                            cache_result.detector_fingerprint
+                        ),
+                        "scene_cache_hits": cache_result.cache_hits,
+                        "scene_cache_misses": cache_result.cache_misses,
+                        "scene_inference_frame_count": (
+                            cache_result.inference_frame_count
+                        ),
+                    },
                     "initialization_anchor": {
                         "policy": "earliest_stable_anchor",
                         "valid": True,
@@ -331,6 +495,9 @@ class PlayerCandidateDiscoveryService:
                                     float(observation["source_time"]),
                                     6,
                                 ),
+                                "source_frame_index": int(
+                                    observation["source_frame_index"]
+                                ),
                                 "bbox_xyxy": [
                                     round(float(value), 3)
                                     for value in observation["bbox"]
@@ -346,7 +513,91 @@ class PlayerCandidateDiscoveryService:
                 },
             )
             candidates.append(candidate)
-        return candidates
+        return candidates, {
+            "detection_cache": cache_result.as_dict(),
+            "candidate_role_filter": {
+                "policy_version": self.CANDIDATE_ROLE_FILTER_POLICY_VERSION,
+                "allowed_class_names": sorted(
+                    self.ALLOWED_CANDIDATE_CLASS_NAMES
+                ),
+                **scene_filter_totals,
+                "excluded_role_counts": dict(
+                    sorted(scene_excluded_role_counts.items())
+                ),
+            },
+        }
+
+    @classmethod
+    def _filter_candidate_detections(
+        cls,
+        detections: list[Any],
+        *,
+        frame_height: int,
+    ) -> tuple[list[Any], dict[str, Any]]:
+        eligible: list[Any] = []
+        excluded_role_counts: dict[str, int] = {}
+        metrics = {
+            "raw_detection_count": 0,
+            "allowed_role_detection_count": 0,
+            "eligible_candidate_detection_count": 0,
+            "excluded_non_target_role_count": 0,
+            "excluded_too_small_count": 0,
+        }
+        minimum_height = max(0.0, float(frame_height)) * cls.MIN_BOX_HEIGHT_RATIO
+
+        for detection in detections:
+            metrics["raw_detection_count"] += 1
+            class_name = cls._normalize_class_name(
+                getattr(detection, "class_name", "")
+            )
+            if class_name not in cls.ALLOWED_CANDIDATE_CLASS_NAMES:
+                metrics["excluded_non_target_role_count"] += 1
+                role_key = class_name or "unknown"
+                excluded_role_counts[role_key] = (
+                    excluded_role_counts.get(role_key, 0) + 1
+                )
+                continue
+
+            metrics["allowed_role_detection_count"] += 1
+            bbox = getattr(detection, "bbox_xyxy", None)
+            if (
+                not isinstance(bbox, (list, tuple))
+                or len(bbox) != 4
+                or float(bbox[3]) - float(bbox[1]) < minimum_height
+            ):
+                metrics["excluded_too_small_count"] += 1
+                continue
+
+            eligible.append(detection)
+            metrics["eligible_candidate_detection_count"] += 1
+
+        return eligible, {
+            "policy_version": cls.CANDIDATE_ROLE_FILTER_POLICY_VERSION,
+            "allowed_class_names": sorted(
+                cls.ALLOWED_CANDIDATE_CLASS_NAMES
+            ),
+            **metrics,
+            "excluded_role_counts": dict(sorted(excluded_role_counts.items())),
+        }
+
+    @staticmethod
+    def _normalize_class_name(value: object) -> str:
+        return str(value or "").strip().lower()
+
+    @staticmethod
+    def _source_video_sha256(
+        *,
+        source_asset: MediaAsset,
+        source_path: Path,
+    ) -> str:
+        declared = str(source_asset.sha256 or "")
+        if len(declared) == 64:
+            return declared
+        digest = hashlib.sha256()
+        with source_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @classmethod
     def _best_tracklet(

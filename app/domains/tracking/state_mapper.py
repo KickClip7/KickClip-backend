@@ -122,6 +122,16 @@ def map_pipeline_state(
             current_stage=None,
         )
 
+    if pipeline_status == "COMPLETE_WITH_UNRESOLVED_GAPS":
+        return TrackingStateMapping(
+            backend_status=TrackingBackendStatus.COMPLETED_WITH_UNRESOLVED_GAPS,
+            pipeline_status=pipeline_status,
+            pipeline_decision=decision,
+            pending_action_type=None,
+            pending_ambiguity_id=None,
+            current_stage=None,
+        )
+
     if pipeline_status in {"COMPLETE_WITH_SAFE_BLOCK", "BLOCKED"}:
         return TrackingStateMapping(
             backend_status=TrackingBackendStatus.COMPLETED_SAFE_BLOCK,

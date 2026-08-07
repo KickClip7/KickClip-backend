@@ -1,0 +1,92 @@
+{
+  "schema_version": "kickclip.scene_target_selection_frozen_manifest.v1",
+  "package": "target_centric_tracking_scene_target_selection_v1",
+  "frozen_at": "2026-07-29T16:47:02+00:00",
+  "mode": "ASSISTED_USER_SELECTION",
+  "frozen_baseline_tree_sha256": {
+    "target_centric_tracking_v1": "212539ec704e50443c268b042d5f7cfe535f2c20e6f1a0c4f4e4e4df61f42652",
+    "target_centric_tracking_v2": "4b26dc752a46f6c8a85571d40a2862bdefb1a7e3f0ae2b89239806219428e9e8",
+    "target_centric_tracking_v2_production": "a68dd1693fc1775aa527bd87711a5f1506fb8b474a343e38b9f4f611194d4ff8",
+    "target_centric_tracking_v2_production_r2": "8834e793fdd68b0100ed5e9773c331b59a016c3ee7639eefe8f73b83796970be",
+    "target_centric_tracking_v2_production_eval_r2": "ef450b8b4e2268192e6bc84b60f7bcb8a0da19e6057b510d97638f298e342bf1"
+  },
+  "frozen_manifests": {
+    "production_r2": "751338f51c4f7c08bb24576e5afea7d82b9cbbdefbb651ff1a3c1d5c45ffcc86",
+    "evaluation_r2": "ca978dcbd29667aeb2529cda894da5eae667051aa47e7ba5d55d503d9130485e"
+  },
+  "checkpoints": {
+    "rfdetr": "5d1d05cf78b6a777430430955d0e745ce5c61913c659b2e96ae5deddbd1a3a94",
+    "sports_osnet": "8d5b2fd8763db34c2aad69810466adf413f0426d9f8119d322227e0e639c5fbd"
+  },
+  "package_files": {
+    "README.md": "61a8b09640fc626f090be86b463ac42c0eea3652609bd7cbdeac7b7c1edd17d1",
+    "__init__.py": "44c7defb6a0f88fada6b00728f743e9b0e5c1dba9c00b818cf8df149dc937791",
+    "appearance.py": "de0c87a0382ed0a9117116f4347f810f7d98057531b03f3a06351dc09c4b476a",
+    "common.py": "fb9d859dbe0140ae48d1a70e2131f5d30391efc61aa27fc329506d6179d2dafc",
+    "contracts.py": "847bcf92e9f4e5dbd88a8d226f169b486466c75ebefa9a2973e35a42fb5e0405",
+    "discovery.py": "984f7bbd2d8994ee49c86a8f0f0a33efcba5ad20d5ec356b3f5e93e22faa79c7",
+    "earlier_anchor.py": "a1a661093ca14b431039b26630b265836ec39fd069c247d5c345ddaa1e316124",
+    "earlier_anchor_decision_schema.json": "c1d3580f646cea582649990ed354d5cdc5d82436f33294556a3c38f9d28b92f6",
+    "earlier_anchor_proposal_schema.json": "93756c0beb51ddde4f8b9093bea7448e42e2e90ac6016163ce572dc2499e87a1",
+    "freeze_scene_target_selection.py": "f25ed038cee0622b87c04b6423c8b6eec9a6abae3acad6535c509d67352061b9",
+    "gallery.py": "b83a3cf99b17e8991292f740656d7631115f6422128c49207ad16826d4cb6b64",
+    "launch.py": "3d81d1857f1e1b7990c98e53f8dd36e691f14c2442b86f7f779f0ba8cd4d04c9",
+    "run_scene_target_selection.py": "41e4d96262ea950b5ffb8dba9b96b1bed7dbb859c8d4f525f6cfcc786398c82a",
+    "scene_player_candidate_schema.json": "27c5b7b8e8f61cdc1340a5889652d731288b161ff8d32c6cd3f3dfe4bd17b4ff",
+    "scene_target_selection_dependency_lock.json": "f5e34673a0ac8d21c61b96fabb4d73a41dba186aa32d08172f30e5656358253b",
+    "scene_target_selection_policy.json": "9aed9e9aef9930a085915251bd2407b2b67742d8a3c21b6ab1e57623fa6a22ad",
+    "selection.py": "b03b77e6da24075f457902e4628f4f2078edac0b7be673b72166daf2e0ef97db",
+    "target_reference_set_schema.json": "6ef6a4c1ed3c767e0f4dc201cfc0ab1bfa350c1268eed81558e3fa1aff9b2aad",
+    "target_selection_schema.json": "7d8f6728793de6d95818ac77ec5d5cf17ae0b213e20b3d91eec85f80bfdfcf20",
+    "tests/test_scene_target_selection_contracts.py": "a66353313b86b82ab80f1ddbadab2ab5d4e12e534d1ec5b1b9d57ed0435e0d8c",
+    "tracking_launch_manifest_schema.json": "29698567f731548f6b119fb6ac727c01134461ef83931c46985109ab4b0cbf48"
+  },
+  "backend_adapter": {
+    "alembic/versions/20260730_0013_create_scene_target_selections.py": "c766185ae48ac4f1495027fcc2748fa9806123fa93b5a42441275f3ae52f9b90",
+    "app/api/v1/highlights.py": "6fe43b07b0aa83c7137deec50d132d9a1225421c226dc5ea9d39e161b127533f",
+    "app/core/config.py": "85d1247fc7d8d6a89c38ce3b780909f3a52ce30474a53582739b45dae6b0bbb3",
+    "app/db/models.py": "979520e3f08b580431325f7848748937823c86983ae1e2939ac36a3c930aaef6",
+    "app/domains/highlight/model.py": "d8f2279e58dbbe58b0f024e24531d7d17e982ff9bad0042774d969dd3ddfdb0b",
+    "app/domains/highlight/repository.py": "848f2703c3c8841a930df7593abbfb813a22e54ce2c8ae2214bfc4b9cada0633",
+    "app/domains/highlight/scene_target_selection.py": "18249de0854cacd0a79fddd58e245b83796c2de96d446b54898cd975d1d92714",
+    "app/domains/highlight/schema.py": "d8bad0ed9ddc4535cddf5903ade2426466176cf41236babf3587cc67d84e030a",
+    "app/domains/tracking/artifacts.py": "666276afc2eb65b2d8ddb536330273a570d8f15ae7898bc24bfbb75ee274c296",
+    "app/domains/tracking/process_runner.py": "3e567cb4fdab2564d38c8f253cb5ccc0c101e814ec079cc4ca37dfb04026b581",
+    "app/domains/tracking/repository.py": "04393cb921b276681786e1f4fac1c579db97cc42592e35915c138f757bb548db",
+    "app/domains/tracking/service.py": "f302cd51e0000fdf519d87133f653febba015ac79977dc551e07743664db6c25",
+    "app/domains/tracking/state_mapper.py": "cfeb2d3059c18ad58739eefbede22468479c883e88d017c1f8b45642a7b33474",
+    "app/domains/tracking/validation.py": "02a9f656c671242526ee0fc0d878af1c4e505658ceeed08fe862f735dffeba9e"
+  },
+  "ui_assets": {
+    "gallery.py": "b83a3cf99b17e8991292f740656d7631115f6422128c49207ad16826d4cb6b64",
+    "candidate_gallery.html": "d2646f0088e9950c5279ccd9beb87b5b0a5ffc69dc0fb6fb1d82bf1ebc9f5efa",
+    "backend_api": "6fe43b07b0aa83c7137deec50d132d9a1225421c226dc5ea9d39e161b127533f"
+  },
+  "fixture_expected_artifacts": {
+    "runs/scene_target_selection/representative_goal_scene_v1/candidate_gallery.html": "d2646f0088e9950c5279ccd9beb87b5b0a5ffc69dc0fb6fb1d82bf1ebc9f5efa",
+    "runs/scene_target_selection/representative_goal_scene_v1/candidate_gallery.json": "25ed6c73079e2999cf1c8360d6377017a816ff33a4587c6cbd8c5cc4de0973dd",
+    "runs/scene_target_selection/representative_goal_scene_v1/earlier_candidate_proposals.json": "e148597dc20a8e9907fe4abddc9e3bfd9859f6f8215feef229f6a60c26cf0b70",
+    "runs/scene_target_selection/representative_goal_scene_v1/scene_candidate_manifest.json": "83513340c421efd3b1e156692f69635cbd4380deedebe2b401252f0ebc9cc4b7",
+    "runs/scene_target_selection/representative_goal_scene_v1/scene_candidates.csv": "0d5e6abbb21363044968fd536c0cffcd30e349d3f37b52d1f565d706d3c489a6",
+    "runs/scene_target_selection/representative_goal_scene_v1/scene_candidates.json": "395d347f3ab782ca2600c9fe384141aa9d4c7541a72c422aa86c780b193009b2",
+    "runs/scene_target_selection/representative_goal_scene_v1/target_reference_set.json": "80e1c3ff1d66610bf6ab0d4e7f9f137c7334d48eb19276a4eeb18e7f71fc0dd6",
+    "runs/scene_target_selection/representative_goal_scene_v1/target_selection.json": "a418ccbb757ffd8842d48f1e0156318dbbd80ce63ca9d739cc415903ac14d05a",
+    "runs/scene_target_selection/representative_goal_scene_v1/target_selection_r0001.json": "d65af30e1260f8365758358563c91ba51ad1298b326c0017e5fe821036694a36"
+  },
+  "dependency_lock_sha256": "f5e34673a0ac8d21c61b96fabb4d73a41dba186aa32d08172f30e5656358253b",
+  "safety_contract": {
+    "automatic_target_selection": false,
+    "automatic_earlier_anchor_confirmation": false,
+    "cross_shot_motion_identity_linking": false,
+    "pre_anchor_bbox_count": 0,
+    "ground_truth_used_for_ranking": false
+  },
+  "representative_validation": {
+    "video_frame_count": 749,
+    "reviewed_shot_count": 11,
+    "candidate_count": 170,
+    "earlier_proposal_count": 3,
+    "state": "WAITING_EARLIER_ANCHOR_CONFIRMATION",
+    "human_identity_confirmed": false
+  }
+}

@@ -78,7 +78,8 @@ def build_highlight_runtime_config(
         ),
         device=str(job_options.get("device") or inference.get("device") or "auto"),
         real_adapter_batch_size=_optional_int(
-            inference.get("batch_size")
+            job_options.get("real_adapter_batch_size")
+            or inference.get("batch_size")
         ),
         # These policies are intentionally not user-overridable.
         real_adapter_max_candidates=_optional_int(

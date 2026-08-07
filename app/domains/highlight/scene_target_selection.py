@@ -203,6 +203,62 @@ class SceneTargetSelectionService:
             default_script=self.runner,
         ).run(arguments)
 
+    @staticmethod
+    def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+    def _ensure_manifest_candidate_sha(
+        self,
+        *,
+        manifest: dict[str, Any],
+        manifest_path: Path,
+        candidates_path: Path,
+    ) -> tuple[dict[str, Any], str, bool]:
+        """Keep the strict SHA contract while repairing legacy runtime output.
+
+        Older frozen scene-selection runners emitted a manifest without the
+        scene_candidates.json digest.  We do not weaken verification: the
+        backend computes the digest from the just-produced immutable file,
+        records it atomically in the manifest, and still rejects any declared
+        digest that differs from the current file.
+        """
+
+        current_sha256 = sha256_file(candidates_path)
+        try:
+            declared_sha256 = extract_manifest_candidate_sha(manifest)
+        except ValueError:
+            repaired = dict(manifest)
+            repaired["scene_candidates_sha256"] = current_sha256
+            files = repaired.get("files")
+            files = dict(files) if isinstance(files, dict) else {}
+            existing = files.get("scene_candidates.json")
+            entry = dict(existing) if isinstance(existing, dict) else {}
+            entry.update(
+                {
+                    "path": "scene_candidates.json",
+                    "sha256": current_sha256,
+                }
+            )
+            files["scene_candidates.json"] = entry
+            repaired["files"] = files
+            repaired["manifest_compatibility_patch"] = (
+                "BACKEND_DECLARED_SCENE_CANDIDATES_SHA256_V1"
+            )
+            self._write_json_atomic(manifest_path, repaired)
+            return repaired, current_sha256, True
+
+        if declared_sha256 != current_sha256:
+            raise ValueError(
+                "Scene candidate manifest SHA-256 differs from "
+                "scene_candidates.json."
+            )
+        return manifest, declared_sha256, False
+
     def _register_runtime_artifact(
         self,
         *,
@@ -356,8 +412,14 @@ class SceneTargetSelectionService:
             output,
             "scene_candidate_manifest.json",
         )
+        manifest, manifest_candidate_sha256, manifest_sha_repaired = (
+            self._ensure_manifest_candidate_sha(
+                manifest=manifest,
+                manifest_path=manifest_path,
+                candidates_path=candidates_path,
+            )
+        )
         scene_candidates_sha256 = sha256_file(candidates_path)
-        manifest_candidate_sha256 = extract_manifest_candidate_sha(manifest)
         verify_candidate_artifact_immutability(
             current_sha256=scene_candidates_sha256,
             stored_discovery_sha256=scene_candidates_sha256,
@@ -500,6 +562,9 @@ class SceneTargetSelectionService:
                 "scene_candidates_sha256": scene_candidates_sha256,
                 "manifest_declared_scene_candidates_sha256": (
                     manifest_candidate_sha256
+                ),
+                "scene_candidate_manifest_sha_repaired": (
+                    manifest_sha_repaired
                 ),
                 "discovery_id": discovery_id,
                 "discovery_inputs": discovery_inputs,

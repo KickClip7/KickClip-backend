@@ -202,6 +202,7 @@ class SceneTrackingRead(BaseModel):
     tracking_job_id: str | None
     status: str
     tracking_status: str | None
+    pending_action: str | None = None
     progress: int = Field(default=0, ge=0, le=100)
     current_stage: str | None = None
     retryable: bool = False
@@ -230,6 +231,20 @@ class HighlightClipPlanResponse(BaseModel):
     clip_plan_id: str
     total_duration_sec: float
     item_count: int
+
+
+class TrackingHighlightCandidateResponse(BaseModel):
+    tracking_job_id: str
+    revision_id: str
+    scene_id: str
+    candidate_id: str
+    binding_id: str
+    binding_status: str
+    tracking_status: str
+    eligible_for_clip_plan: bool
+    clip_plan_id: str | None = None
+    unresolved_gaps: bool = False
+    automatic_target_confirmation: bool = False
 
 
 class HighlightRenderRequest(BaseModel):

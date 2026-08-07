@@ -1,0 +1,55 @@
+{
+  "schema_version": "kickclip.scene_target_selection_policy.v1",
+  "policy_id": "scene_wide_user_target_selection_v1",
+  "mode": "ASSISTED_USER_SELECTION",
+  "shot_boundaries": {
+    "priority": [
+      "HUMAN_REVIEWED_R2",
+      "FULLY_REVIEWED_PRODUCTION_R2"
+    ],
+    "pending_review_action": "WAITING_SHOT_BOUNDARY_REVIEW",
+    "require_exact_frame_coverage": true
+  },
+  "local_tracklets": {
+    "implementation": "frozen_v2_stage3b0",
+    "max_age": 8,
+    "minimum_tracklet_frames": 3,
+    "minimum_predicted_iou": 0.03,
+    "maximum_center_distance": 1.6,
+    "minimum_area_ratio": 0.25,
+    "maximum_area_ratio": 4.0,
+    "minimum_match_score": 0.17,
+    "cross_shot_linking": false
+  },
+  "initialization": {
+    "minimum_stable_observations": 3,
+    "minimum_tracking_duration_sec": 10.0,
+    "maximum_initialization_overlap_iou": 0.6
+  },
+  "gallery": {
+    "sort": [
+      "shot_index",
+      "first_frame"
+    ],
+    "default_visible_score": 0.25,
+    "preserve_hidden_candidates": true,
+    "automatic_target_selection": false
+  },
+  "references": {
+    "maximum_references": 6,
+    "source_scope": "SELECTED_LOCAL_TRACKLET",
+    "exclude_identity_switch_risk": true
+  },
+  "earlier_anchor": {
+    "ranking": "frozen_v2_stage3b1",
+    "maximum_review_candidates": 3,
+    "automatic_confirmation": false,
+    "evaluation_target_ids_allowed": false
+  },
+  "tracking": {
+    "production_runtime": "target_centric_tracking_v2_production_r2",
+    "wrapper": "target_centric_tracking_v2_production_r3",
+    "cross_shot_mode": "assisted",
+    "pre_anchor_bbox_count": 0
+  }
+}

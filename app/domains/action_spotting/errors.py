@@ -8,6 +8,7 @@ ACTION_SPOTTING_FAILED = "ACTION_SPOTTING_FAILED"
 ACTION_SPOTTING_CHECKPOINT_MISMATCH = "ACTION_SPOTTING_CHECKPOINT_MISMATCH"
 ACTION_SPOTTING_CLASS_ORDER_MISMATCH = "ACTION_SPOTTING_CLASS_ORDER_MISMATCH"
 ACTION_SPOTTING_FEATURE_MISMATCH = "ACTION_SPOTTING_FEATURE_MISMATCH"
+FEATURE_EXTRACTION_FAILED = "FEATURE_EXTRACTION_FAILED"
 ACTION_SPOTTING_INFERENCE_POLICY_INCOMPLETE = (
     "ACTION_SPOTTING_INFERENCE_POLICY_INCOMPLETE"
 )
@@ -81,6 +82,17 @@ def class_order_mismatch(message: str, **diagnostics: Any) -> ActionSpottingErro
 def feature_mismatch(message: str, **diagnostics: Any) -> ActionSpottingError:
     return ActionSpottingError(
         ACTION_SPOTTING_FEATURE_MISMATCH,
+        message,
+        diagnostics=diagnostics,
+        retryable=True,
+    )
+
+
+def feature_extraction_failed(
+    message: str, **diagnostics: Any
+) -> ActionSpottingError:
+    return ActionSpottingError(
+        FEATURE_EXTRACTION_FAILED,
         message,
         diagnostics=diagnostics,
         retryable=True,

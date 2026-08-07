@@ -10,7 +10,7 @@ from app.ai.tasks.soccernet_feature_extraction.task import (
 )
 from app.domains.action_spotting.errors import (
     ActionSpottingError,
-    feature_mismatch,
+    feature_extraction_failed,
     inference_failed,
 )
 
@@ -30,8 +30,8 @@ class ActionSpottingPipelineTask(BaseAITask):
             except ActionSpottingError:
                 raise
             except Exception as exc:
-                raise feature_mismatch(
-                    "SoccerNet PCA512 feature extraction failed.",
+                raise feature_extraction_failed(
+                    "SoccerNet PCA512 feature extraction failed before Action Spotting.",
                     exception_type=type(exc).__name__,
                     detail=str(exc),
                 ) from exc

@@ -1,0 +1,32 @@
+{
+  "schema_version": "kickclip.phase1_backend_parity_fixture.r1",
+  "fixture_id": "possession_similar_20s_phase1_frozen_reviewed",
+  "video_relative_path": "sample_videos/possession_similar_20s_phase1.mp4",
+  "initial_bbox_xyxy": [141, 212, 174, 288],
+  "bbox_format": "xyxy_pixels",
+  "review_provenance": "PREVIOUSLY_HUMAN_REVIEWED_EXPERIMENT_FIXTURE",
+  "reviewer": "PHASE1_FROZEN_EXPERIMENT_REVIEW",
+  "review_note": "Previously reviewed frozen Phase-1 experiment fixture. These PASS decisions are used only for deterministic backend parity verification and are not generalized to new videos.",
+  "review_decisions": {
+    "STAGE2B": "PASS",
+    "STAGE2D": "PASS",
+    "STAGE2D1": "PASS",
+    "STAGE2D2": "PASS"
+  },
+  "expected_final_metrics": {
+    "frame_count": 480,
+    "bbox_frame_count": 332,
+    "source_stage": "stage2d2",
+    "state_counts": {
+      "ACTIVE": 321,
+      "AMBIGUOUS": 65,
+      "INITIALIZING": 1,
+      "OCCLUDED": 18,
+      "REACQUIRED": 2,
+      "SEARCHING": 73
+    }
+  },
+  "automatic_target_confirmation": false,
+  "threshold_search_permitted": false,
+  "human_review_generalization_permitted": false
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -13,8 +14,14 @@ from app.domains.auth.access import (
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
 from app.domains.tracking.artifacts import TrackingArtifactService
-from app.domains.tracking.errors import TrackingError, TrackingValidationError
+from app.domains.tracking.errors import (
+    TrackingContractError,
+    TrackingError,
+    TrackingValidationError,
+)
 from app.domains.tracking.executor import get_tracking_executor
+from app.domains.tracking.execution import R1_EXECUTION_KIND
+from app.domains.tracking.r1_executor import get_r1_tracking_executor
 from app.domains.tracking.schema import (
     TrackingAmbiguityConfirmationRequest,
     TrackingArtifactsResponse,
@@ -35,6 +42,12 @@ from app.domains.tracking.verifier import (
 
 
 router = APIRouter()
+
+
+def _submit_tracking_job(job) -> bool:
+    if job.execution_kind == R1_EXECUTION_KIND:
+        return get_r1_tracking_executor().submit(job.tracking_job_id)
+    return get_tracking_executor().submit(job.tracking_job_id)
 
 
 @router.get(
@@ -135,7 +148,11 @@ def get_tracking_job(
     current_user: User = Depends(get_current_user),
 ) -> TrackingJobResponse:
     job = require_tracking_job_access(db, job_id, current_user)
-    return TrackingJobService(db).to_response(job)
+    try:
+        return TrackingJobService(db).to_response(job)
+    except TrackingError as exc:
+        _raise_tracking_http_error(exc)
+        raise AssertionError("unreachable") from exc
 
 
 @router.post(
@@ -165,7 +182,7 @@ def review_tracking_job(
     except TrackingError as exc:
         _raise_tracking_http_error(exc)
     if job.status == TrackingBackendStatus.QUEUED.value:
-        get_tracking_executor().submit(job_id)
+        _submit_tracking_job(job)
     return service.to_response(job)
 
 
@@ -198,7 +215,7 @@ def confirm_tracking_ambiguity(
     except TrackingError as exc:
         _raise_tracking_http_error(exc)
     if job.status == TrackingBackendStatus.QUEUED.value:
-        get_tracking_executor().submit(job_id)
+        _submit_tracking_job(job)
     return service.to_response(job)
 
 
@@ -233,9 +250,16 @@ def get_tracking_timeline(
             start_frame=start_frame,
             end_frame=end_frame,
         )
+        return TrackingTimelineResponse.model_validate(payload)
     except TrackingError as exc:
         _raise_tracking_http_error(exc)
-    return TrackingTimelineResponse.model_validate(payload)
+    except ValidationError as exc:
+        _raise_tracking_http_error(
+            TrackingContractError(
+                "Tracking timeline does not match the public response schema."
+            )
+        )
+        raise AssertionError("unreachable") from exc
 
 
 @router.get(

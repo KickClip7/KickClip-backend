@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from sqlalchemy import create_engine
@@ -14,6 +15,7 @@ from app.domains.analysis.model import AnalysisJob
 from app.domains.artifact.model import Artifact
 from app.domains.auth.model import User
 from app.domains.clip_plan.repository import ClipPlanRepository
+from app.domains.candidate_handoff_r1.model import EventCandidateSelectionR1
 from app.domains.highlight.action_cache import ActionSpottingCacheService
 from app.domains.highlight.model import SceneTrackingBinding
 from app.domains.highlight.repository import HighlightRepository
@@ -725,6 +727,156 @@ class HighlightRevisionIntegrationTests(unittest.TestCase):
         )
         self.assertIn("crop=", command[command.index("-vf") + 1])
 
+    def test_r1_unresolved_tracking_becomes_an_idempotent_highlight_candidate(
+        self,
+    ) -> None:
+        repository = HighlightRepository(self.db)
+        revision = repository.create_revision(
+            project_id=self.project.project_id,
+            revision_number=1,
+            action_spotting_job_id=self.job.analysis_job_id,
+            user_request="선택 장면의 선수를 추적해줘",
+            structured_request=HighlightRequest(
+                focus_mode="PLAYER",
+                aspect_ratio="9:16",
+            ).model_dump(mode="json"),
+            selected_scene_ids=["evt_first"],
+            scene_selection=[
+                {
+                    "scene_id": "evt_first",
+                    "state": "USER_SELECTED",
+                    "render_strategy": "TARGET_CENTERED",
+                }
+            ],
+            focus_mode="PLAYER",
+            status="PLAYER_SELECTION_REQUIRED",
+            pending_action="SELECT_PLAYER",
+            options={
+                "candidate_pipeline_inputs": {
+                    "event_source_start_sec": 145.0,
+                    "source_start_frame": 3625,
+                }
+            },
+        )
+        tracking_job = TrackingJob(
+            tracking_job_id="trk_r14_candidate",
+            owner_id=self.user.user_id,
+            match_id=self.match.match_id,
+            project_id=self.project.project_id,
+            media_asset_id=self.asset.asset_id,
+            test_name="r14_highlight_candidate",
+            initial_bbox=[100, 100, 260, 500],
+            bbox_format="xyxy_pixels",
+            device="cpu",
+            reacquisition_mode="assisted",
+            status="COMPLETED_WITH_UNRESOLVED_GAPS",
+            current_stage="FINALIZE",
+            output_directory="/tmp/r14_highlight_candidate",
+            pipeline_state_path="/tmp/r14_highlight_candidate/state.json",
+            runtime_metadata={
+                "event_candidate_handoff_r1": {
+                    "source_video": {
+                        "fps": 25.0,
+                        "frame_count": 250,
+                        "width": 1920,
+                        "height": 1080,
+                    }
+                }
+            },
+        )
+        selection = EventCandidateSelectionR1(
+            selection_id="ecselr1_highlight",
+            project_id=self.project.project_id,
+            owner_id=self.user.user_id,
+            revision_id=revision.revision_id,
+            event_id="evt_first",
+            scene_id="evt_first",
+            ranking_id="rank_1",
+            shortlist_patch_id="patch_1",
+            discovery_id="discovery_1",
+            candidate_id="shot_0001_track_0001",
+            shot_id="shot_0001",
+            tracklet_id="track_0001",
+            selected_at=datetime.now(timezone.utc),
+            candidate_manifest_sha256="1" * 64,
+            candidate_media_bundle_sha256="2" * 64,
+            source_video_sha256=self.asset.sha256,
+            reviewed_shot_boundaries_sha256="3" * 64,
+            selection_artifact_path="storage/selection.json",
+            selection_artifact_sha256="4" * 64,
+            media_bundle_manifest_path="storage/manifest.json",
+            tracking_job_id=tracking_job.tracking_job_id,
+        )
+        self.db.add_all([tracking_job, selection])
+        self.db.commit()
+        timeline = {
+            "schema_version": "kickclip.target_centric_e2e.v1",
+            "pipeline_version": "r14",
+            "video": {
+                "width": 1920,
+                "height": 1080,
+                "fps": 25,
+                "frame_count": 250,
+            },
+            "frames": [
+                {
+                    "frame_index": 0,
+                    "time_seconds": 0,
+                    "state": "ACTIVE",
+                    "bbox_xyxy": [100, 100, 260, 500],
+                    "tracking_confidence": 0.95,
+                },
+                {
+                    "frame_index": 100,
+                    "time_seconds": 4,
+                    "state": "ACTIVE",
+                    "bbox_xyxy": [400, 120, 560, 520],
+                    "tracking_confidence": 0.92,
+                },
+                {
+                    "frame_index": 150,
+                    "time_seconds": 6,
+                    "state": "LOST",
+                    "bbox_xyxy": None,
+                    "tracking_confidence": 0.0,
+                },
+            ],
+        }
+        service = HighlightWorkflowService(self.db)
+        with patch(
+            "app.domains.highlight.service.TrackingTimelineService.read",
+            return_value=timeline,
+        ):
+            first = service.include_tracking_job_candidate(
+                project=self.project,
+                job=tracking_job,
+            )
+            second = service.include_tracking_job_candidate(
+                project=self.project,
+                job=tracking_job,
+            )
+            plan_response = service.create_clip_plan(
+                project=self.project,
+                revision_id=revision.revision_id,
+                allow_absent_full_frame=False,
+            )
+
+        bindings = repository.list_bindings(revision.revision_id)
+        self.assertEqual(len(bindings), 1)
+        self.assertEqual(first.binding_id, second.binding_id)
+        self.assertTrue(first.eligible_for_clip_plan)
+        self.assertTrue(first.unresolved_gaps)
+        self.assertEqual(bindings[0].source_start_time_sec, 145.0)
+        self.assertEqual(bindings[0].status, "COMPLETED")
+        plan = ClipPlanRepository(self.db).get_by_id(plan_response.clip_plan_id)
+        self.assertEqual(
+            plan.options["render_provenance"]["tracking_job_ids"],
+            [tracking_job.tracking_job_id],
+        )
+        self.assertEqual(
+            plan.items[0].metadata_["render_strategy"],
+            "TARGET_CENTERED",
+        )
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,6 +48,10 @@ Tracking AI는 별도 frozen runtime을 subprocess로 실행합니다. 모델과
 
 자세한 설정과 상태 계약은 [Target Tracking 통합 문서](docs/target_tracking_backend.md)를 참고하세요.
 
+새 영상에서 scene clip, shot-cut 초안, 사람 검토, immutable reviewed artifact,
+RF-DETR detections를 처음부터 만드는 절차는
+[R15 Fresh-Machine Shot-Boundary Workflow](docs/r15_fresh_machine_shot_boundary_workflow.md)를 참고하세요.
+
 ## 통합 하이라이트 워크플로
 
 일반 하이라이트와 선수 중심 하이라이트는 별도 제품이나 별도 Project가 아닙니다.

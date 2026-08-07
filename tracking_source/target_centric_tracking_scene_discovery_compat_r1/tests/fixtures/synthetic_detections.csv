@@ -1,0 +1,14 @@
+frame_index,time_ms,detection_index,detection_id,class_id,class_name,confidence,x1,y1,x2,y2
+0,0,0,player_000,0,player,0.90,16,10,34,54
+1,100,0,player_001,0,player,0.91,17,10,35,54
+2,200,0,player_002,0,player,0.92,18,10,36,54
+3,300,0,player_003,0,player,0.93,19,10,37,54
+4,400,0,player_004,0,player,0.94,20,10,38,54
+5,500,0,player_005,0,player,0.95,21,10,39,54
+6,600,0,player_006,0,player,0.94,22,10,40,54
+7,700,0,player_007,0,player,0.93,23,10,41,54
+8,800,0,player_008,0,player,0.92,24,10,42,54
+9,900,0,player_009,0,player,0.91,25,10,43,54
+10,1000,0,player_010,0,player,0.90,26,10,44,54
+11,1100,0,player_011,0,player,0.89,27,10,45,54
+

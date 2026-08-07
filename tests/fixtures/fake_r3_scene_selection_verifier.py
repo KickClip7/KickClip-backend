@@ -4,11 +4,14 @@ import json
 print(
     json.dumps(
         {
-            "r3_wrapper_verified": True,
-            "sports_osnet_strict_loader_verified": True,
-            "selection_schema_compatible": True,
-            "reference_schema_compatible": True,
-            "synthetic_assisted_smoke_verified": True,
+            "backend_r1_v1_v2_adapter_verified": True,
+            "research_sources_verified": True,
+            "strict_dependency_check_verified": True,
+            "memory_passthrough_contract_verified": True,
+            "memory_revision_safety_gate_verified": True,
+            "selection_anchor_adapter_verified": True,
+            "global_ID_tracking_upgrade_v7_is_not_aliased_to_v6": True,
+            "live_frozen_runtime_verified": True,
         }
     )
 )

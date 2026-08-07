@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -10,6 +11,7 @@ from app.domains.analysis.model import AnalysisJob
 from app.domains.artifact.signed_url import build_signed_artifact_url
 from app.domains.auth.model import User
 from app.domains.clip_plan.repository import ClipPlanRepository
+from app.domains.candidate_handoff_r1.model import EventCandidateSelectionR1
 from app.domains.highlight.action_cache import ActionSpottingCacheService
 from app.domains.highlight.candidate_discovery import (
     PlayerCandidateDiscoveryService,
@@ -35,6 +37,7 @@ from app.domains.highlight.schema import (
     PlayerCandidateRead,
     PlayerFocusSubjectRead,
     SceneTrackingRead,
+    TrackingHighlightCandidateResponse,
 )
 from app.domains.highlight.timeline_mapping import TrackingTimelineMapper
 from app.domains.media.model import MediaAsset
@@ -47,6 +50,7 @@ from app.domains.render.tracking_transform import TrackingTransformBuilder
 from app.domains.timeline.model import TimelineEvent
 from app.domains.timeline.repository import TimelineEventRepository
 from app.domains.tracking.errors import TrackingError, TrackingInputError
+from app.domains.tracking.model import TrackingJob
 from app.domains.tracking.executor import get_tracking_executor
 from app.domains.tracking.schema import TrackingJobCreateRequest
 from app.domains.tracking.service import TrackingJobService
@@ -555,6 +559,196 @@ class HighlightWorkflowService:
     # ------------------------------------------------------------------
     # Tracking-aware planning and rendering
     # ------------------------------------------------------------------
+    def include_tracking_job_candidate(
+        self,
+        *,
+        project: Project,
+        job: TrackingJob,
+        commit: bool = True,
+    ) -> TrackingHighlightCandidateResponse:
+        """Attach an R1 tracking result to its immutable highlight scene.
+
+        Event Candidate Handoff R1 intentionally owns its selection records,
+        while highlight planning consumes SceneTrackingBinding rows.  This
+        bridge keeps the immutable selection provenance and makes the trusted
+        tracking timeline available to the existing target-centred renderer.
+        The operation is idempotent so terminal polling and refresh recovery
+        can safely call it more than once.
+        """
+        if job.project_id != project.project_id:
+            raise ValueError("Tracking job does not belong to this project.")
+        selection = self.db.scalar(
+            select(EventCandidateSelectionR1).where(
+                EventCandidateSelectionR1.tracking_job_id
+                == job.tracking_job_id
+            )
+        )
+        if selection is None:
+            raise ValueError("Tracking job has no immutable candidate selection.")
+        revision = self.repository.get_revision_for_update(
+            selection.revision_id
+        )
+        if revision is None or revision.project_id != project.project_id:
+            raise ValueError("Tracking candidate highlight revision is missing.")
+        if selection.scene_id not in set(revision.selected_scene_ids or []):
+            raise ValueError("Tracking candidate scene is not selected.")
+
+        subject = (
+            self.repository.get_focus_subject(revision.focus_subject_id)
+            if revision.focus_subject_id
+            else None
+        )
+        if subject is None:
+            subject = self.repository.create_focus_subject(
+                project_id=project.project_id,
+                display_name=f"선택 선수 · {selection.candidate_id}",
+                identity_source="USER_DEFINED",
+                anchor_scene_id=selection.scene_id,
+                anchor_candidate_id=selection.candidate_id,
+                appearance_memory_ref=(
+                    (job.runtime_metadata or {})
+                    .get("scene_target_selection", {})
+                    .get("current_target_memory_path")
+                ),
+                metadata_={
+                    "scope": "PROJECT_EDIT_SUBJECT",
+                    "is_match_global_identity": False,
+                    "selection_id": selection.selection_id,
+                    "tracking_job_id": job.tracking_job_id,
+                    "source": "EVENT_CANDIDATE_HANDOFF_R1",
+                },
+            )
+            revision.focus_subject_id = subject.focus_subject_id
+
+        scene = self._scene(selection.scene_id)
+        source = dict(
+            ((job.runtime_metadata or {}).get("event_candidate_handoff_r1") or {})
+            .get("source_video")
+            or {}
+        )
+        pipeline_inputs = dict(
+            (revision.options or {}).get("candidate_pipeline_inputs") or {}
+        )
+        fps = float(source.get("fps") or 0.0)
+        frame_count = int(source.get("frame_count") or 0)
+        source_start = float(
+            pipeline_inputs.get("event_source_start_sec")
+            if pipeline_inputs.get("event_source_start_sec") is not None
+            else scene.start_sec
+        )
+        clip_duration = frame_count / fps if fps > 0 and frame_count > 0 else (
+            float(scene.end_sec) - float(scene.start_sec)
+        )
+        source_end = min(float(scene.end_sec), source_start + clip_duration)
+        source_start_frame = pipeline_inputs.get("source_start_frame")
+        if source_start_frame is None and fps > 0:
+            source_start_frame = int(round(source_start * fps))
+
+        binding = self.repository.get_binding(
+            revision_id=revision.revision_id,
+            scene_id=selection.scene_id,
+        )
+        if binding is not None and (
+            binding.selected_candidate_id not in {None, selection.candidate_id}
+        ):
+            raise ValueError("Scene already has a different tracking candidate.")
+        if binding is None:
+            binding = self.repository.create_binding(
+                revision_id=revision.revision_id,
+                scene_id=selection.scene_id,
+                focus_subject_id=subject.focus_subject_id,
+                selected_candidate_id=selection.candidate_id,
+                tracking_job_id=job.tracking_job_id,
+                scene_clip_asset_id=job.media_asset_id,
+                source_start_time_sec=source_start,
+                source_end_time_sec=source_end,
+                source_start_frame=source_start_frame,
+                source_end_frame=(
+                    int(source_start_frame) + frame_count - 1
+                    if source_start_frame is not None and frame_count > 0
+                    else None
+                ),
+                source_fps=fps or None,
+                clip_fps=fps or None,
+                clip_frame_count=frame_count or None,
+                confirmation_source="USER",
+                target_presence_status="SEARCHING",
+                render_strategy="TARGET_CENTERED",
+                status="TRACKING_RUNNING",
+                metadata_={},
+            )
+        else:
+            binding.focus_subject_id = subject.focus_subject_id
+            binding.selected_candidate_id = selection.candidate_id
+            binding.tracking_job_id = job.tracking_job_id
+            binding.scene_clip_asset_id = job.media_asset_id
+            binding.source_start_time_sec = source_start
+            binding.source_end_time_sec = source_end
+            binding.source_start_frame = source_start_frame
+            binding.source_end_frame = (
+                int(source_start_frame) + frame_count - 1
+                if source_start_frame is not None and frame_count > 0
+                else None
+            )
+            binding.source_fps = fps or None
+            binding.clip_fps = fps or None
+            binding.clip_frame_count = frame_count or None
+            binding.render_strategy = "TARGET_CENTERED"
+
+        binding.metadata_ = {
+            **(binding.metadata_ or {}),
+            "highlight_candidate": {
+                "source": "EVENT_CANDIDATE_HANDOFF_R1",
+                "selection_id": selection.selection_id,
+                "tracking_job_id": job.tracking_job_id,
+                "candidate_id": selection.candidate_id,
+                "automatic_target_confirmation": False,
+            },
+        }
+        revision.options = {
+            **(revision.options or {}),
+            "tracking_highlight_candidate": {
+                "tracking_job_id": job.tracking_job_id,
+                "selection_id": selection.selection_id,
+                "scene_id": selection.scene_id,
+                "candidate_id": selection.candidate_id,
+                "status": "PENDING",
+                "automatic_target_confirmation": False,
+            },
+        }
+        self.db.flush()
+        self._reconcile_tracking(revision)
+        eligible = bool((binding.timeline_summary or {}).get("crop_segments"))
+        revision.options = {
+            **(revision.options or {}),
+            "tracking_highlight_candidate": {
+                **((revision.options or {}).get("tracking_highlight_candidate") or {}),
+                "status": "READY" if eligible else binding.status,
+                "eligible_for_clip_plan": eligible,
+            },
+        }
+        if commit:
+            self.db.commit()
+            self.db.refresh(binding)
+        else:
+            self.db.flush()
+        return TrackingHighlightCandidateResponse(
+            tracking_job_id=job.tracking_job_id,
+            revision_id=revision.revision_id,
+            scene_id=selection.scene_id,
+            candidate_id=selection.candidate_id,
+            binding_id=binding.binding_id,
+            binding_status=binding.status,
+            tracking_status=job.status,
+            eligible_for_clip_plan=eligible,
+            clip_plan_id=revision.clip_plan_id,
+            unresolved_gaps=(
+                job.status
+                == TrackingBackendStatus.COMPLETED_WITH_UNRESOLVED_GAPS.value
+            ),
+            automatic_target_confirmation=False,
+        )
+
     def create_clip_plan(
         self,
         *,
@@ -908,6 +1102,11 @@ class HighlightWorkflowService:
                         if binding.tracking_job
                         else None
                     ),
+                    pending_action=(
+                        binding.tracking_job.pending_action_type
+                        if binding.tracking_job
+                        else None
+                    ),
                     progress=(
                         tracking_progress(
                             binding.tracking_job.status,
@@ -1208,7 +1407,10 @@ class HighlightWorkflowService:
             }:
                 running = True
                 binding.status = "TRACKING_RUNNING"
-            elif job.status == TrackingBackendStatus.COMPLETED.value:
+            elif job.status in {
+                TrackingBackendStatus.COMPLETED.value,
+                TrackingBackendStatus.COMPLETED_WITH_UNRESOLVED_GAPS.value,
+            }:
                 try:
                     timeline = TrackingTimelineService().read(job)
                     summary = TrackingTimelineMapper.summarize(binding, timeline)
@@ -1219,6 +1421,16 @@ class HighlightWorkflowService:
                         if summary.get("crop_segments")
                         else "ABSENT"
                     )
+                    binding.metadata_ = {
+                        **(binding.metadata_ or {}),
+                        "tracking_completion": {
+                            "status": job.status,
+                            "unresolved_gaps": (
+                                job.status
+                                == TrackingBackendStatus.COMPLETED_WITH_UNRESOLVED_GAPS.value
+                            ),
+                        },
+                    }
                 except TrackingError as exc:
                     binding.status = "FAILED"
                     binding.error_message = str(exc)

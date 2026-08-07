@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from app.core.config import get_settings
 from app.core.paths import get_project_root
 
 
@@ -28,6 +30,9 @@ class SoccerNetFeatureExtractionConfig:
     extractor_name: str = "sn_spotting_resnet_tf2_pca512"
     output_dim: int = 512
     chunk_sec: float = 300.0
+    batch_size: int = 16
+    python_executable: str = field(default_factory=lambda: sys.executable)
+    runtime_probe_timeout_sec: float = 120.0
 
     sn_spotting_root: Path = field(default_factory=lambda: get_project_root() / "external/sn-spotting")
     video_feature_extractor: Path = field(
@@ -70,6 +75,9 @@ class SoccerNetFeatureExtractionConfig:
             "extractor_name": self.extractor_name,
             "output_dim": self.output_dim,
             "chunk_sec": self.chunk_sec,
+            "batch_size": self.batch_size,
+            "python_executable": self.python_executable,
+            "runtime_probe_timeout_sec": self.runtime_probe_timeout_sec,
             "sn_spotting_root": self.sn_spotting_root.as_posix(),
             "video_feature_extractor": self.video_feature_extractor.as_posix(),
             "pca_path": self.pca_path.as_posix(),
@@ -98,6 +106,7 @@ def build_soccernet_feature_extraction_config(
     """
 
     job_options = job_options or {}
+    settings = get_settings()
     resolved_config_path = _resolve_project_path(config_path or DEFAULT_CONFIG_PATH)
     raw_config = _load_yaml_config(resolved_config_path)
     section = raw_config.get("feature_extraction") or {}
@@ -128,6 +137,26 @@ def build_soccernet_feature_extraction_config(
         or job_options.get("soccernet_feature_chunk_sec")
         or section.get("chunk_sec")
         or 300
+    )
+
+    batch_size = int(
+        job_options.get("feature_batch_size")
+        or job_options.get("soccernet_feature_batch_size")
+        or section.get("batch_size")
+        or 16
+    )
+
+    python_executable = str(
+        job_options.get("feature_python_executable")
+        or settings.ACTION_SPOTTING_PYTHON_EXECUTABLE
+        or section.get("python_executable")
+        or sys.executable
+    )
+
+    runtime_probe_timeout_sec = float(
+        job_options.get("feature_runtime_probe_timeout_sec")
+        or section.get("runtime_probe_timeout_sec")
+        or 120
     )
 
     allow_job_option_halftime_split_sec = bool(
@@ -167,6 +196,9 @@ def build_soccernet_feature_extraction_config(
         ),
         output_dim=output_dim,
         chunk_sec=chunk_sec,
+        batch_size=batch_size,
+        python_executable=python_executable,
+        runtime_probe_timeout_sec=runtime_probe_timeout_sec,
         sn_spotting_root=_resolve_project_path(
             job_options.get("sn_spotting_root")
             or section.get("sn_spotting_root")
@@ -257,6 +289,15 @@ def _validate_config(config: SoccerNetFeatureExtractionConfig) -> None:
 
     if config.output_dim <= 0:
         raise ValueError("feature output_dim must be greater than 0.")
+
+    if config.batch_size <= 0:
+        raise ValueError("feature batch_size must be greater than 0.")
+
+    if not config.python_executable.strip():
+        raise ValueError("feature python_executable must not be empty.")
+
+    if config.runtime_probe_timeout_sec <= 0:
+        raise ValueError("feature runtime_probe_timeout_sec must be greater than 0.")
 
     if config.chunk_sec <= 0:
         raise ValueError("feature chunk_sec must be greater than 0.")

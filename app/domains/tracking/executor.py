@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from app.ai.runtime.gpu_coordinator import claim_gpu_slot
 from app.db.session import SessionLocal, engine
 from app.domains.tracking.artifacts import TrackingArtifactService
 from app.domains.tracking.errors import TrackingProcessTimeoutError
+from app.domains.tracking.execution import LEGACY_EXECUTION_KIND
 from app.domains.tracking.process_runner import (
     TrackingProcessRunner,
     get_tracking_process_registry,
@@ -37,8 +39,16 @@ GPU_ADVISORY_LOCK_BASE = 0x4B49434B
 class TrackingJobExecutor:
     """Durable DB-claimed local executor, replaceable by a queue worker later."""
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        execution_kind: str = LEGACY_EXECUTION_KIND,
+        thread_name_prefix: str = "kickclip-tracking",
+    ) -> None:
         self.settings = settings or get_settings()
+        self.execution_kind = execution_kind
+        self.thread_name_prefix = thread_name_prefix
         self._state_lock = threading.Lock()
         self._active_job_ids: set[str] = set()
         self._pool: ThreadPoolExecutor | None = None
@@ -52,7 +62,7 @@ class TrackingJobExecutor:
             self._started = True
             self._stopping.clear()
 
-        installation = get_tracking_verifier().check()
+        installation = self._installation_status()
         if not installation.available:
             logger.info(
                 "Tracking executor not started: %s (%s)",
@@ -63,7 +73,7 @@ class TrackingJobExecutor:
 
         self._pool = ThreadPoolExecutor(
             max_workers=self.settings.TRACKING_MAX_CONCURRENT_JOBS,
-            thread_name_prefix="kickclip-tracking",
+            thread_name_prefix=self.thread_name_prefix,
         )
         recoverable = self._reconcile_recoverable_jobs()
         for tracking_job_id in recoverable:
@@ -107,7 +117,9 @@ class TrackingJobExecutor:
         pid: int | None = None
         try:
             repository = TrackingJobRepository(db)
-            if not repository.claim_queued(tracking_job_id):
+            if not repository.claim_queued(
+                tracking_job_id, execution_kind=self.execution_kind
+            ):
                 db.rollback()
                 return
             db.commit()
@@ -161,6 +173,8 @@ class TrackingJobExecutor:
                     test_name=job.test_name,
                     on_start=on_start,
                 )
+            artifacts = TrackingArtifactService(self.settings)
+            self._stage_input_artifacts(job, artifacts)
             state = read_pipeline_state(Path(job.pipeline_state_path))
             mapping = map_pipeline_state(
                 state,
@@ -173,8 +187,9 @@ class TrackingJobExecutor:
                 mapping=mapping,
                 process_return_code=result.return_code,
                 process_pid=result.process_pid,
-                artifacts=TrackingArtifactService(self.settings),
+                artifacts=artifacts,
             )
+            self._after_pipeline_sync(db, job, state, mapping, artifacts)
             if mapping.backend_status == TrackingBackendStatus.FAILED:
                 error_type, public_message = classify_runtime_failure(
                     result.stdout_log_path,
@@ -194,6 +209,7 @@ class TrackingJobExecutor:
             if job is not None:
                 self._reconcile_or_fail(
                     job,
+                    db=db,
                     process_return_code=None,
                     process_pid=pid,
                     fallback_type="TRACKING_PROCESS_TIMEOUT",
@@ -210,6 +226,7 @@ class TrackingJobExecutor:
             if job is not None:
                 self._reconcile_or_fail(
                     job,
+                    db=db,
                     process_return_code=None,
                     process_pid=pid,
                     fallback_type="TRACKING_RUNTIME_FAILED",
@@ -223,10 +240,41 @@ class TrackingJobExecutor:
                 self._release_gpu_slot(*advisory)
             db.close()
 
+    def _installation_status(self):
+        return get_tracking_verifier().check()
+
+    def _after_pipeline_sync(
+        self,
+        db,
+        job,
+        state,
+        mapping,
+        artifacts,
+    ) -> None:
+        """Hook for execution-kind-specific DB synchronization."""
+
+    @staticmethod
+    def _stage_input_artifacts(
+        job: Any,
+        artifacts: TrackingArtifactService,
+    ) -> None:
+        metadata = job.runtime_metadata or {}
+        configured = metadata.get("input_artifacts")
+        if not isinstance(configured, Mapping):
+            validation = metadata.get("input_validation")
+            configured = (
+                validation.get("artifact_paths")
+                if isinstance(validation, Mapping)
+                else None
+            )
+        if isinstance(configured, Mapping) and configured:
+            artifacts.stage_input_validation_artifacts(job, configured)
+
     def _reconcile_or_fail(
         self,
         job,
         *,
+        db=None,
         process_return_code: int | None,
         process_pid: int | None,
         fallback_type: str,
@@ -241,19 +289,27 @@ class TrackingJobExecutor:
             )
             if mapping.backend_status in {
                 TrackingBackendStatus.COMPLETED,
+                TrackingBackendStatus.COMPLETED_WITH_UNRESOLVED_GAPS,
                 TrackingBackendStatus.COMPLETED_SAFE_BLOCK,
                 TrackingBackendStatus.WAITING_MEMORY_REVIEW,
                 TrackingBackendStatus.WAITING_CROSS_SHOT_CONFIRMATION,
                 TrackingBackendStatus.WAITING_SEGMENT_REVIEW,
             }:
+                artifacts = TrackingArtifactService(self.settings)
                 apply_pipeline_result(
                     job,
                     state=state,
                     mapping=mapping,
                     process_return_code=process_return_code,
                     process_pid=process_pid,
-                    artifacts=TrackingArtifactService(self.settings),
+                    artifacts=artifacts,
                 )
+                # R1/canonical E2E jobs have DB-backed ambiguity/memory state.
+                # Reconcile that state before preserving a WAITING outcome.  The
+                # old implementation passed None here, so an R1 sync failure
+                # could leave the job permanently WAITING while its ambiguity
+                # rows were missing/inconsistent.
+                self._after_pipeline_sync(db, job, state, mapping, artifacts)
                 return
         except Exception:
             logger.exception(
@@ -272,9 +328,16 @@ class TrackingJobExecutor:
         to_submit: list[str] = []
         try:
             repository = TrackingJobRepository(db)
-            for job in repository.list_recoverable():
+            repository.quarantine_unroutable()
+            for job in repository.list_recoverable(
+                execution_kind=self.execution_kind
+            ):
                 state = read_pipeline_state(Path(job.pipeline_state_path))
-                if state is not None:
+                # A queued human decision intentionally precedes its runtime
+                # acknowledgement. Do not let the stale pre-decision JSON state
+                # overwrite the authoritative queued action during recovery.
+                has_queued_action = bool(job.queued_action)
+                if state is not None and not has_queued_action:
                     mapping = map_pipeline_state(
                         state,
                         process_return_code=job.process_return_code,

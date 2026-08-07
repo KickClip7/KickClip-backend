@@ -1,0 +1,102 @@
+{
+  "schema_version": "kickclip.phase1_frozen_manifest.v1",
+  "bundle_version": "1.0.0",
+  "created_at": "2026-07-25T21:10:37+09:00",
+  "project_root": "D:\\HAESUNG\\prometheus\\YOLO-train",
+  "code_dir": "target_centric_tracking_v1",
+  "scripts": {
+    "stage0": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\stage0_audit_inputs.py",
+      "sha256": "e55ffb71e0965a739c2fab496f1e35eceb79a62de90148a7cbe0e80b1bf25fd9",
+      "size_bytes": 37790
+    },
+    "stage1": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\stage1_generate_rfdetr_detections.py",
+      "sha256": "0a95746a3770aa28e7a0ca5e6e00118d1dea4776292c6d9d1036ce574f27fd3b",
+      "size_bytes": 47172
+    },
+    "stage2": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\stage2_run_conservative_target_association.py",
+      "sha256": "2bb8793556f02dc3435cedac7ba4048a98b2167950c30086041d3236f1dddf5d",
+      "size_bytes": 79989
+    },
+    "stage2b": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\stage2b_run_same_shot_reentry_reacquisition.py",
+      "sha256": "7837419367a4844ea16828d2771c67768e984cfb480df76a359b89cbb115facc",
+      "size_bytes": 85713
+    },
+    "stage2c": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\stage2c_finalize_target_timeline_and_render.py",
+      "sha256": "2d1e74b754736cb4adeb93f30aa89282a53ffd5ad1a2ee3e15a845b1b5825d82",
+      "size_bytes": 68417
+    },
+    "stage2d": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\stage2d_run_iterative_multi_reentry.py",
+      "sha256": "2058439b37a1a78b8fd21c7d5818c585f2186c0cff4ce93a6085f9a9e86da20d",
+      "size_bytes": 92695
+    },
+    "stage2d1": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\stage2d1_run_temporal_episode_multi_reentry.py",
+      "sha256": "a67f96ef57a340c2ea170a3b025547a24c16ec33cd2b0d599d7005b7f86fef48",
+      "size_bytes": 53731
+    },
+    "stage2d2": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\stage2d2_run_confirmed_track_hysteresis.py",
+      "sha256": "b5d5ecce4cca379d185f28e48073c82cfb20f6082389d4c02ad4b72782a1bd0c",
+      "size_bytes": 51437
+    },
+    "runner": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\run_phase1_frozen_pipeline.py",
+      "sha256": "0aa1f57192da35add8c46e0e8c1e5961e6c56f41b41a800d295dbf6fe1f47a74",
+      "size_bytes": 13004
+    },
+    "finalizer": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\phase1_finalize_latest_timeline.py",
+      "sha256": "f310e2e86ee878d5804837172567c8d486f834699f5bda0a6b1128be40eae81b",
+      "size_bytes": 18505
+    },
+    "validator": {
+      "required": true,
+      "path": "target_centric_tracking_v1\\phase1_validate_outputs.py",
+      "sha256": "c7f146b03f5dcec8e57999f75b727cc17d49b23a57d0e06fc691010ac221795d",
+      "size_bytes": 5055
+    }
+  },
+  "models": {
+    "rfdetr": {
+      "path": "weights\\rfdetr\\checkpoint_best_regular.pth",
+      "sha256": "5d1d05cf78b6a777430430955d0e745ce5c61913c659b2e96ae5deddbd1a3a94",
+      "expected_sha256": "5d1d05cf78b6a777430430955d0e745ce5c61913c659b2e96ae5deddbd1a3a94",
+      "verified": true
+    },
+    "sports_osnet": {
+      "path": "global_ID_tracking_upgrade_v6\\third_party\\Deep-EIoU\\Deep-EIoU\\checkpoints\\sports_model.pth.tar-60",
+      "sha256": "8d5b2fd8763db34c2aad69810466adf413f0426d9f8119d322227e0e639c5fbd",
+      "expected_sha256": "8d5b2fd8763db34c2aad69810466adf413f0426d9f8119d322227e0e639c5fbd",
+      "verified": true
+    }
+  },
+  "contracts": {
+    "policy_path": "target_centric_tracking_v1\\phase1_frozen_policy.json",
+    "policy_sha256": "9d09a14e72615ab81a82e1c21a9973c565665d6876be9695d36f1e4df039bb42",
+    "schema_path": "target_centric_tracking_v1\\phase1_output_schema.json",
+    "schema_sha256": "d53ae181f9c9bb86dd968a900f582bbbc967543f7189af4f630ac2c86f51d78e"
+  },
+  "freeze_rules": {
+    "script_hash_check_before_run": true,
+    "model_hash_check_before_run": true,
+    "threshold_search": false,
+    "automatic_memory_update_from_unreviewed_episode": false,
+    "silent_wrong_player_switch_priority": "ZERO_TOLERANCE"
+  }
+}

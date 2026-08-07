@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domains.tracking.status import TrackingBackendStatus
 from app.domains.tracking.validation import validate_bbox_xyxy
@@ -72,12 +72,34 @@ class TrackingReviewRequest(BaseModel):
 class AmbiguityDecision(str, Enum):
     CANDIDATE = "candidate"
     ABSENT = "absent"
+    NONE_OF_THESE = "none_of_these"
+    NON_PLAYER_ROLE = "non_player_role"
 
 
 class TrackingAmbiguityConfirmationRequest(BaseModel):
     decision: AmbiguityDecision
     candidate_id: str | None = Field(default=None, max_length=255)
     note: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_candidate_decision(cls, value: Any) -> Any:
+        """Accept the candidate-only payload emitted by the current frontend."""
+
+        if not isinstance(value, dict) or value.get("decision"):
+            return value
+        normalized = dict(value)
+        candidate_id = str(normalized.get("candidate_id") or "").strip()
+        if candidate_id.lower() in {
+            AmbiguityDecision.ABSENT.value,
+            AmbiguityDecision.NONE_OF_THESE.value,
+            AmbiguityDecision.NON_PLAYER_ROLE.value,
+        }:
+            normalized["decision"] = candidate_id.lower()
+            normalized["candidate_id"] = None
+        elif candidate_id:
+            normalized["decision"] = AmbiguityDecision.CANDIDATE.value
+        return normalized
 
     @field_validator("candidate_id")
     @classmethod
@@ -111,12 +133,26 @@ class TrackingArtifactsResponse(BaseModel):
     artifacts: list[TrackingArtifactRead] = Field(default_factory=list)
 
 
+class TrackingCandidateRead(BaseModel):
+    candidate_id: str
+    rank: int | None = None
+    score: float | None = None
+    frame_image_urls: list[str] = Field(default_factory=list)
+    shot_id: str | None = None
+    tracklet_id: str | None = None
+    reviewability: str | None = None
+    best_frame: int | None = None
+    status: str = "PENDING"
+    review_bundle: dict[str, Any] = Field(default_factory=dict)
+
+
 class TrackingPendingActionResponse(BaseModel):
     type: str
     review_stage: str | None = None
     ambiguity_id: str | None = None
     shot_id: str | None = None
     candidate_ids: list[str] = Field(default_factory=list)
+    candidates: list[TrackingCandidateRead] = Field(default_factory=list)
     recommended_candidate: str | None = None
     artifact_keys: list[str] = Field(default_factory=list)
     required_action: str
@@ -136,6 +172,9 @@ class TrackingJobResponse(BaseModel):
     project_id: str | None
     media_asset_id: str
     status: TrackingBackendStatus
+    execution_kind: str
+    pipeline_stage: str | None
+    processing_status: str
     outcome: str
     progress: int = Field(ge=0, le=100)
     retryable: bool
@@ -143,6 +182,19 @@ class TrackingJobResponse(BaseModel):
     pipeline_status: str | None
     pipeline_decision: str | None
     current_stage: str | None
+    pending_ambiguity_id: str | None
+    pending_candidates: list[TrackingCandidateRead] = Field(default_factory=list)
+    latest_decision: dict[str, Any] | None = None
+    current_memory_revision: dict[str, Any] | None = None
+    next_ambiguity: dict[str, Any] | None = None
+    review_progress: dict[str, Any] = Field(default_factory=dict)
+    current_shot: str | None = None
+    next_shot: str | None = None
+    completed: bool
+    completed_at: datetime | None = None
+    failure_code: str | None = None
+    artifact_readiness: dict[str, bool] = Field(default_factory=dict)
+    preview_readiness: dict[str, bool] = Field(default_factory=dict)
     initial_bbox_xyxy: list[float]
     bbox_format: str
     device: str

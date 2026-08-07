@@ -227,9 +227,25 @@ class TrackingArtifactService:
         )
         expected = (output_root / job.test_name).resolve()
         stored = Path(job.output_directory).resolve()
-        if stored != expected or not stored.is_relative_to(output_root):
-            raise TrackingContractError("Tracking job output root is invalid.")
-        return stored
+        if stored == expected and stored.is_relative_to(output_root):
+            return stored
+
+        r1_metadata = (job.runtime_metadata or {}).get(
+            "event_candidate_handoff_r1"
+        )
+        r1_root = (
+            LocalStorage().storage_root / "event_candidate_handoff_r1"
+        ).resolve()
+        pipeline_state = Path(job.pipeline_state_path).resolve()
+        if (
+            isinstance(r1_metadata, Mapping)
+            and stored.name == job.tracking_job_id
+            and stored.is_relative_to(r1_root)
+            and pipeline_state.parent == stored
+        ):
+            return stored
+
+        raise TrackingContractError("Tracking job output root is invalid.")
 
     def _collect_pending(
         self,

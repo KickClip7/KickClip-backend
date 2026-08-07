@@ -7,6 +7,7 @@ from app.api.v1 import (
     artifacts,
     auth,
     clip_plans,
+    event_candidate_handoff_r1,
     event_candidate_ranking_v1_1_2a,
     health,
     highlights,
@@ -17,6 +18,7 @@ from app.api.v1 import (
     renders,
     scene_target_reviewability,
     session,
+    shot_boundaries,
     studio,
     timelines,
     tracking,
@@ -39,6 +41,11 @@ api_router.include_router(
     tags=["artifacts"],
 )
 api_router.include_router(
+    event_candidate_handoff_r1.router,
+    tags=["event-candidate-handoff-r1"],
+    dependencies=authenticated,
+)
+api_router.include_router(
     highlights.router,
     tags=["highlight"],
     dependencies=authenticated,
@@ -51,6 +58,11 @@ api_router.include_router(
 api_router.include_router(
     scene_target_reviewability.router,
     tags=["scene-target-reviewability"],
+    dependencies=authenticated,
+)
+api_router.include_router(
+    shot_boundaries.router,
+    tags=["shot-boundaries"],
     dependencies=authenticated,
 )
 api_router.include_router(

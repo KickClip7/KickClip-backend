@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 APPROVED_SHOT_STATES = frozenset({"REVIEWED_PASS", "CONFIRMED"})
 
 
@@ -44,6 +43,13 @@ def load_reviewed_shots(document: dict[str, Any]) -> tuple[ReviewedShot, ...]:
     if not isinstance(rows, list) or not rows:
         raise ValueError("Reviewed shot artifact has no shots.")
     shots: list[ReviewedShot] = []
+    automatic = (
+        document.get("artifact_type") == "AUTO_SHOT_BOUNDARIES"
+        and document.get("boundary_origin") == "AUTO_DETECTED"
+        and document.get("human_reviewed") is False
+        and document.get("automatic_target_confirmation") is False
+        and (document.get("structural_validation") or {}).get("status") == "PASS"
+    )
     expected_frame = 0
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
@@ -75,7 +81,9 @@ def load_reviewed_shots(document: dict[str, Any]) -> tuple[ReviewedShot, ...]:
             or end_time <= start_time
         ):
             raise ValueError("Reviewed shot contract is invalid.")
-        if state not in APPROVED_SHOT_STATES:
+        if automatic and state in APPROVED_SHOT_STATES:
+            raise ValueError("Automatic shot boundaries must not impersonate review approval.")
+        if not automatic and state not in APPROVED_SHOT_STATES:
             raise ValueError(f"Shot is not approved: {shot_id}")
         shots.append(
             ReviewedShot(
@@ -142,4 +150,3 @@ def global_ranking_fingerprint(rows: tuple[dict[str, Any], ...]) -> str:
             for row in rows
         ]
     )
-

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "kickclip.earlier_anchor_decision.v1",
+  "type": "object",
+  "required": ["selection_id", "state", "anchor_shot_id", "start_mode", "confirmed_by", "confirmed_at"],
+  "properties": {
+    "state": {
+      "enum": [
+        "USER_CONFIRMED_EARLIER_ANCHOR",
+        "USER_REJECTED_ALL_EARLIER_CANDIDATES",
+        "START_FROM_SELECTED_SHOT"
+      ]
+    }
+  }
+}
