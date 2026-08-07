@@ -178,12 +178,35 @@ def extract_pending_ambiguity(state: Mapping[str, Any]) -> dict[str, Any] | None
     )
     if ambiguity is None:
         raise R1RuntimeSyncError("Runtime pending ambiguity is absent from state.")
-    candidates = _rows(
-        ambiguity.get("review_candidates")
-        or ambiguity.get("candidates")
-    )
-    if not candidates:
-        raise R1RuntimeSyncError("EMPTY_PENDING_AMBIGUITY_FORBIDDEN")
+
+    # Canonical E2E keeps the full review_candidates audit trail and shrinks
+    # pending_action.candidate_ids after each human rejection. Only those active
+    # ids may be exposed as the backend WAITING ambiguity. Synchronizing the
+    # whole historical review_candidates list can resurrect already rejected
+    # candidates and is the root cause of EMPTY_PENDING_AMBIGUITY_FORBIDDEN.
+    pending_ids = [
+        str(value)
+        for value in (pending.get("candidate_ids") or [])
+        if str(value)
+    ]
+    if not pending_ids:
+        raise R1RuntimeSyncError(
+            "CROSS_SHOT_CONFIRMATION_HAS_NO_ACTIVE_CANDIDATES"
+        )
+
+    rows = _rows(ambiguity.get("review_candidates") or ambiguity.get("candidates"))
+    by_id = {
+        str(item.get("candidate_id") or ""): item
+        for item in rows
+        if str(item.get("candidate_id") or "")
+    }
+    missing = [candidate_id for candidate_id in pending_ids if candidate_id not in by_id]
+    if missing:
+        raise R1RuntimeSyncError(
+            "Runtime pending candidate_ids are absent from ambiguity evidence: "
+            + ",".join(missing)
+        )
+    candidates = [dict(by_id[candidate_id]) for candidate_id in pending_ids]
     return {**ambiguity, "candidates": candidates, "pending": pending}
 
 
@@ -260,24 +283,11 @@ class R1RuntimeStateSynchronizer:
                     },
                 }
             )
-        reviewed_candidate_ids = {
-            str(value)
-            for value in self.db.scalars(
-                select(EventCandidateReviewDecisionR1.candidate_id).where(
-                    EventCandidateReviewDecisionR1.tracking_job_id
-                    == job.tracking_job_id,
-                    EventCandidateReviewDecisionR1.ambiguity_id == ambiguity_id,
-                    EventCandidateReviewDecisionR1.candidate_id.is_not(None),
-                )
-            ).all()
-            if value
-        }
-        if reviewed_candidate_ids:
-            candidates = [
-                item
-                for item in candidates
-                if str(item.get("candidate_id") or "") not in reviewed_candidate_ids
-            ]
+        # `extract_pending_ambiguity()` already reduced the runtime audit trail
+        # to pending_action.candidate_ids, which is canonical server truth after
+        # each resume. Do not filter it again using backend review rows: that
+        # creates a temporal race where a decision is durable in PostgreSQL but
+        # has not yet been replayed into the subprocess state.
         if not candidates:
             raise R1RuntimeSyncError("EMPTY_PENDING_AMBIGUITY_FORBIDDEN")
 

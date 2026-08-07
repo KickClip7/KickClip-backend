@@ -11,7 +11,7 @@ class ShotBoundaryDraftItem(BaseModel):
     end_frame_inclusive: int = Field(ge=0)
     start_seconds: float | None = None
     end_seconds_inclusive: float | None = None
-    review_status: Literal["PENDING", "REVIEWED_PASS"] = "PENDING"
+    review_status: Literal["PENDING", "AUTO_ACCEPTED", "REVIEWED_PASS"] = "PENDING"
 
 
 class ShotCutCandidate(BaseModel):
@@ -24,7 +24,12 @@ class ShotCutCandidate(BaseModel):
 
 class ShotBoundaryReviewResponse(BaseModel):
     status: Literal[
-        "NOT_PREPARED", "PREPARING", "WAITING_REVIEW", "CONFIRMED", "FAILED"
+        "NOT_PREPARED",
+        "PREPARING",
+        "WAITING_REVIEW",
+        "AUTO_READY",
+        "CONFIRMED",
+        "FAILED",
     ]
     project_id: str
     revision_id: str
@@ -46,6 +51,10 @@ class ShotBoundaryReviewResponse(BaseModel):
     automatic_cuts: list[ShotCutCandidate] = Field(default_factory=list)
     contact_sheet_url: str | None = None
     confirmed_artifact_id: str | None = None
+    authoritative_artifact_id: str | None = None
+    boundary_origin: Literal["AUTO_DETECTED", "HUMAN_REVIEWED"] | None = None
+    human_reviewed: bool = False
+    review_required: bool = False
     detections_status: str | None = None
     automatic_confirmation: Literal[False] = False
     error: dict | None = None

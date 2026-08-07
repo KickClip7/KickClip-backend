@@ -419,22 +419,32 @@ class SceneTargetTrackingInstallationVerifier:
                 components=components,
             )
 
-        selection_verified = bool(
-            selection_result.get(
+        # The backend-owned source verifier reports
+        # ``scene_target_selection_source_verified``. Older verifier contracts
+        # used ``scene_target_selection_verified`` or
+        # ``scene_discovery_runtime_verified``. Accept all supported success
+        # keys, while the manifest SHA-256 check above remains the authoritative
+        # immutability gate.
+        selection_verified = any(
+            bool(selection_result.get(key))
+            for key in (
+                "scene_target_selection_source_verified",
                 "scene_target_selection_verified",
-                selection_result.get(
-                    "scene_discovery_runtime_verified",
-                    selection_result.get("status") == "PASS",
-                ),
+                "scene_discovery_runtime_verified",
             )
-        )
+        ) or selection_result.get("status") == "PASS"
         if not selection_verified:
             return TrackingInstallationStatus(
                 enabled=True,
                 available=False,
                 checked_at=now,
                 code="SCENE_TARGET_SELECTION_VERIFICATION_FAILED",
-                message="Scene target selection verifier did not confirm the package.",
+                message=(
+                    "Scene target selection verifier did not confirm the package. "
+                    "Expected one of: scene_target_selection_source_verified, "
+                    "scene_target_selection_verified, scene_discovery_runtime_verified, "
+                    "or status=PASS."
+                ),
                 components=components,
             )
 

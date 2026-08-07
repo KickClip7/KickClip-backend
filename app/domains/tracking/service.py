@@ -327,11 +327,14 @@ class TrackingJobService:
         pending = self._public_pending_action(job)
         timeline = (job.artifact_index or {}).get("target_timeline_json") or {}
         has_timeline = bool(timeline.get("exists"))
-        error = (
-            TrackingErrorRead(type=job.error_type, message=job.error_message)
-            if job.error_type or job.error_message
-            else None
-        )
+        # Public responses must remain readable even for historical jobs that
+        # were persisted by an older runtime-sync implementation.  Keep the DB
+        # row immutable on GET, but surface a terminal FAILED view if a WAITING
+        # job no longer has a coherent active ambiguity.
+        response_status = job.status
+        response_error_type = job.error_type
+        response_error_message = job.error_message
+        response_pending_ambiguity_id = job.pending_ambiguity_id
         latest = (
             self.db.get(EventCandidateReviewDecisionR1, job.latest_decision_id)
             if job.latest_decision_id
@@ -367,21 +370,42 @@ class TrackingJobService:
                 for item in active_candidates
                 if item.get("candidate_id")
             ]
-            if list(ambiguity.candidate_ids or []) != active_candidate_ids:
+            candidate_ids_match = (
+                list(ambiguity.candidate_ids or []) == active_candidate_ids
+            )
+            if (
+                not candidate_ids_match
+                and job.status
+                != TrackingBackendStatus.WAITING_CROSS_SHOT_CONFIRMATION.value
+            ):
                 raise TrackingContractError(
                     "Pending ambiguity candidate_ids do not match PENDING candidates."
                 )
+        else:
+            candidate_ids_match = True
+
         if job.status == TrackingBackendStatus.WAITING_CROSS_SHOT_CONFIRMATION.value:
-            if (
-                pipeline is None
-                or pipeline.pending_ambiguity_id != job.pending_ambiguity_id
-                or ambiguity is None
-                or ambiguity.status != "WAITING"
-                or not active_candidates
-            ):
-                raise TrackingContractError(
-                    "WAITING_CROSS_SHOT_CONFIRMATION requires one active WAITING ambiguity."
+            waiting_contract_valid = (
+                candidate_ids_match
+                and pipeline is not None
+                and pipeline.pending_ambiguity_id == job.pending_ambiguity_id
+                and ambiguity is not None
+                and ambiguity.status == "WAITING"
+                and bool(active_candidates)
+            )
+            if not waiting_contract_valid:
+                response_status = TrackingBackendStatus.FAILED.value
+                response_error_type = (
+                    job.error_type or "STALE_WAITING_AMBIGUITY_STATE"
                 )
+                response_error_message = (
+                    job.error_message
+                    or "This tracking job was left in an inconsistent waiting state by an older runtime sync. Start a new tracking job for the current highlight revision."
+                )
+                response_pending_ambiguity_id = None
+                pending = None
+                ambiguity = None
+                active_candidates = []
         if (
             pending is not None
             and ambiguity is not None
@@ -396,6 +420,14 @@ class TrackingJobService:
                     ],
                 }
             )
+        error = (
+            TrackingErrorRead(
+                type=response_error_type,
+                message=response_error_message,
+            )
+            if response_error_type or response_error_message
+            else None
+        )
         artifact_readiness = {
             "pipeline_state": Path(job.pipeline_state_path).is_file(),
             "timeline": bool(job.timeline_path and Path(job.timeline_path).is_file()),
@@ -412,18 +444,18 @@ class TrackingJobService:
             match_id=job.match_id,
             project_id=job.project_id,
             media_asset_id=job.media_asset_id,
-            status=TrackingBackendStatus(job.status),
+            status=TrackingBackendStatus(response_status),
             execution_kind=job.execution_kind,
             pipeline_stage=job.pipeline_stage,
             processing_status=job.processing_status,
-            outcome=tracking_outcome(job.status, job.error_type),
-            progress=tracking_progress(job.status, job.current_stage),
-            retryable=tracking_retryable(job.status, job.error_type),
+            outcome=tracking_outcome(response_status, response_error_type),
+            progress=tracking_progress(response_status, job.current_stage),
+            retryable=tracking_retryable(response_status, response_error_type),
             status_url=f"/api/v1/tracking/jobs/{job.tracking_job_id}",
             pipeline_status=job.pipeline_status,
             pipeline_decision=job.pipeline_decision,
             current_stage=job.current_stage,
-            pending_ambiguity_id=job.pending_ambiguity_id,
+            pending_ambiguity_id=response_pending_ambiguity_id,
             pending_candidates=list(pending.candidates) if pending else [],
             latest_decision=(
                 {
@@ -485,7 +517,7 @@ class TrackingJobService:
                 ),
                 "current_shot": job.current_shot_id,
                 "preparing_next_candidates": bool(
-                    job.status in {
+                    response_status in {
                         TrackingBackendStatus.QUEUED.value,
                         TrackingBackendStatus.RUNNING.value,
                     }
@@ -496,7 +528,7 @@ class TrackingJobService:
             next_shot=job.next_shot_id,
             completed=job.pipeline_stage == "COMPLETED",
             completed_at=job.completed_at,
-            failure_code=job.failure_code,
+            failure_code=(job.failure_code or (response_error_type if response_status == TrackingBackendStatus.FAILED.value else None)),
             artifact_readiness=artifact_readiness,
             preview_readiness=preview_readiness,
             initial_bbox_xyxy=list(job.initial_bbox),

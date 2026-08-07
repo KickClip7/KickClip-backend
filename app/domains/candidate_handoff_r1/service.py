@@ -86,6 +86,15 @@ SUPPORTED_TRACKING_BOUNDARY_ARTIFACT_TYPES = {
     AUTO_SHOT_BOUNDARIES,
     REVIEWED_SHOT_BOUNDARIES,
 }
+PUBLIC_CANDIDATE_REVIEW_CONTINUATIONS = frozenset(
+    {
+        "REVIEW_NEXT_CANDIDATE",
+        "REVIEW_NEXT_BATCH",
+        "SEARCH_NEXT_SHOT",
+        "TRACKING_RESUMED",
+        "COMPLETED",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -1781,6 +1790,20 @@ class CandidateHandoffR1Service:
             )
         )
         if existing is not None:
+            metadata = dict(existing.metadata_ or {})
+            continuation = str(metadata.get("continuation") or "TRACKING_RESUMED")
+            if continuation not in PUBLIC_CANDIDATE_REVIEW_CONTINUATIONS:
+                # Repair rows persisted by an older backend build that wrote an
+                # internal orchestration label into the public API field. The
+                # human decision itself is already durable and must not be replayed.
+                metadata["continuation"] = "TRACKING_RESUMED"
+                metadata["next_candidate_id"] = None
+                metadata["next_ambiguity_id"] = None
+                metadata["automatic_target_confirmation"] = False
+                existing.metadata_ = metadata
+                self.db.add(existing)
+                self.db.commit()
+                self.db.refresh(existing)
             return existing
         job = self.db.scalar(
             select(TrackingJob)
@@ -2096,94 +2119,76 @@ class CandidateHandoffR1Service:
             pipeline.last_completed_ambiguity_id = ambiguity_id
             summary.setdefault("shot_absent_ids", []).append(ambiguity.shot_id)
             submit_runtime = True
-        elif remaining:
-            # Candidate-local rejection/unreviewable: keep the same dynamic ambiguity.
-            ambiguity.candidates = remaining
-            ambiguity.status = "WAITING"
-            pipeline.pending_ambiguity_id = ambiguity_id
-            pipeline.pipeline_stage = (
-                R1PipelineStage.WAITING_CROSS_SHOT_CONFIRMATION.value
-            )
-            pipeline.processing_status = R1ProcessingStatus.WAITING.value
-            job.status = TrackingBackendStatus.WAITING_CROSS_SHOT_CONFIRMATION.value
-            job.pipeline_status = "NEEDS_CONFIRMATION"
-            job.pending_action_type = "CROSS_SHOT_CONFIRMATION"
-            job.pending_ambiguity_id = ambiguity_id
-            outbox.status = "COMPLETED"
-            outbox.completed_at = datetime.now(timezone.utc)
-            outbox.artifact_path = row.confirmation_artifact_path
-            outbox.artifact_sha256 = sha
-            continuation = "REVIEW_NEXT_CANDIDATE"
-            remaining_candidate_count = len(remaining)
-            next_candidate_id = str(remaining[0]["candidate_id"])
-            next_ambiguity_id = ambiguity_id
-        else:
-            ambiguity.status = (
-                "ALL_CANDIDATES_REJECTED"
+        elif request.state in {
+            CandidateReviewState.DIFFERENT_PLAYER,
+            CandidateReviewState.UNREVIEWABLE_LOW_RESOLUTION,
+        }:
+            # Canonical E2E is the single source of truth for cross-shot review
+            # state. Never consume a candidate-local decision only in the DB.
+            # Every rejection/unreviewable decision is replayed immediately into
+            # target_centric_tracking_e2e_v1 so its pending candidate_ids,
+            # ambiguity status, negative memory, and next-shot search remain in
+            # lockstep with the backend contract.
+            kind = (
+                "candidate_rejected"
                 if request.state == CandidateReviewState.DIFFERENT_PLAYER
-                else "UNRESOLVED_LOW_RESOLUTION"
+                else "candidate_unreviewable"
             )
-            next_batch = self._next_review_catalog_batch(
-                job=job,
-                pipeline=pipeline,
-                ambiguity=ambiguity,
-            )
-            if next_batch is not None:
-                job.queued_action = None
-                job.status = TrackingBackendStatus.WAITING_CROSS_SHOT_CONFIRMATION.value
-                job.pipeline_status = "NEEDS_CONFIRMATION"
-                job.pending_action_type = "CROSS_SHOT_CONFIRMATION"
-                job.pending_ambiguity_id = next_batch.ambiguity_id
-                pipeline.pending_ambiguity_id = next_batch.ambiguity_id
-                pipeline.pipeline_stage = (
-                    R1PipelineStage.WAITING_CROSS_SHOT_CONFIRMATION.value
-                )
-                pipeline.processing_status = R1ProcessingStatus.WAITING.value
-                outbox.status = "COMPLETED"
-                outbox.completed_at = datetime.now(timezone.utc)
-                outbox.artifact_path = row.confirmation_artifact_path
-                outbox.artifact_sha256 = sha
-                continuation = "REVIEW_NEXT_BATCH"
-                # This response describes the exhausted generation. The new
-                # generation is loaded from next_ambiguity_id as server truth.
-                remaining_candidate_count = 0
-                next_candidate_id = None
-                next_ambiguity_id = next_batch.ambiguity_id
-                summary["candidate_batch_generation"] = int(next_batch.generation)
-                summary["remaining_candidate_count"] = remaining_candidate_count
-            else:
-                kind = (
-                    "candidate_rejected"
-                    if request.state == CandidateReviewState.DIFFERENT_PLAYER
-                    else "candidate_unreviewable"
-                )
-                job.queued_action = {
-                    "kind": kind,
-                    "ambiguity_id": ambiguity_id,
-                    "candidate_id": request.candidate_id,
-                    "decision_artifact_path": row.confirmation_artifact_path,
-                    "decision_artifact_sha256": sha,
-                    "reviewer": user.user_id,
-                    "note": request.note,
-                }
-                pipeline.pending_ambiguity_id = None
+            job.queued_action = {
+                "kind": kind,
+                "ambiguity_id": ambiguity_id,
+                "candidate_id": request.candidate_id,
+                "decision_artifact_path": row.confirmation_artifact_path,
+                "decision_artifact_sha256": sha,
+                "reviewer": user.user_id,
+                "note": request.note,
+            }
+            # While the subprocess applies the human decision there is no
+            # backend-owned WAITING ambiguity. The canonical runtime will return
+            # either the same ambiguity with a reduced candidate_ids list, a new
+            # ambiguity for a later shot, or a terminal/searching state.
+            pipeline.pending_ambiguity_id = None
+            ambiguity.status = "APPLYING_HUMAN_DECISION"
+            if not remaining:
                 pipeline.last_completed_ambiguity_id = ambiguity_id
-                if kind == "candidate_rejected":
-                    excluded = list(summary.get("excluded_candidate_ids") or [])
-                    if request.candidate_id not in excluded:
-                        excluded.append(request.candidate_id)
-                    summary["excluded_candidate_ids"] = excluded
-                else:
-                    unresolved = list(
-                        summary.get("unresolved_low_resolution_shot_ids") or []
-                    )
-                    if ambiguity.shot_id not in unresolved:
-                        unresolved.append(ambiguity.shot_id)
-                    summary["unresolved_low_resolution_shot_ids"] = unresolved
-                submit_runtime = True
-                continuation = "SEARCH_NEXT_SHOT"
+
+            if kind == "candidate_rejected":
+                excluded = list(summary.get("excluded_candidate_ids") or [])
+                if request.candidate_id not in excluded:
+                    excluded.append(request.candidate_id)
+                summary["excluded_candidate_ids"] = excluded
+            else:
+                unresolved = list(
+                    summary.get("unresolved_low_resolution_shot_ids") or []
+                )
+                if not remaining and ambiguity.shot_id not in unresolved:
+                    unresolved.append(ambiguity.shot_id)
+                summary["unresolved_low_resolution_shot_ids"] = unresolved
+
+            submit_runtime = True
+            remaining_candidate_count = len(remaining)
+            next_candidate_id = (
+                str(remaining[0]["candidate_id"]) if remaining else None
+            )
+            # The decision is applied asynchronously by the canonical E2E runtime.
+            # The backend cannot truthfully promise which review/search state comes
+            # next until that runtime has applied the decision.  Return the public
+            # TRACKING_RESUMED continuation and let the client poll the job; canonical
+            # E2E will then publish the next WAITING ambiguity, SEARCHING state, or
+            # terminal completion.
+            next_candidate_id = None
+            next_ambiguity_id = None
+            continuation = "TRACKING_RESUMED"
+        else:
+            raise ValueError(
+                f"Unsupported candidate review state: {request.state.value}"
+            )
 
         summary["remaining_candidate_count"] = remaining_candidate_count
+        if continuation not in PUBLIC_CANDIDATE_REVIEW_CONTINUATIONS:
+            raise RuntimeError(
+                f"Invalid public candidate-review continuation: {continuation}"
+            )
         row.metadata_ = {
             **dict(row.metadata_ or {}),
             "continuation": continuation,

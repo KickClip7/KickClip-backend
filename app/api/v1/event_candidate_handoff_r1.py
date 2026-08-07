@@ -110,7 +110,10 @@ def _require_candidate_discovery_inputs(
             status_code=status.HTTP_409_CONFLICT,
             detail={
                 "code": "SHOT_BOUNDARY_REVIEW_REQUIRED",
-                "message": "Automatic shot boundaries need human correction.",
+                "message": (
+                    "Automatic shot-boundary structural validation failed. "
+                    "Manual correction is required only for this exceptional scene."
+                ),
                 "reason": "AUTOMATIC_BOUNDARY_STRUCTURAL_GATE_FAILED",
                 "prepare_review_url": prepare_url,
                 "review_status_url": status_url,

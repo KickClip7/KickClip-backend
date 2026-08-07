@@ -193,7 +193,18 @@ class EventCandidateRecommendationPreparationService:
         event_id: str,
         scene_id: str,
         reviewed_shot_boundaries_sha256: str | None = None,
+        detections_sha256: str | None = None,
     ) -> bool:
+        """Return True only for a ranking built from the *current* inputs.
+
+        Candidate discovery is intentionally cacheable, but the RF-DETR sampling
+        policy is part of the effective input contract.  A new sampling policy
+        produces a new detections.csv digest even when the scene and automatic
+        shot boundaries are unchanged.  Reusing a V1.1.2a ranking produced from
+        an older detection artifact can otherwise preserve an empty candidate
+        gallery forever.
+        """
+
         expected = {
             "revision_id": revision_id,
             "event_id": event_id,
@@ -211,6 +222,16 @@ class EventCandidateRecommendationPreparationService:
                     or ""
                 )
                 == reviewed_shot_boundaries_sha256
+            )
+            and (
+                detections_sha256 is None
+                or str(
+                    ((row.metadata_ or {}).get("freeze_material") or {}).get(
+                        "detections_sha256"
+                    )
+                    or ""
+                )
+                == detections_sha256
             )
             for row in self.db.scalars(
                 select(Artifact).where(
@@ -676,12 +697,22 @@ class EventCandidateRecommendationPreparationService:
             if reviewed is not None
             else ""
         )
+        detections = self.db.get(
+            Artifact, str(mapping.get("detections_artifact_id") or "")
+        )
+        detection_metadata = detections.metadata_ or {} if detections is not None else {}
+        detections_sha = str(
+            detection_metadata.get("sha256")
+            or detection_metadata.get("detections_sha256")
+            or ""
+        )
         if self._has_source(
             project=project,
             revision_id=revision_id,
             event_id=event_id,
             scene_id=scene_id,
             reviewed_shot_boundaries_sha256=reviewed_sha or None,
+            detections_sha256=detections_sha or None,
         ):
             event = self.db.get(TimelineEvent, event_id)
             if (
@@ -714,11 +745,15 @@ class EventCandidateRecommendationPreparationService:
                 "The selected revision, event, scene and Action Spotting source do not match.",
             )
         discovery = (revision.options or {}).get("scene_target_selection") or {}
+        discovery_inputs = discovery.get("discovery_inputs") or {}
         if (
             discovery.get("scene_id") != scene_id
             or not discovery.get("discovery_id")
-            or (discovery.get("discovery_inputs") or {}).get("shot_boundaries_sha256")
-            != reviewed_sha
+            or discovery_inputs.get("shot_boundaries_sha256") != reviewed_sha
+            or (
+                bool(detections_sha)
+                and discovery_inputs.get("detections_sha256") != detections_sha
+            )
         ):
             scene_video, reviewed, detections = self._materialize_candidate_inputs(
                 project=project,
@@ -726,6 +761,10 @@ class EventCandidateRecommendationPreparationService:
                 event=event,
                 scene_id=scene_id,
             )
+            # The discovery fingerprint already includes detections_sha256.  By
+            # reaching this branch on a digest mismatch we force the frozen
+            # scene-target discovery to rebuild from the new sparse RF-DETR rows
+            # instead of reusing the previous empty gallery.
             if not self._materialize_discovery_snapshot(
                 project=project,
                 revision=revision,

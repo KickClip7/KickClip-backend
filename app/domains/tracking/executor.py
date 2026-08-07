@@ -209,6 +209,7 @@ class TrackingJobExecutor:
             if job is not None:
                 self._reconcile_or_fail(
                     job,
+                    db=db,
                     process_return_code=None,
                     process_pid=pid,
                     fallback_type="TRACKING_PROCESS_TIMEOUT",
@@ -225,6 +226,7 @@ class TrackingJobExecutor:
             if job is not None:
                 self._reconcile_or_fail(
                     job,
+                    db=db,
                     process_return_code=None,
                     process_pid=pid,
                     fallback_type="TRACKING_RUNTIME_FAILED",
@@ -272,6 +274,7 @@ class TrackingJobExecutor:
         self,
         job,
         *,
+        db=None,
         process_return_code: int | None,
         process_pid: int | None,
         fallback_type: str,
@@ -301,7 +304,12 @@ class TrackingJobExecutor:
                     process_pid=process_pid,
                     artifacts=artifacts,
                 )
-                self._after_pipeline_sync(None, job, state, mapping, artifacts)
+                # R1/canonical E2E jobs have DB-backed ambiguity/memory state.
+                # Reconcile that state before preserving a WAITING outcome.  The
+                # old implementation passed None here, so an R1 sync failure
+                # could leave the job permanently WAITING while its ambiguity
+                # rows were missing/inconsistent.
+                self._after_pipeline_sync(db, job, state, mapping, artifacts)
                 return
         except Exception:
             logger.exception(

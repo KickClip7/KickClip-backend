@@ -32,7 +32,7 @@ def _raise(exc: ShotBoundaryWorkflowError) -> None:
 @router.post(
     "/projects/{project_id}/highlight/revisions/{revision_id}/events/{event_id}/shot-boundaries/prepare",
     response_model=ShotBoundaryReviewResponse,
-    summary="Materialize an exact scene and prepare an automatic shot-boundary draft",
+    summary="Automatically prepare authoritative shot boundaries and candidate detections",
 )
 def prepare_shot_boundaries(
     project_id: str,
@@ -46,7 +46,7 @@ def prepare_shot_boundaries(
 ) -> ShotBoundaryReviewResponse:
     project = require_project_access(db, project_id, current_user)
     try:
-        result = ShotBoundaryReviewService(db).prepare(
+        result = ShotBoundaryReviewService(db).prepare_for_candidate_discovery(
             project=project,
             user=current_user,
             revision_id=revision_id,
@@ -63,7 +63,7 @@ def prepare_shot_boundaries(
 @router.get(
     "/projects/{project_id}/highlight/revisions/{revision_id}/events/{event_id}/shot-boundaries",
     response_model=ShotBoundaryReviewResponse,
-    summary="Get the authoritative shot-boundary review state",
+    summary="Get the authoritative automatic-or-reviewed shot-boundary state",
 )
 def get_shot_boundaries(
     project_id: str,
@@ -89,7 +89,7 @@ def get_shot_boundaries(
 @router.put(
     "/projects/{project_id}/highlight/revisions/{revision_id}/events/{event_id}/shot-boundaries/draft",
     response_model=ShotBoundaryReviewResponse,
-    summary="Save a human-edited shot-boundary draft with optimistic concurrency",
+    summary="Optional fallback: save a human-corrected shot-boundary draft",
 )
 def update_shot_boundary_draft(
     project_id: str,
@@ -117,7 +117,7 @@ def update_shot_boundary_draft(
 @router.post(
     "/projects/{project_id}/highlight/revisions/{revision_id}/events/{event_id}/shot-boundaries/reset",
     response_model=ShotBoundaryReviewResponse,
-    summary="Reset the mutable draft to the immutable automatic analysis result",
+    summary="Optional fallback: reset a corrected draft to automatic cut detection",
 )
 def reset_shot_boundary_draft(
     project_id: str,
@@ -143,7 +143,7 @@ def reset_shot_boundary_draft(
 @router.post(
     "/projects/{project_id}/highlight/revisions/{revision_id}/events/{event_id}/shot-boundaries/confirm",
     response_model=ShotBoundaryConfirmResponse,
-    summary="Create an immutable human-reviewed boundary artifact and scene detections",
+    summary="Optional fallback: replace automatic boundaries with a human-reviewed artifact",
 )
 def confirm_shot_boundaries(
     project_id: str,

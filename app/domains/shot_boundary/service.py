@@ -52,39 +52,127 @@ AUTO_ARTIFACT_TYPE = "AUTO_SHOT_BOUNDARIES"
 DETECTIONS_ARTIFACT_TYPE = "SCENE_PLAYER_DETECTIONS"
 OBSERVATIONS_ARTIFACT_TYPE = "SCENE_RFDETR_OBSERVATIONS"
 
-# Initial player-candidate discovery is intentionally cheaper than final
-# target tracking.  It uses the Action Spotting timestamp as the center of a
-# short detection window and samples only the frames needed to build stable
-# shot-local micro-tracklets.  The final tracking runtime still processes the
-# selected target with the full precision-first pipeline.
-FAST_CANDIDATE_DETECTION_POLICY_VERSION = "ACTION_WINDOW_SAMPLED_RFDETR_V3_WIDE_OBSERVATION"
-FAST_CANDIDATE_TARGET_FPS = 5.0
-FAST_CANDIDATE_DENSE_TARGET_FPS = 10.0
-FAST_CANDIDATE_MAX_FRAME_STRIDE = 6
-FAST_CANDIDATE_DENSE_BEFORE_SEC = 1.5
-FAST_CANDIDATE_DENSE_AFTER_SEC = 3.0
-FAST_CANDIDATE_WINDOW_BY_LABEL: dict[str, tuple[float, float]] = {
-    "goal": (8.0, 10.0),
-    "shot": (6.0, 6.0),
-    "foul": (5.0, 7.0),
-    "card": (4.0, 10.0),
-    "freekick": (6.0, 6.0),
-    "free_kick": (6.0, 6.0),
-    "free kick": (6.0, 6.0),
+# Initial player-candidate discovery is intentionally much cheaper than final
+# target tracking. Action Spotting already tells us *when* the interesting
+# event happened, and automatic shot boundaries tell us where broadcast shots
+# begin/end. Candidate discovery therefore runs RF-DETR only on 1-3
+# representative frames from the event-near shots instead of scanning the
+# whole event clip at a fixed FPS.
+#
+# Downstream responsibilities remain unchanged:
+#   sampled RF-DETR rows
+#   -> frozen same-shot candidate grouping / quality filtering
+#   -> candidate fragment grouping / duplicate suppression
+#   -> Top-K recommendation
+#   -> explicit user selection
+#   -> canonical target-centric E2E tracking.
+FAST_CANDIDATE_DETECTION_POLICY_VERSION = (
+    "ACTION_SPOTTING_SHOT_LOCAL_TRIPLET_RFDETR_V5_WIDE_OBSERVATION"
+)
+FAST_CANDIDATE_FRAMES_PER_SHOT = 3
+FAST_CANDIDATE_PRE_SHOTS_BY_LABEL: dict[str, int] = {
+    "goal": 2,
+    "shot": 2,
+    "foul": 2,
+    "card": 1,
+    "freekick": 2,
+    "free_kick": 2,
+    "free kick": 2,
 }
-FAST_CANDIDATE_DEFAULT_WINDOW = (6.0, 8.0)
+FAST_CANDIDATE_POST_SHOTS_BY_LABEL: dict[str, int] = {
+    # Goal broadcasts commonly show scorer celebration/close-up after A, so
+    # retain a slightly wider post-event shot envelope while still sampling
+    # at most three frames per shot.
+    "goal": 5,
+    "shot": 2,
+    "foul": 3,
+    "card": 4,
+    "freekick": 2,
+    "free_kick": 2,
+    "free kick": 2,
+}
+FAST_CANDIDATE_DEFAULT_PRE_SHOTS = 2
+FAST_CANDIDATE_DEFAULT_POST_SHOTS = 3
 
 
-def _event_window_seconds(event: TimelineEvent) -> tuple[float, float]:
+def _event_near_shot_counts(event: TimelineEvent) -> tuple[int, int]:
     label = str(event.label or event.event_type or "").strip().lower()
     compact = label.replace("-", "_")
-    return FAST_CANDIDATE_WINDOW_BY_LABEL.get(
+    before = FAST_CANDIDATE_PRE_SHOTS_BY_LABEL.get(
         label,
-        FAST_CANDIDATE_WINDOW_BY_LABEL.get(
+        FAST_CANDIDATE_PRE_SHOTS_BY_LABEL.get(
             compact,
-            FAST_CANDIDATE_DEFAULT_WINDOW,
+            FAST_CANDIDATE_DEFAULT_PRE_SHOTS,
         ),
     )
+    after = FAST_CANDIDATE_POST_SHOTS_BY_LABEL.get(
+        label,
+        FAST_CANDIDATE_POST_SHOTS_BY_LABEL.get(
+            compact,
+            FAST_CANDIDATE_DEFAULT_POST_SHOTS,
+        ),
+    )
+    return max(0, int(before)), max(0, int(after))
+
+
+def _representative_frames_for_shot(
+    *,
+    start_frame: int,
+    end_frame: int,
+    event_frame: int | None,
+    relative_to_event: int = 0,
+) -> list[int]:
+    """Return a shot-local contiguous 1-3 frame representative burst.
+
+    V4 sampled the quarter/middle/three-quarter positions of each shot.  That
+    was cheap for RF-DETR, but those observations can be seconds apart.  The
+    frozen scene-candidate runtime groups detections into short same-shot
+    tracklets, so isolated observations were correctly rejected and could
+    leave ``scene_candidates.json`` empty.
+
+    V5 keeps the exact same RF-DETR budget (at most three frames per shot) but
+    makes the three frames contiguous.  This preserves enough temporal support
+    for the existing same-shot grouping without returning to dense detection.
+
+    Anchor placement is event-conditioned:
+    - event shot: centered on Action Spotting event A;
+    - shot before A: near the latter part of the shot (build-up);
+    - shot after A: near the early part of the shot (reaction/celebration);
+    - fallback: center of the shot.
+    """
+
+    if end_frame < start_frame:
+        return []
+    length = end_frame - start_frame + 1
+    if length <= FAST_CANDIDATE_FRAMES_PER_SHOT:
+        return list(range(start_frame, end_frame + 1))
+
+    if event_frame is not None and start_frame <= event_frame <= end_frame:
+        anchor = int(event_frame)
+        anchor_strategy = "ACTION_SPOTTING_EVENT"
+    elif relative_to_event < 0:
+        anchor = start_frame + int(round((length - 1) * 0.75))
+        anchor_strategy = "PRE_EVENT_LATE_SHOT"
+    elif relative_to_event > 0:
+        anchor = start_frame + int(round((length - 1) * 0.25))
+        anchor_strategy = "POST_EVENT_EARLY_SHOT"
+    else:
+        anchor = start_frame + int(round((length - 1) * 0.50))
+        anchor_strategy = "SHOT_CENTER"
+
+    # Shift the 3-frame window at the shot edges rather than shrinking it.
+    # For every shot with >=3 frames this therefore returns exactly 3
+    # consecutive, in-shot frame indices.
+    first = anchor - 1
+    last_first = end_frame - (FAST_CANDIDATE_FRAMES_PER_SHOT - 1)
+    first = min(max(first, start_frame), last_first)
+    frames = list(
+        range(first, first + FAST_CANDIDATE_FRAMES_PER_SHOT)
+    )
+    # ``anchor_strategy`` is intentionally local documentation only; the
+    # caller records the relation/frames in sampling provenance.
+    _ = anchor_strategy
+    return frames
 
 
 def _sampled_candidate_frames(
@@ -92,56 +180,144 @@ def _sampled_candidate_frames(
     fps: float,
     frame_count: int,
     event_local_sec: float,
-    before_sec: float,
-    after_sec: float,
-) -> tuple[list[int], dict[str, int | float]]:
+    shots: list[dict[str, Any]],
+    pre_shot_count: int,
+    post_shot_count: int,
+) -> tuple[list[int], dict[str, Any]]:
+    """Sample only event-near automatic shots, at 1-3 frames per shot.
+
+    The complete Action Spotting scene clip remains the search envelope (for a
+    Goal this is typically the existing ~45 s 15-before/30-after clip). We do
+    not run RF-DETR over every frame in that envelope. Instead, the shot that
+    contains A plus a small number of neighbouring shots are selected and each
+    contributes at most three representative frames.
+    """
+
     if fps <= 0 or frame_count <= 0:
         raise ValueError("Scene FPS and frame count must be positive.")
 
     duration_sec = frame_count / fps
-    event_local_sec = min(max(0.0, event_local_sec), duration_sec)
-    start_sec = max(0.0, event_local_sec - before_sec)
-    end_sec = min(duration_sec, event_local_sec + after_sec)
-    start_frame = max(0, min(frame_count - 1, int(math.floor(start_sec * fps))))
-    end_frame = max(
-        start_frame,
-        min(frame_count - 1, int(math.ceil(end_sec * fps))),
-    )
-    event_frame = max(
-        start_frame,
-        min(end_frame, int(round(event_local_sec * fps))),
+    event_local_sec = min(max(0.0, event_local_sec), max(0.0, duration_sec))
+    event_frame = min(
+        frame_count - 1,
+        max(0, int(round(event_local_sec * fps))),
     )
 
-    base_stride = max(1, int(round(fps / FAST_CANDIDATE_TARGET_FPS)))
-    base_stride = min(base_stride, FAST_CANDIDATE_MAX_FRAME_STRIDE)
-    dense_stride = max(
-        1,
-        int(round(fps / FAST_CANDIDATE_DENSE_TARGET_FPS)),
-    )
-    dense_stride = min(dense_stride, max(1, FAST_CANDIDATE_MAX_FRAME_STRIDE // 2))
+    normalized_shots: list[dict[str, Any]] = []
+    for fallback_index, row in enumerate(shots):
+        try:
+            start = int(row["start_frame"])
+            end = int(row.get("end_frame_inclusive", row.get("end_frame")))
+        except (KeyError, TypeError, ValueError):
+            continue
+        start = min(max(0, start), frame_count - 1)
+        end = min(max(start, end), frame_count - 1)
+        normalized_shots.append(
+            {
+                "shot_index": int(row.get("shot_index", fallback_index)),
+                "shot_id": str(row.get("shot_id") or f"shot_{fallback_index:04d}"),
+                "start_frame": start,
+                "end_frame_inclusive": end,
+            }
+        )
 
-    frames = set(range(start_frame, end_frame + 1, base_stride))
-    dense_start = max(
-        start_frame,
-        int(math.floor((event_local_sec - FAST_CANDIDATE_DENSE_BEFORE_SEC) * fps)),
+    normalized_shots.sort(
+        key=lambda row: (
+            int(row["start_frame"]),
+            int(row["end_frame_inclusive"]),
+            int(row["shot_index"]),
+        )
     )
-    dense_end = min(
-        end_frame,
-        int(math.ceil((event_local_sec + FAST_CANDIDATE_DENSE_AFTER_SEC) * fps)),
+    if not normalized_shots:
+        normalized_shots = [
+            {
+                "shot_index": 0,
+                "shot_id": "shot_0000",
+                "start_frame": 0,
+                "end_frame_inclusive": frame_count - 1,
+            }
+        ]
+
+    event_shot_position = next(
+        (
+            index
+            for index, row in enumerate(normalized_shots)
+            if int(row["start_frame"])
+            <= event_frame
+            <= int(row["end_frame_inclusive"])
+        ),
+        None,
     )
-    frames.update(range(dense_start, dense_end + 1, dense_stride))
-    frames.update({start_frame, event_frame, end_frame})
+    if event_shot_position is None:
+        event_shot_position = min(
+            range(len(normalized_shots)),
+            key=lambda index: abs(
+                (
+                    int(normalized_shots[index]["start_frame"])
+                    + int(normalized_shots[index]["end_frame_inclusive"])
+                )
+                / 2.0
+                - event_frame
+            ),
+        )
+
+    first = max(0, event_shot_position - max(0, int(pre_shot_count)))
+    last = min(
+        len(normalized_shots) - 1,
+        event_shot_position + max(0, int(post_shot_count)),
+    )
+    selected_shots = normalized_shots[first : last + 1]
+
+    frames: set[int] = set()
+    sampled_shots: list[dict[str, Any]] = []
+    for absolute_position, row in enumerate(selected_shots, start=first):
+        is_event_shot = absolute_position == event_shot_position
+        relative_to_event = absolute_position - event_shot_position
+        representative = _representative_frames_for_shot(
+            start_frame=int(row["start_frame"]),
+            end_frame=int(row["end_frame_inclusive"]),
+            event_frame=(event_frame if is_event_shot else None),
+            relative_to_event=relative_to_event,
+        )
+        frames.update(representative)
+        sampled_shots.append(
+            {
+                **row,
+                "is_event_shot": is_event_shot,
+                "relative_to_event_shot": relative_to_event,
+                "sampling_mode": "CONTIGUOUS_SHOT_LOCAL_TRIPLET",
+                "sampled_frames": representative,
+                "sampled_frame_count": len(representative),
+            }
+        )
 
     ordered = sorted(frame for frame in frames if 0 <= frame < frame_count)
     return ordered, {
-        "window_start_frame": start_frame,
-        "window_end_frame_inclusive": end_frame,
-        "event_scene_local_frame": event_frame,
-        "base_stride_frames": base_stride,
-        "dense_stride_frames": dense_stride,
-        "window_start_sec": start_frame / fps,
-        "window_end_sec": end_frame / fps,
+        "strategy": "EVENT_NEAR_SHOTS_CONTIGUOUS_REPRESENTATIVE_TRIPLETS",
+        "scene_duration_sec": duration_sec,
+        "scene_frame_count": frame_count,
         "event_scene_local_sec": event_local_sec,
+        "event_scene_local_frame": event_frame,
+        "total_shot_count": len(normalized_shots),
+        "event_shot_id": str(normalized_shots[event_shot_position]["shot_id"]),
+        "event_shot_index": int(
+            normalized_shots[event_shot_position]["shot_index"]
+        ),
+        "pre_event_shot_count": max(0, int(pre_shot_count)),
+        "post_event_shot_count": max(0, int(post_shot_count)),
+        "selected_shot_count": len(selected_shots),
+        "frames_per_shot_max": FAST_CANDIDATE_FRAMES_PER_SHOT,
+        "sampled_frame_count": len(ordered),
+        "selected_shots": sampled_shots,
+        "window_start_frame": int(selected_shots[0]["start_frame"]),
+        "window_end_frame_inclusive": int(
+            selected_shots[-1]["end_frame_inclusive"]
+        ),
+        "window_start_sec": int(selected_shots[0]["start_frame"]) / fps,
+        "window_end_sec": (
+            int(selected_shots[-1]["end_frame_inclusive"]) + 1
+        )
+        / fps,
     }
 
 
@@ -592,6 +768,49 @@ class ShotBoundaryReviewService:
         self.db.commit()
         self.db.refresh(session)
         return self._response(session)
+
+    def prepare_for_candidate_discovery(
+        self,
+        *,
+        project: Project,
+        user: User,
+        revision_id: str,
+        event_id: str,
+        scene_id: str,
+        new_review_revision: bool = False,
+    ) -> ShotBoundaryReviewResponse:
+        """Prepare automatic cuts as the default authoritative segmentation.
+
+        Normal product flow does not pause for camera-cut approval.  The
+        automatic detector is followed by structural/provenance validation and
+        candidate-detection materialization.  Human boundary editing remains an
+        exceptional fallback only when that structural gate rejects the result.
+
+        Target identity is never confirmed here.
+        """
+
+        self.prepare(
+            project=project,
+            user=user,
+            revision_id=revision_id,
+            event_id=event_id,
+            scene_id=scene_id,
+            new_review_revision=new_review_revision,
+        )
+        self.prepare_candidate_discovery_inputs(
+            project=project,
+            user=user,
+            revision_id=revision_id,
+            event_id=event_id,
+            scene_id=scene_id,
+        )
+        return self.status(
+            project=project,
+            user=user,
+            revision_id=revision_id,
+            event_id=event_id,
+            scene_id=scene_id,
+        )
 
     def _current_candidate_detection_policy(self) -> dict[str, Any]:
         play_class_ids = frozenset(self.settings.tracking_play_class_ids)
@@ -2204,19 +2423,29 @@ class ShotBoundaryReviewService:
                 "Scene FPS or frame count is unavailable for candidate detection.",
             )
 
-        before_sec, after_sec = _event_window_seconds(event)
         event_local_sec = float(event.timestamp_sec) - float(scene.start_sec)
+        boundary_document = (
+            session.draft_json
+            if session.status == "CONFIRMED" and session.draft_json
+            else session.automatic_draft_json
+        ) or {}
+        candidate_shots = self.canonicalize_shots(
+            list(boundary_document.get("shots") or []),
+            frame_count=declared_frame_count,
+        )
+        pre_shot_count, post_shot_count = _event_near_shot_counts(event)
         sampled_frames, sampling = _sampled_candidate_frames(
             fps=scene_fps,
             frame_count=declared_frame_count,
             event_local_sec=event_local_sec,
-            before_sec=before_sec,
-            after_sec=after_sec,
+            shots=candidate_shots,
+            pre_shot_count=pre_shot_count,
+            post_shot_count=post_shot_count,
         )
         if not sampled_frames:
             raise ShotBoundaryWorkflowError(
                 "SCENE_PLAYER_DETECTION_FAILED",
-                "The Action Spotting candidate window contains no decodable frames.",
+                "Event-near shot sampling produced no candidate frames.",
             )
 
         # Candidate discovery intentionally runs RF-DETR in observation mode:
@@ -2250,8 +2479,7 @@ class ShotBoundaryReviewService:
             "event_timestamp_sec": float(event.timestamp_sec),
             "scene_start_sec": float(scene.start_sec),
             "scene_end_sec": float(scene.end_sec),
-            "before_sec": before_sec,
-            "after_sec": after_sec,
+            "event_window_source": "ACTION_SPOTTING_SCENE_CLIP",
             "sampled_frame_count": len(sampled_frames),
             **sampling,
         }
@@ -2303,13 +2531,12 @@ class ShotBoundaryReviewService:
         candidate_rows: list[dict[str, Any]] = []
         observation_rows: list[dict[str, Any]] = []
         batch_size = max(1, int(self.settings.PLAYER_DETECTOR_BATCH_SIZE))
-        sample_set = set(sampled_frames)
-        window_start = int(sampling["window_start_frame"])
-        window_end = int(sampling["window_end_frame_inclusive"])
-        capture.set(cv2.CAP_PROP_POS_FRAMES, window_start)
-        current_frame = window_start
         batch_indices: list[int] = []
         batch_frames: list[Any] = []
+        # We seek directly to the sparse keyframes. This avoids decoding every
+        # frame in the Action Spotting clip merely to run inference on a few of
+        # them. Keep the legacy metric name for API compatibility; under V4 it
+        # now means successfully decoded representative frames.
         decoded_window_frame_count = 0
         wide_frame_count = 0
         closeup_frame_count = 0
@@ -2503,17 +2730,16 @@ class ShotBoundaryReviewService:
             batch_frames.clear()
 
         try:
-            while current_frame <= window_end:
+            for frame_index in sampled_frames:
+                capture.set(cv2.CAP_PROP_POS_FRAMES, int(frame_index))
                 ok, frame = capture.read()
                 if not ok or frame is None:
-                    break
+                    continue
                 decoded_window_frame_count += 1
-                if current_frame in sample_set:
-                    batch_indices.append(current_frame)
-                    batch_frames.append(frame)
-                    if len(batch_frames) >= batch_size:
-                        flush_batch()
-                current_frame += 1
+                batch_indices.append(int(frame_index))
+                batch_frames.append(frame)
+                if len(batch_frames) >= batch_size:
+                    flush_batch()
             flush_batch()
         finally:
             capture.release()
@@ -2618,6 +2844,7 @@ class ShotBoundaryReviewService:
                 "frame_count": declared_frame_count,
                 "sampled_frame_count": len(sampled_frames),
                 "decoded_window_frame_count": decoded_window_frame_count,
+                "decoded_representative_frame_count": decoded_window_frame_count,
                 "raw_base_detection_count": raw_base_detection_count,
                 "observation_eligible_count": observation_eligible_count,
                 "candidate_detection_count": len(candidate_rows),
@@ -2667,6 +2894,51 @@ class ShotBoundaryReviewService:
             )
         return session
 
+    def _automatic_ready_mapping(
+        self,
+        session: ShotBoundaryReviewSession,
+    ) -> tuple[dict[str, Any], Artifact, Artifact] | None:
+        """Return the verified automatic boundary/detection contract if ready."""
+
+        revision = self.db.get(HighlightRevision, session.revision_id)
+        project = self.db.get(Project, session.project_id)
+        if revision is None or project is None:
+            return None
+        mapping = (revision.options or {}).get("candidate_pipeline_inputs") or {}
+        if (
+            mapping.get("scene_id") != session.scene_id
+            or mapping.get("status") != "MATERIALIZED"
+            or mapping.get("boundary_origin") != "AUTO_DETECTED"
+            or mapping.get("human_reviewed") is not False
+            or mapping.get("automatic_target_confirmation") is not False
+        ):
+            return None
+        boundaries = self.db.get(
+            Artifact, str(mapping.get("shot_boundaries_artifact_id") or "")
+        )
+        detections = self.db.get(
+            Artifact, str(mapping.get("detections_artifact_id") or "")
+        )
+        if boundaries is None or detections is None:
+            return None
+        if not self._automatic_artifact_is_usable(
+            boundaries,
+            project=project,
+            revision_id=session.revision_id,
+            event_id=session.event_id,
+            scene_id=session.scene_id,
+        ):
+            return None
+        if not self._detection_artifact_is_usable(
+            detections,
+            project=project,
+            revision_id=session.revision_id,
+            event_id=session.event_id,
+            scene_id=session.scene_id,
+        ):
+            return None
+        return dict(mapping), boundaries, detections
+
     def _response(
         self, session: ShotBoundaryReviewSession
     ) -> ShotBoundaryReviewResponse:
@@ -2687,8 +2959,45 @@ class ShotBoundaryReviewService:
                     f"{base}/cut/{cut['cut_frame']}/after?scene_id={session.scene_id}"
                 )
             automatic_cuts.append(cut)
+
+        effective_status = str(session.status)
+        authoritative_artifact_id = session.confirmed_artifact_id
+        boundary_origin: str | None = None
+        human_reviewed = False
+        review_required = session.status not in {"CONFIRMED"}
+        detections_status = (
+            "READY"
+            if session.detections_artifact_id
+            else ("FAILED_RETRYABLE" if session.error_json else None)
+        )
+
+        automatic_ready = self._automatic_ready_mapping(session)
+        if automatic_ready is not None:
+            _mapping, boundaries, _detections = automatic_ready
+            # The review session remains available as an optional correction
+            # workspace, but normal product flow does not pause here.
+            effective_status = "AUTO_READY"
+            authoritative_artifact_id = boundaries.artifact_id
+            boundary_origin = "AUTO_DETECTED"
+            human_reviewed = False
+            review_required = False
+            detections_status = "READY"
+        elif session.status == "CONFIRMED" and session.confirmed_artifact_id:
+            effective_status = "CONFIRMED"
+            authoritative_artifact_id = session.confirmed_artifact_id
+            boundary_origin = "HUMAN_REVIEWED"
+            human_reviewed = True
+            review_required = False
+
+        response_shots = [
+            dict(row) for row in ((session.draft_json or {}).get("shots") or [])
+        ]
+        if effective_status == "AUTO_READY":
+            for row in response_shots:
+                row["review_status"] = "AUTO_ACCEPTED"
+
         return ShotBoundaryReviewResponse(
-            status=session.status,
+            status=effective_status,
             project_id=session.project_id,
             revision_id=session.revision_id,
             event_id=session.event_id,
@@ -2705,18 +3014,18 @@ class ShotBoundaryReviewService:
             width=metadata.get("width"),
             height=metadata.get("height"),
             draft_revision=session.draft_revision,
-            shots=(session.draft_json or {}).get("shots") or [],
+            shots=response_shots,
             automatic_cuts=automatic_cuts,
             contact_sheet_url=(
                 f"/api/v1/projects/{session.project_id}/highlight/revisions/{session.revision_id}"
                 f"/events/{session.event_id}/shot-boundaries/media/contact-sheet?scene_id={session.scene_id}"
             ),
             confirmed_artifact_id=session.confirmed_artifact_id,
-            detections_status=(
-                "READY"
-                if session.detections_artifact_id
-                else ("FAILED_RETRYABLE" if session.error_json else None)
-            ),
+            authoritative_artifact_id=authoritative_artifact_id,
+            boundary_origin=boundary_origin,
+            human_reviewed=human_reviewed,
+            review_required=review_required,
+            detections_status=detections_status,
             error=session.error_json or None,
             automatic_confirmation=False,
         )
