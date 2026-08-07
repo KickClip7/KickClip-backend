@@ -54,6 +54,14 @@ PHASE4B_NEGATIVE_ROLE_MIN_GALLERY_SIZE = 3
 PHASE4B_REVIEW_MIN_CROP_MARGIN_MEDIAN = 0.05
 PHASE4B_REVIEW_MIN_POSITIVE_MARGIN_SUPPORT = 0.67
 PHASE4B_REVIEW_MIN_PROTOTYPE_NEGATIVE_MARGIN = 0.03
+# Detector-labeled staff/referee evidence is noisier than user-confirmed
+# negatives, so it must not hard-reject on a single weak signal.  P1 only
+# vetoes when at least two independent identity comparisons say the candidate
+# is closer to detector-role negatives than to the selected target.
+PHASE4B_DETECTOR_ROLE_HARD_MAX_CROP_MARGIN_MEDIAN = 0.0
+PHASE4B_DETECTOR_ROLE_HARD_MAX_POSITIVE_MARGIN_SUPPORT = 0.50
+PHASE4B_DETECTOR_ROLE_HARD_MAX_PROTOTYPE_MARGIN = 0.0
+PHASE4B_DETECTOR_ROLE_HARD_MIN_FAILED_SIGNALS = 2
 PHASE4B_DUPLICATE_MIN_COMMON_FRAMES = 3
 PHASE4B_DUPLICATE_MIN_MEAN_IOU = 0.45
 PHASE4B_DUPLICATE_MIN_TEMPORAL_OVERLAP = 0.40
@@ -64,9 +72,9 @@ PHASE4B_ALL_EXHAUSTED_DECISION = "SAFE_BLOCK_PHASE4B_ALL_REMAINING_SHOTS_EXHAUST
 PHASE4B_NONE_OF_THESE_SHOT_STATUS = "SEARCH_EXHAUSTED_NONE_OF_THESE"
 PHASE4B_IDENTITY_NEGATIVE_MEMORY_SCHEMA = "kickclip.phase4b_identity_negative_memory.v1"
 PHASE4B_IDENTITY_NEGATIVE_MEMORY_POLICY = "USER_REJECTED_CROSS_SHOT_CANDIDATES_R1"
-PHASE4B_COMBINED_NEGATIVE_POLICY = "PROVENANCE_ROLE_USER_HARD_DETECTOR_SOFT_IDENTITY_ROBUST_R4"
+PHASE4B_COMBINED_NEGATIVE_POLICY = "PROVENANCE_ROLE_USER_HARD_DETECTOR_STRONG_VETO_IDENTITY_ROBUST_R5"
 PHASE4B_IDENTITY_NEGATIVE_SCORING_POLICY = "SCALE_COMPATIBLE_CLUSTER_ROBUST_IDENTITY_NEGATIVE_R1"
-PHASE4B_ROLE_NEGATIVE_SCORING_POLICY = "USER_CONFIRMED_ROLE_SCALE_COMPATIBLE_HARD_DETECTOR_ROLE_SOFT_R2"
+PHASE4B_ROLE_NEGATIVE_SCORING_POLICY = "USER_CONFIRMED_ROLE_HARD_DETECTOR_ROLE_STRONG_VETO_R3"
 PHASE4B_RESCUE_REVIEW_POLICY = "GROUP_CONFIDENCE_ASSISTED_REVIEW_R5"
 PHASE4B_PREVIOUS_POLICY_R7 = "APPROVED_MEMORY_FROZEN_B0_B1_B2_ASSISTED_REVIEW_R7_IDENTITY_OBSERVABILITY"
 PHASE4B_PREVIOUS_POLICY_R8 = "APPROVED_MEMORY_FROZEN_B0_B1_B2_ASSISTED_REVIEW_R8_BANKED_NEGATIVE_RESCUE"
@@ -84,7 +92,7 @@ PHASE4B_USER_CONFIRMED_ROLE_SCORING_POLICY = (
     "USER_CONFIRMED_NON_PLAYER_SCALE_COMPATIBLE_CLUSTER_ROBUST_HARD_GATE_R1"
 )
 PHASE4B_DETECTOR_ROLE_SCORING_POLICY = (
-    "DETECTOR_LABELED_STAFF_REFEREE_SOFT_EVIDENCE_R1"
+    "DETECTOR_LABELED_STAFF_REFEREE_STRONG_MULTI_EVIDENCE_VETO_R2"
 )
 PHASE4B_ASSISTED_REVIEW_SELECTION_POLICY = (
     "CORROBORATION_GROUP_CONFIDENCE_REVIEW_CATALOG_R4"
@@ -4082,16 +4090,35 @@ def _phase4b_detector_role_soft_gate(
     *,
     negative_memory_available: bool,
 ) -> dict[str, Any]:
+    """Precision-first detector-role gate with a conservative hard veto.
+
+    Detector-produced referee/staff labels are useful negative identity
+    evidence, but they are not trusted enough for a one-signal rejection.
+    We keep the existing warning thresholds for diagnostics and only reject
+    when at least two independent comparisons are actually negative:
+
+    * median target-vs-role crop margin <= 0;
+    * positive-margin crop support < 0.5;
+    * target-vs-role prototype margin <= 0.
+
+    This prevents a coach/staff tracklet that looks more like the role-negative
+    gallery than the selected player from entering assisted review, while a
+    single noisy detector-role observation remains reviewable.
+    """
+
     if not negative_memory_available:
         return {
             "policy": PHASE4B_DETECTOR_ROLE_SCORING_POLICY,
             "negative_memory_available": False,
             "passed": True,
             "soft_warning": False,
+            "hard_veto": False,
             "review_mode": "NO_DETECTOR_ROLE_EVIDENCE",
             "gates": {},
+            "warning_reasons": [],
             "rejection_reasons": [],
         }
+
     crop_margin = _phase4b_metric_value(
         row, "detector_role_crop_margin_median", 1.0
     )
@@ -4101,6 +4128,7 @@ def _phase4b_detector_role_soft_gate(
     prototype_margin = _phase4b_metric_value(
         row, "detector_role_prototype_negative_margin", 1.0
     )
+
     warnings = []
     if crop_margin < PHASE4B_REVIEW_MIN_CROP_MARGIN_MEDIAN:
         warnings.append("crop_margin_median")
@@ -4108,28 +4136,63 @@ def _phase4b_detector_role_soft_gate(
         warnings.append("positive_margin_support_ratio")
     if prototype_margin < PHASE4B_REVIEW_MIN_PROTOTYPE_NEGATIVE_MARGIN:
         warnings.append("prototype_negative_margin")
+
+    hard_failures = []
+    if crop_margin <= PHASE4B_DETECTOR_ROLE_HARD_MAX_CROP_MARGIN_MEDIAN:
+        hard_failures.append("crop_margin_median_nonpositive")
+    if support < PHASE4B_DETECTOR_ROLE_HARD_MAX_POSITIVE_MARGIN_SUPPORT:
+        hard_failures.append("positive_margin_support_below_half")
+    if prototype_margin <= PHASE4B_DETECTOR_ROLE_HARD_MAX_PROTOTYPE_MARGIN:
+        hard_failures.append("prototype_negative_margin_nonpositive")
+
+    hard_veto = (
+        len(hard_failures) >= PHASE4B_DETECTOR_ROLE_HARD_MIN_FAILED_SIGNALS
+    )
     return {
         "policy": PHASE4B_DETECTOR_ROLE_SCORING_POLICY,
         "negative_memory_available": True,
-        "passed": True,
+        "passed": not hard_veto,
         "soft_warning": bool(warnings),
-        "review_mode": "DETECTOR_ROLE_SOFT_EVIDENCE_ONLY",
+        "hard_veto": hard_veto,
+        "hard_veto_min_failed_signals": (
+            PHASE4B_DETECTOR_ROLE_HARD_MIN_FAILED_SIGNALS
+        ),
+        "review_mode": (
+            "DETECTOR_ROLE_STRONG_MULTI_EVIDENCE_HARD_VETO"
+            if hard_veto
+            else "DETECTOR_ROLE_EVIDENCE_REVIEWABLE"
+        ),
         "gates": {
             "crop_margin_median": {
                 "value": crop_margin,
                 "warning_below": PHASE4B_REVIEW_MIN_CROP_MARGIN_MEDIAN,
+                "hard_veto_at_or_below": (
+                    PHASE4B_DETECTOR_ROLE_HARD_MAX_CROP_MARGIN_MEDIAN
+                ),
             },
             "positive_margin_support_ratio": {
                 "value": support,
                 "warning_below": PHASE4B_REVIEW_MIN_POSITIVE_MARGIN_SUPPORT,
+                "hard_veto_below": (
+                    PHASE4B_DETECTOR_ROLE_HARD_MAX_POSITIVE_MARGIN_SUPPORT
+                ),
             },
             "prototype_negative_margin": {
                 "value": prototype_margin,
-                "warning_below": PHASE4B_REVIEW_MIN_PROTOTYPE_NEGATIVE_MARGIN,
+                "warning_below": (
+                    PHASE4B_REVIEW_MIN_PROTOTYPE_NEGATIVE_MARGIN
+                ),
+                "hard_veto_at_or_below": (
+                    PHASE4B_DETECTOR_ROLE_HARD_MAX_PROTOTYPE_MARGIN
+                ),
             },
         },
         "warning_reasons": warnings,
-        "rejection_reasons": [],
+        "rejection_reasons": (
+            [f"strong_detector_role:{name}" for name in hard_failures]
+            if hard_veto
+            else []
+        ),
     }
 
 
@@ -4230,6 +4293,10 @@ def _phase4b_candidate_negative_review_gate(
             f"user_role:{name}"
             for name in user_role_gate.get("rejection_reasons") or []
         ),
+        *(
+            f"detector_role:{name}"
+            for name in detector_role_gate.get("rejection_reasons") or []
+        ),
         *(f"identity:{name}" for name in identity_gate.get("rejection_reasons") or []),
     ]
     return {
@@ -4241,11 +4308,14 @@ def _phase4b_candidate_negative_review_gate(
         ),
         "role_negative_gate": user_role_gate,
         "user_confirmed_role_gate": user_role_gate,
+        # Keep the historical key for compatibility with stored UI/report
+        # readers, but its `passed` value now participates in the hard gate.
         "detector_role_soft_gate": detector_role_gate,
         "identity_negative_gate": identity_gate,
         "passed": bool(user_role_gate.get("passed"))
+        and bool(detector_role_gate.get("passed"))
         and bool(identity_gate.get("passed")),
-        "review_mode": "USER_ROLE_HARD_DETECTOR_ROLE_SOFT_IDENTITY_ROBUST",
+        "review_mode": "USER_ROLE_HARD_DETECTOR_STRONG_VETO_IDENTITY_ROBUST",
         "rejection_reasons": reasons,
         "soft_warning_reasons": [
             f"detector_role:{name}"
@@ -4274,6 +4344,7 @@ def _phase4b_plausible_assisted_review_eligible(
 ) -> bool:
     review_gate = dict(row.get("negative_review_gate") or {})
     user_role_gate = dict(review_gate.get("user_confirmed_role_gate") or {})
+    detector_role_gate = dict(review_gate.get("detector_role_soft_gate") or {})
     identity_gate = dict(review_gate.get("identity_negative_gate") or {})
     observability = dict(row.get("identity_observability") or {})
     purity = dict(row.get("identity_purity") or {})
@@ -4282,6 +4353,8 @@ def _phase4b_plausible_assisted_review_eligible(
     if purity.get("passed") is not True:
         return False
     if user_role_gate.get("passed") is not True:
+        return False
+    if detector_role_gate.get("passed") is not True:
         return False
     if identity_gate.get("passed") is not True:
         return False
@@ -5077,7 +5150,7 @@ def _phase4b_select_assisted_review_candidates(
                 "corroboration_group_member_ids": list(
                     row.get("corroboration_group_member_ids") or []
                 ),
-                "detector_role_evidence_is_soft_only": True,
+                "detector_role_evidence_is_soft_only": False,
                 "user_confirmed_role_gate_passed": True,
                 "identity_negative_gate_passed": True,
                 "automatic_target_confirmation": False,
@@ -8506,7 +8579,7 @@ def _phase4b_process_candidates(
         PHASE4B_USER_CONFIRMED_ROLE_SCORING_POLICY
     )
     gate["detector_role_scoring_policy"] = PHASE4B_DETECTOR_ROLE_SCORING_POLICY
-    gate["detector_role_evidence_is_soft_only"] = True
+    gate["detector_role_evidence_is_soft_only"] = False
     gate["role_negative_scoring_policy"] = PHASE4B_ROLE_NEGATIVE_SCORING_POLICY
     gate["deduplicated_candidate_count"] = len(deduplicated_candidates)
     atomic_json(shot_root / "safe_gate.json", gate)
@@ -8552,7 +8625,7 @@ def _phase4b_process_candidates(
             "identity_negative_scoring_policy": PHASE4B_IDENTITY_NEGATIVE_SCORING_POLICY,
             "user_confirmed_role_scoring_policy": PHASE4B_USER_CONFIRMED_ROLE_SCORING_POLICY,
             "detector_role_scoring_policy": PHASE4B_DETECTOR_ROLE_SCORING_POLICY,
-            "detector_role_evidence_is_soft_only": True,
+            "detector_role_evidence_is_soft_only": False,
             "role_negative_scoring_policy": PHASE4B_ROLE_NEGATIVE_SCORING_POLICY,
             "deduplicated_candidates": deduplicated_candidates,
         },
@@ -8917,7 +8990,7 @@ def _phase4b_process_candidates(
         "identity_negative_scoring_policy": PHASE4B_IDENTITY_NEGATIVE_SCORING_POLICY,
         "user_confirmed_role_scoring_policy": PHASE4B_USER_CONFIRMED_ROLE_SCORING_POLICY,
         "detector_role_scoring_policy": PHASE4B_DETECTOR_ROLE_SCORING_POLICY,
-        "detector_role_evidence_is_soft_only": True,
+        "detector_role_evidence_is_soft_only": False,
         "role_negative_scoring_policy": PHASE4B_ROLE_NEGATIVE_SCORING_POLICY,
         "deduplicated_candidates": deduplicated_candidates,
         "exhaustion_reason": None,

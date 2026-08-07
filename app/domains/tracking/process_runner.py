@@ -113,7 +113,11 @@ class TrackingProcessRunner:
             job.reacquisition_mode,
             "--output-root",
             str(self._output_root()),
+            "--tracking-play-conf-threshold",
+            str(float(self.settings.TRACKING_PLAY_CONF_THRESHOLD)),
         ]
+        if self.settings.TRACKING_FULL_SCENE:
+            command.append("--full-scene")
         self._append_scene_launch_arguments(command, job)
         if overwrite:
             command.append("--overwrite")
@@ -140,7 +144,11 @@ class TrackingProcessRunner:
             job.reacquisition_mode,
             "--output-root",
             str(self._output_root()),
+            "--tracking-play-conf-threshold",
+            str(float(self.settings.TRACKING_PLAY_CONF_THRESHOLD)),
         ]
+        if self.settings.TRACKING_FULL_SCENE:
+            command.append("--full-scene")
         kind = str(action.get("kind") or "")
         if kind == "review":
             stage = str(action["stage"])
@@ -441,7 +449,7 @@ class TrackingProcessRunner:
                     candidate = None
                 if candidate is not None:
                     break
-            if candidate is not None and candidate > initial_frame:
+            if candidate is not None and candidate > 0:
                 cuts.add(candidate)
         return sorted(cuts)
 
@@ -459,7 +467,7 @@ class TrackingProcessRunner:
         verified = self._verified_scene_context(job)
         if verified is None:
             return
-        _, paths = verified
+        scene_context, paths = verified
 
         anchor = self._read_json_object(
             paths["earlier_anchor_decision_path"],
@@ -492,6 +500,16 @@ class TrackingProcessRunner:
         )
         command.extend(["--initial-frame", str(initial_frame)])
         command.append("--allow-prestaged-output")
+        if self.settings.TRACKING_USE_SELECTED_REFERENCE_MEMORY:
+            command.extend(
+                [
+                    "--target-reference-set",
+                    str(paths["target_reference_set_path"]),
+                    "--target-reference-set-sha256",
+                    str(scene_context["target_reference_set_sha256"]),
+                    "--trusted-selected-reference-memory",
+                ]
+            )
         if cut_frames:
             command.extend(["--cut-frames", *[str(value) for value in cut_frames]])
 

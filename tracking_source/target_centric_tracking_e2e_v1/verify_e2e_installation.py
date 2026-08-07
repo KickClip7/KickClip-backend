@@ -42,6 +42,9 @@ def main() -> int:
 
     required = [
         root / "target_centric_tracking_e2e_v1" / "run_target_centric_pipeline.py",
+        root / "target_centric_tracking_e2e_v1" / "run_target_centric_pipeline_core.py",
+        root / "target_centric_tracking_e2e_v1" / "run_stage1_with_conf_override.py",
+        root / "target_centric_tracking_e2e_v1" / "run_phase1_product_pipeline.py",
         root / "target_centric_tracking_v2" / "stage3a0_audit_cross_shot_inputs.py",
         root / "target_centric_tracking_v2" / "stage3a1_confirm_cross_shot_boundary.py",
         root / "target_centric_tracking_v2" / "stage3a2_build_precut_target_memory.py",
@@ -67,7 +70,10 @@ def main() -> int:
         return 2
 
     print("Status=PASS")
-    print("Canonical E2E runner verified=True")
+    print("Canonical full-scene E2E wrapper verified=True")
+    print("One-direction E2E core verified=True")
+    print("Product Stage1 confidence wrapper verified=True")
+    print("Product Phase1 runner verified=True")
     print("Phase1 frozen scripts verified=", len(manifest["scripts"]))
     print("Frozen models verified=", verified_models)
     print("V6 ReID helper verified=True")
