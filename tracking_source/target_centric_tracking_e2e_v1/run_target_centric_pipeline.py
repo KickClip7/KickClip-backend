@@ -37,13 +37,15 @@ from typing import Any, Mapping, Sequence
 import cv2
 
 WRAPPER_SCHEMA = "kickclip.target_centric_full_scene.v1"
-WRAPPER_VERSION = "1.2.0-product-assisted-intent"
+WRAPPER_VERSION = "1.2.1-product-assisted-intent"
 TERMINAL = {
     "COMPLETE",
     "COMPLETE_WITH_SAFE_BLOCK",
     "COMPLETE_WITH_UNRESOLVED_GAPS",
     "BLOCKED",
 }
+RESUMABLE_CHILD_STATUS = "RUNNING"
+MAX_INTERNAL_CONTINUATION_HOPS = 4
 CONFIRMED_STATES = {
     "INITIALIZING",
     "ACTIVE",
@@ -380,6 +382,17 @@ def build_child_resume_command(state: Mapping[str, Any], direction: str, args: a
     if args.review_note:
         command.extend(["--review-note", args.review_note])
     return command
+
+
+def build_child_continue_command(state: Mapping[str, Any], direction: str) -> list[str]:
+    """Resume a durable RUNNING child without inventing a user decision."""
+    cfg = state["config"]
+    return [
+        sys.executable,
+        str(cfg["core_script"]),
+        *build_common_child_args(state, direction),
+        "--resume",
+    ]
 
 
 def read_child_state(state: Mapping[str, Any], direction: str) -> dict[str, Any] | None:
@@ -942,18 +955,39 @@ def update_parent_from_child(parent: Path, state: dict[str, Any], direction: str
         if diagnostic:
             message += f"; child diagnostic: {diagnostic}"
         raise RuntimeError(message)
+
     child_status = str(child.get("status") or "")
+    pending = public_pending(direction, child)
+
+    # Durability repair: a child may have materialized a pending ambiguity while
+    # its status JSON still contains the preceding RUNNING checkpoint.  Never
+    # discard a real pending action merely because the status field lagged.
+    if child_status == RESUMABLE_CHILD_STATUS and pending is not None:
+        child_status = "NEEDS_CONFIRMATION"
+
     state["directions"][direction]["status"] = child_status
     state["directions"][direction]["decision"] = child.get("decision")
     if child_status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
+        if pending is None:
+            raise RuntimeError(
+                f"{direction} child requires confirmation but has no pending_action"
+            )
         state["status"] = "NEEDS_CONFIRMATION"
         state["decision"] = f"{direction.upper()}_{child.get('decision') or 'REVIEW_REQUIRED'}"
-        state["pending_action"] = public_pending(direction, child)
+        state["pending_action"] = pending
         state["active_direction"] = direction
     elif child_status in TERMINAL:
         state["pending_action"] = None
         state["status"] = "RUNNING"
         state["decision"] = f"{direction.upper()}_DIRECTION_COMPLETE"
+    elif child_status == RESUMABLE_CHILD_STATUS:
+        # RUNNING is a durable checkpoint, not a fatal terminal state.  The
+        # wrapper owns the child process lifecycle, so if the subprocess has
+        # exited at this checkpoint we immediately issue a neutral --resume.
+        state["status"] = "RUNNING"
+        state["decision"] = f"{direction.upper()}_CHILD_RUNNING_RESUMABLE"
+        state["pending_action"] = None
+        state["active_direction"] = direction
     else:
         state["status"] = "FAILED"
         state["decision"] = f"{direction.upper()}_UNEXPECTED_CHILD_STATUS_{child_status or 'MISSING'}"
@@ -978,6 +1012,56 @@ def run_direction_new(root: Path, parent: Path, state: dict[str, Any], direction
 def run_direction_resume(root: Path, parent: Path, state: dict[str, Any], direction: str, args: argparse.Namespace) -> int:
     command = build_child_resume_command(state, direction, args)
     return run_subprocess(command, root, parent / "logs" / f"{direction}.log")
+
+
+def run_direction_continue(
+    root: Path,
+    parent: Path,
+    state: dict[str, Any],
+    direction: str,
+) -> int:
+    command = build_child_continue_command(state, direction)
+    return run_subprocess(command, root, parent / "logs" / f"{direction}.log")
+
+
+def drain_resumable_child(
+    root: Path,
+    parent: Path,
+    state: dict[str, Any],
+    direction: str,
+    initial_status: str,
+) -> tuple[int, str]:
+    """Drive an exited RUNNING checkpoint to review pause or terminal state.
+
+    Core search normally reaches NEEDS_CONFIRMATION or a terminal state in one
+    invocation.  This bounded recovery loop handles durable intermediate state
+    after process interruption without converting it into a false fatal error.
+    """
+    status = initial_status
+    return_code = 0
+    hops = 0
+    while status == RESUMABLE_CHILD_STATUS and hops < MAX_INTERNAL_CONTINUATION_HOPS:
+        hops += 1
+        state["decision"] = (
+            f"{direction.upper()}_AUTO_RESUME_DURABLE_RUNNING_CHECKPOINT_{hops}"
+        )
+        save_parent(parent, state)
+        return_code = run_direction_continue(root, parent, state, direction)
+        status = update_parent_from_child(parent, state, direction)
+        merge_outputs(root, parent, state, render=False)
+
+    if status == RESUMABLE_CHILD_STATUS:
+        state["status"] = "FAILED"
+        state["decision"] = (
+            f"{direction.upper()}_CHILD_STALLED_RUNNING_AFTER_"
+            f"{MAX_INTERNAL_CONTINUATION_HOPS}_AUTO_RESUMES"
+        )
+        state["pending_action"] = None
+        save_parent(parent, state)
+        merge_outputs(root, parent, state, render=False)
+        return 2, status
+
+    return return_code, status
 
 
 def finalize_status(state: dict[str, Any]) -> None:
@@ -1089,6 +1173,10 @@ def main() -> int:
         return_code = run_direction_resume(root, parent, state, direction, args)
         child_status = update_parent_from_child(parent, state, direction)
         merge_outputs(root, parent, state, render=False)
+        if child_status == RESUMABLE_CHILD_STATUS:
+            return_code, child_status = drain_resumable_child(
+                root, parent, state, direction, child_status
+            )
         if child_status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
             print_status(parent, state)
             return 3
@@ -1102,6 +1190,10 @@ def main() -> int:
             rc = run_direction_new(root, parent, state, next_direction)
             next_status = update_parent_from_child(parent, state, next_direction)
             merge_outputs(root, parent, state, render=False)
+            if next_status == RESUMABLE_CHILD_STATUS:
+                rc, next_status = drain_resumable_child(
+                    root, parent, state, next_direction, next_status
+                )
             if next_status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
                 print_status(parent, state)
                 return 3
@@ -1123,6 +1215,10 @@ def main() -> int:
     rc = run_direction_new(root, parent, state, "forward")
     status = update_parent_from_child(parent, state, "forward")
     merge_outputs(root, parent, state, render=False)
+    if status == RESUMABLE_CHILD_STATUS:
+        rc, status = drain_resumable_child(
+            root, parent, state, "forward", status
+        )
     if status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
         print_status(parent, state)
         return 3
@@ -1135,6 +1231,10 @@ def main() -> int:
     rc = run_direction_new(root, parent, state, "backward")
     status = update_parent_from_child(parent, state, "backward")
     merge_outputs(root, parent, state, render=False)
+    if status == RESUMABLE_CHILD_STATUS:
+        rc, status = drain_resumable_child(
+            root, parent, state, "backward", status
+        )
     if status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
         print_status(parent, state)
         return 3

@@ -44,7 +44,7 @@ import numpy as np
 
 SCHEMA_VERSION = "kickclip.target_centric_e2e.v1"
 STATE_VERSION = "kickclip.target_centric_e2e_state.v1"
-PIPELINE_VERSION = "1.1.0-product-assisted-intent"
+PIPELINE_VERSION = "1.1.1-product-assisted-intent"
 
 UNCERTAIN_STATES = {"LOST", "SEARCHING", "AMBIGUOUS", "ABSENT", "TERMINATED"}
 CONFIRMED_STATES = {
@@ -4146,6 +4146,10 @@ def search_remaining_shots(
             next_index = int(state["search"]["next_shot_index"])
             continue
         create_ambiguity(output_dir, state, shot, result)
+        # Persist the review pause before returning control to the full-scene
+        # wrapper.  The parent process must never observe the previous RUNNING
+        # checkpoint after a new ambiguity has already been materialized.
+        save_state(output_dir, state)
         return
     state["status"] = "COMPLETE"
     state["decision"] = "E2E_TARGET_TIMELINE_COMPLETE"
