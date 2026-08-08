@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
-from app.db.session import SessionLocal
+from app.db.session import BackgroundSessionLocal
 from app.domains.artifact.model import Artifact
 from app.domains.auth.model import User
 from app.domains.highlight.event_candidate_ranking import (
@@ -222,7 +222,7 @@ class SceneAITaskExecutor:
                 self._active.discard(task_id)
 
     def _execute(self, task_id: str) -> None:
-        db = SessionLocal()
+        db = BackgroundSessionLocal()
         try:
             claimed = db.execute(
                 update(SceneAITask)
@@ -532,7 +532,7 @@ class SceneAITaskExecutor:
         }
 
     def _recoverable(self) -> list[str]:
-        db = SessionLocal()
+        db = BackgroundSessionLocal()
         try:
             running = list(
                 db.scalars(

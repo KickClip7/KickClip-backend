@@ -52,6 +52,13 @@ from .service import (
     GROUPING_ARTIFACT_TYPE,
     public_candidate_id,
 )
+from .initial_target_gallery import (
+    INITIAL_TARGET_GALLERY_BUCKET_SECONDS,
+    INITIAL_TARGET_GALLERY_MAX_CANDIDATES,
+    INITIAL_TARGET_GALLERY_MAX_PER_TEMPORAL_BUCKET,
+    INITIAL_TARGET_GALLERY_POLICY_VERSION,
+    select_initial_target_gallery,
+)
 from .work_metrics import CandidatePreparationWorkMetrics
 
 SOURCE_ARTIFACT_TYPE = "EVENT_CANDIDATE_RANKING_V1_1_2A_SHADOW"
@@ -1413,10 +1420,22 @@ class EventCandidateRecommendationPreparationService:
             self.storage.storage_root / "shared_frame_cache_r1"
         )
 
-        shortlist_rows = list(ranking.get("shortlist") or [])
+        gallery_rows = select_initial_target_gallery(
+            ranking,
+            available_source_candidate_ids=source_candidates.keys(),
+        )
+        if not gallery_rows:
+            raise CandidatePreparationError(
+                "NO_INITIAL_TARGET_GALLERY_CANDIDATES",
+                "No eligible WIDE candidate is available for initial target selection.",
+            )
         work_metrics.increment(
             "shortlisted_candidate_count",
-            len(shortlist_rows),
+            len(ranking.get("shortlist") or []),
+        )
+        work_metrics.increment(
+            "initial_target_gallery_candidate_count",
+            len(gallery_rows),
         )
 
         revision = self.db.get(
@@ -1435,17 +1454,17 @@ class EventCandidateRecommendationPreparationService:
 
         prepared_by_candidate_id: dict[str, dict[str, Any]] = {}
         grouping_inputs: list[dict[str, Any]] = []
-        for shortlist_rank, shortlist_row in enumerate(
-            shortlist_rows,
+        for gallery_rank, gallery_row in enumerate(
+            gallery_rows,
             start=1,
         ):
-            source_candidate_id = str(shortlist_row.get("candidate_id") or "")
+            source_candidate_id = str(gallery_row.get("candidate_id") or "")
             raw = source_candidates.get(source_candidate_id)
             if raw is None:
                 raise CandidatePreparationError(
                     "INPUT_PROVENANCE_MISMATCH",
                     (
-                        "Shortlisted candidate is absent from frozen "
+                        "Initial-gallery candidate is absent from frozen "
                         f"discovery: {source_candidate_id}"
                     ),
                 )
@@ -1470,23 +1489,25 @@ class EventCandidateRecommendationPreparationService:
                     "Public candidate IDs are not unique.",
                 )
             global_rank = int(
-                shortlist_row.get(
+                gallery_row.get(
                     "original_global_rank",
-                    shortlist_row.get("rank"),
+                    gallery_row.get("rank"),
                 )
             )
             prepared_by_candidate_id[candidate_id] = {
                 "candidate": candidate,
                 "frame_offset": frame_offset,
-                "shortlist_row": shortlist_row,
-                "shortlist_rank": shortlist_rank,
+                "shortlist_row": gallery_row,
+                "shortlist_rank": gallery_rank,
                 "global_rank": global_rank,
             }
             grouping_inputs.append(
                 {
                     **candidate,
                     "frame_offset": frame_offset,
-                    "shortlist_rank": shortlist_rank,
+                    # Keep the existing grouping contract field name for API
+                    # compatibility. Semantically this is the initial gallery rank.
+                    "shortlist_rank": gallery_rank,
                     "global_rank": global_rank,
                 }
             )
@@ -1502,8 +1523,33 @@ class EventCandidateRecommendationPreparationService:
                 metrics=work_metrics,
             )
 
+        gallery_public_ids = [
+            public_candidate_id(str(row["candidate_id"]))
+            for row in gallery_rows
+        ]
+        gallery_source_ranks = {
+            public_candidate_id(str(row["candidate_id"])): int(row.get("rank") or 0)
+            for row in gallery_rows
+        }
         grouping_document = {
             **grouping_document,
+            "initial_target_gallery": {
+                "policy_version": INITIAL_TARGET_GALLERY_POLICY_VERSION,
+                "max_candidates": INITIAL_TARGET_GALLERY_MAX_CANDIDATES,
+                "max_per_temporal_bucket": (
+                    INITIAL_TARGET_GALLERY_MAX_PER_TEMPORAL_BUCKET
+                ),
+                "temporal_bucket_seconds": INITIAL_TARGET_GALLERY_BUCKET_SECONDS,
+                "candidate_ids": gallery_public_ids,
+                "source_global_ranks": gallery_source_ranks,
+                "candidate_count": len(gallery_public_ids),
+                "source_ranked_candidate_count": len(
+                    ranking.get("all_candidates") or []
+                ),
+                "v1_2_shortlist_candidate_count": len(
+                    ranking.get("shortlist") or []
+                ),
+            },
             "revision_id": revision_id,
             "event_id": event_id,
             "scene_id": scene_id,
@@ -1548,6 +1594,7 @@ class EventCandidateRecommendationPreparationService:
             "scene_id": scene_id,
             "shortlist_patch_id": patch_id,
             "candidate_grouping_policy": (CANDIDATE_GROUPING_POLICY_VERSION),
+            "initial_target_gallery_policy": INITIAL_TARGET_GALLERY_POLICY_VERSION,
             "source_video_sha256": immutable.source_video_sha256,
             "candidate_manifest_sha256": (immutable.candidate_manifest_sha256),
             "shot_boundaries_artifact_id": reviewed.artifact_id,
@@ -1807,6 +1854,8 @@ class EventCandidateRecommendationPreparationService:
             "candidate_count": candidate_count,
             "display_candidate_count": candidate_count,
             "candidate_grouping_policy": (CANDIDATE_GROUPING_POLICY_VERSION),
+            "initial_target_gallery_policy": INITIAL_TARGET_GALLERY_POLICY_VERSION,
+            "initial_target_gallery_raw_count": len(gallery_rows),
             "candidate_grouping_path": (
                 grouping_path.relative_to(self.storage.project_root).as_posix()
             ),

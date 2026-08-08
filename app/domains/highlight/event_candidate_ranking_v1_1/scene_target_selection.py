@@ -650,6 +650,13 @@ class SceneTargetSelectionService:
                 continue
             if metadata.get("discovery_id") != current_discovery_id:
                 continue
+            # Defense-in-depth for the WIDE-only tracking product policy.
+            # Fresh V8 detections already exclude CLOSEUP/MIXED rows before
+            # scene-candidate grouping, but stale/legacy database candidates
+            # must never leak back into the selectable gallery.
+            product_scene_context = metadata.get("product_scene_context") or {}
+            if str(product_scene_context.get("mode") or "MIXED").upper() != "WIDE":
+                continue
             artifact_ids = metadata.get("artifact_ids") or {}
             representative = dict(
                 metadata["representative_observation"]
@@ -736,6 +743,13 @@ class SceneTargetSelectionService:
             raise ValueError("Candidate is not a scene-wide selection candidate.")
         if metadata.get("discovery_id") != discovery.get("discovery_id"):
             raise ValueError("Candidate belongs to an obsolete discovery cache.")
+        product_scene_context = metadata.get("product_scene_context") or {}
+        scene_mode = str(product_scene_context.get("mode") or "MIXED").upper()
+        if scene_mode != "WIDE":
+            raise ValueError(
+                "KickClip target tracking accepts WIDE shots only; "
+                f"candidate scene mode is {scene_mode}."
+            )
         discovery_output = self.storage.resolve_path(metadata["artifact_root"])
         next_revision = self.repository.next_target_selection_revision(
             revision_id=revision.revision_id,

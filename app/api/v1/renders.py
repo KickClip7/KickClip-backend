@@ -2,7 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.db.session import SessionLocal, get_db
+from app.db.session import BackgroundSessionLocal, get_db
 from app.domains.auth.access import require_clip_plan_access, require_render_job_access
 from app.domains.auth.dependencies import get_current_user
 from app.domains.auth.model import User
@@ -113,7 +113,7 @@ def download_rendered_video(
 
 
 def _run_render_job_background(render_job_id: str) -> None:
-    db = SessionLocal()
+    db = BackgroundSessionLocal()
     try:
         service = RenderJobService(db)
         service.run_render_job(render_job_id)

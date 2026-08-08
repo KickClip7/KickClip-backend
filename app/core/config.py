@@ -75,6 +75,28 @@ class Settings(BaseSettings):
         "postgresql+psycopg://kickclip:kickclip@localhost:5432/kickclip"
     )
     DB_ECHO: bool = False
+    # The backend runs long-lived AI/background jobs alongside frequent status
+    # polling.  Keep a modest application pool, but make the limits explicit so
+    # pool starvation is observable/configurable instead of relying on
+    # SQLAlchemy's implicit 5 + 10 defaults.
+    DB_POOL_SIZE: int = Field(default=10, ge=1, le=50)
+    DB_MAX_OVERFLOW: int = Field(default=10, ge=0, le=50)
+    DB_POOL_TIMEOUT_SECONDS: float = Field(default=30.0, gt=0)
+    DB_POOL_RECYCLE_SECONDS: int = Field(default=1800, ge=60)
+    # Long-running scene-AI/tracking workers use an independent, small pool so
+    # they cannot exhaust the request-serving FastAPI pool while inference or
+    # subprocess work is in progress.
+    DB_BACKGROUND_POOL_SIZE: int = Field(default=4, ge=1, le=20)
+    DB_BACKGROUND_MAX_OVERFLOW: int = Field(default=2, ge=0, le=20)
+    # Candidate/evidence media requests use a dedicated pool.  These routes can
+    # be bursty (many cards/assets requested together), so they must never
+    # consume the general API pool used by auth/status/control requests.
+    DB_MEDIA_POOL_SIZE: int = Field(default=4, ge=1, le=20)
+    DB_MEDIA_MAX_OVERFLOW: int = Field(default=0, ge=0, le=20)
+    # Application-level gate for candidate/evidence media.  Keep this <= the
+    # dedicated media pool size so a request never waits for a DB connection
+    # while already occupying a media worker slot.
+    CANDIDATE_MEDIA_MAX_CONCURRENT_REQUESTS: int = Field(default=4, ge=1, le=16)
 
     # -------------------------------------------------------------------------
     # Champion Action Spotting provenance/runtime diagnostics

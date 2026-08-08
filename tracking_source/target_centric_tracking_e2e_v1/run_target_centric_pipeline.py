@@ -9,8 +9,9 @@ P0 product integration responsibilities:
 - pass the user-selected immutable reference gallery into identity scoring;
 - pass the configured RF-DETR play confidence (0.15 by default) into the
   Stage-1 compatibility layer;
-- preserve assisted review/ambiguity behavior and merge both directions into
-  one source-coordinate target timeline.
+- preserve precision-first ambiguity behavior while allowing frozen safe-gate
+  PASS reacquisition without human review, and merge both directions into one
+  source-coordinate target timeline.
 
 Without ``--full-scene`` this file delegates to the one-direction core for
 backward compatibility.
@@ -36,13 +37,15 @@ from typing import Any, Mapping, Sequence
 import cv2
 
 WRAPPER_SCHEMA = "kickclip.target_centric_full_scene.v1"
-WRAPPER_VERSION = "1.1.0-p0"
+WRAPPER_VERSION = "1.2.1-product-assisted-intent"
 TERMINAL = {
     "COMPLETE",
     "COMPLETE_WITH_SAFE_BLOCK",
     "COMPLETE_WITH_UNRESOLVED_GAPS",
     "BLOCKED",
 }
+RESUMABLE_CHILD_STATUS = "RUNNING"
+MAX_INTERNAL_CONTINUATION_HOPS = 4
 CONFIRMED_STATES = {
     "INITIALIZING",
     "ACTIVE",
@@ -381,6 +384,17 @@ def build_child_resume_command(state: Mapping[str, Any], direction: str, args: a
     return command
 
 
+def build_child_continue_command(state: Mapping[str, Any], direction: str) -> list[str]:
+    """Resume a durable RUNNING child without inventing a user decision."""
+    cfg = state["config"]
+    return [
+        sys.executable,
+        str(cfg["core_script"]),
+        *build_common_child_args(state, direction),
+        "--resume",
+    ]
+
+
 def read_child_state(state: Mapping[str, Any], direction: str) -> dict[str, Any] | None:
     path = Path(str(state["directions"][direction]["output_dir"])) / "pipeline_state.json"
     return read_json(path) if path.is_file() else None
@@ -417,9 +431,34 @@ def initialize_parent(args: argparse.Namespace, root: Path, parent: Path) -> dic
     cuts = normalized_cuts(args.cut_frames, int(meta["frame_count"]))
     backward_cuts = sorted(anchor - cut + 1 for cut in cuts if 0 < cut <= anchor)
 
-    if parent.exists() and (parent / "pipeline_state.json").exists() and not args.overwrite:
-        raise FileExistsError(f"Tracking output already exists: {parent}")
+    prestaged_state: dict[str, Any] | None = None
+    prestaged_state_path = parent / "pipeline_state.json"
+    if parent.exists() and prestaged_state_path.exists() and not args.overwrite:
+        existing = read_json(prestaged_state_path)
+        existing_is_full_scene = bool(existing.get("config", {}).get("full_scene")) or str(
+            existing.get("schema_version") or ""
+        ) == WRAPPER_SCHEMA
+        if existing_is_full_scene:
+            raise FileExistsError(f"Tracking output already exists: {parent}")
+        if not args.allow_prestaged_output:
+            raise FileExistsError(f"Tracking output already exists: {parent}")
+
+        execution_kind = str(existing.get("execution_kind") or "")
+        pipeline_version = str(existing.get("pipeline_version") or "")
+        if execution_kind != "EVENT_CANDIDATE_HANDOFF_R1" and not pipeline_version.startswith(
+            "EVENT_CANDIDATE_HANDOFF_R1"
+        ):
+            raise RuntimeError(
+                "--allow-prestaged-output may only reuse an EVENT_CANDIDATE_HANDOFF_R1 output directory"
+            )
+        prestaged_state = dict(existing)
+
     parent.mkdir(parents=True, exist_ok=True)
+    if prestaged_state is not None:
+        snapshot = parent / "backend_artifacts" / "prestaged_pipeline_state.json"
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json(snapshot, prestaged_state)
+
     if args.overwrite:
         for name in ("directions", "work", "ambiguity_candidates", "backend_artifacts"):
             path = parent / name
@@ -485,11 +524,21 @@ def initialize_parent(args: argparse.Namespace, root: Path, parent: Path) -> dic
             "no_preview": bool(args.no_preview),
             "print_every": int(args.print_every),
             "full_scene": True,
+            "allow_prestaged_output": bool(args.allow_prestaged_output),
+            "prestaged_handoff_state_preserved": prestaged_state is not None,
+            "prestaged_handoff_state_path": (
+                str(parent / "backend_artifacts" / "prestaged_pipeline_state.json")
+                if prestaged_state is not None
+                else None
+            ),
         },
         "safety_contract": {
             "silent_wrong_player_switch": "FORBIDDEN",
             "camera_cut_resets_motion": True,
             "assisted_reacquisition": args.reacquisition_mode == "assisted",
+            "safe_gate_pass_auto_reacquired": True,
+            "ambiguous_only_requires_user_confirmation": True,
+            "maximum_review_candidates_per_ambiguity": 3,
             "selected_reference_memory_used_for_scoring": bool(args.trusted_selected_reference_memory),
             "frozen_v1_v2_source_modified": False,
             "v7_runtime_dependency": False,
@@ -682,14 +731,62 @@ def merge_outputs(root: Path, parent: Path, state: dict[str, Any], render: bool)
     ambiguities: list[dict[str, Any]] = []
     confirmations: list[dict[str, Any]] = []
     for direction in ("backward", "forward"):
+        child_ambiguities = collect_child_payload(
+            state, direction, "ambiguities.json", "ambiguities"
+        )
+        child_confirmations = collect_child_payload(
+            state, direction, "confirmations.json", "confirmations"
+        )
+
+        # A child can durably reach NEEDS_CONFIRMATION before the wrapper has
+        # copied its ambiguity artifact into the parent contract.  The R1 DB
+        # synchronizer intentionally requires pending_action.ambiguity_id to
+        # resolve against parent pipeline_state.ambiguities.  Fall back to the
+        # child's pipeline_state audit trail if an artifact is not present yet.
+        child_state = read_child_state(state, direction)
+        if not child_ambiguities and isinstance(child_state, Mapping):
+            child_ambiguities = [
+                dict(item)
+                for item in (child_state.get("ambiguities") or [])
+                if isinstance(item, Mapping)
+            ]
+        if not child_confirmations and isinstance(child_state, Mapping):
+            child_confirmations = [
+                dict(item)
+                for item in (child_state.get("confirmations") or [])
+                if isinstance(item, Mapping)
+            ]
+
         ambiguities.extend(
             transform_ambiguity(item, direction, anchor)
-            for item in collect_child_payload(state, direction, "ambiguities.json", "ambiguities")
+            for item in child_ambiguities
         )
         confirmations.extend(
             transform_confirmation(item, direction, anchor)
-            for item in collect_child_payload(state, direction, "confirmations.json", "confirmations")
+            for item in child_confirmations
         )
+
+    # R1RuntimeStateSynchronizer consumes pipeline_state.json, not only the
+    # sibling ambiguities.json artifact.  Keep the parent JSON self-contained
+    # so a durable CROSS_SHOT_CONFIRMATION can be synchronized atomically.
+    state["ambiguities"] = ambiguities
+    state["confirmations"] = confirmations
+
+    pending = state.get("pending_action")
+    if isinstance(pending, Mapping) and str(pending.get("type") or "") == "CROSS_SHOT_CONFIRMATION":
+        pending_id = str(pending.get("ambiguity_id") or "")
+        if not pending_id:
+            raise RuntimeError("Parent CROSS_SHOT_CONFIRMATION has no ambiguity_id")
+        if not any(str(item.get("ambiguity_id") or "") == pending_id for item in ambiguities):
+            raise RuntimeError(
+                "Parent pending ambiguity is absent from merged directional state: "
+                + pending_id
+            )
+
+    # Persist the enriched parent contract before backend reconciliation.
+    # Without this save the subprocess can correctly pause for review while the
+    # backend sees only pending_action and fails referential-integrity sync.
+    save_parent(parent, state)
 
     timeline = {
         "schema_version": "kickclip.target_centric_e2e.v1",
@@ -798,8 +895,9 @@ def merge_outputs(root: Path, parent: Path, state: dict[str, Any], render: bool)
         f"- RF-DETR play confidence: `{cfg['tracking_play_conf_threshold']}`\n"
         f"- Selected reference memory used for scoring: `{bool(cfg['trusted_selected_reference_memory'])}`\n"
         f"- BBox coverage: `{summary['counts']['bbox_coverage_percent']:.2f}%`\n\n"
-        "Frozen V1/V2 source files are not modified. Camera-cut motion continuity is reset, "
-        "and assisted cross-shot identity links require explicit confirmation.\n",
+        "Frozen V1/V2 source files are not modified. Camera-cut motion continuity is reset. "
+        "Frozen safe-gate PASS links are auto-reacquired; only AMBIGUOUS cross-shot links "
+        "require user confirmation (maximum three tracklet candidates).\n",
     )
 
     if render and state["status"] in TERMINAL:
@@ -812,22 +910,84 @@ def direction_ready(state: Mapping[str, Any], direction: str) -> bool:
     return bool(child and str(child.get("status") or "") in TERMINAL)
 
 
+def child_failure_diagnostic(parent: Path, direction: str) -> str | None:
+    """Extract the most useful fatal diagnostic from a child direction log."""
+
+    log_path = parent / "logs" / f"{direction}.log"
+    if not log_path.is_file():
+        return None
+    try:
+        lines = [
+            line.strip()
+            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return None
+    if not lines:
+        return None
+
+    preferred_markers = (
+        "e2e fatal error:",
+        "fatal error:",
+        "traceback (most recent call last):",
+        "runtimeerror:",
+        "file not found",
+        "filenotfounderror:",
+        "valueerror:",
+    )
+    lowered = [line.lower() for line in lines]
+    for marker in preferred_markers:
+        for index in range(len(lines) - 1, -1, -1):
+            if marker in lowered[index]:
+                if marker == "traceback (most recent call last):":
+                    # The useful exception is normally the last non-empty line.
+                    return lines[-1][:4000]
+                return lines[index][:4000]
+    return lines[-1][:4000]
+
+
 def update_parent_from_child(parent: Path, state: dict[str, Any], direction: str) -> str:
     child = read_child_state(state, direction)
     if child is None:
-        raise RuntimeError(f"{direction} child ended without pipeline_state.json")
+        diagnostic = child_failure_diagnostic(parent, direction)
+        message = f"{direction} child ended without pipeline_state.json"
+        if diagnostic:
+            message += f"; child diagnostic: {diagnostic}"
+        raise RuntimeError(message)
+
     child_status = str(child.get("status") or "")
+    pending = public_pending(direction, child)
+
+    # Durability repair: a child may have materialized a pending ambiguity while
+    # its status JSON still contains the preceding RUNNING checkpoint.  Never
+    # discard a real pending action merely because the status field lagged.
+    if child_status == RESUMABLE_CHILD_STATUS and pending is not None:
+        child_status = "NEEDS_CONFIRMATION"
+
     state["directions"][direction]["status"] = child_status
     state["directions"][direction]["decision"] = child.get("decision")
     if child_status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
+        if pending is None:
+            raise RuntimeError(
+                f"{direction} child requires confirmation but has no pending_action"
+            )
         state["status"] = "NEEDS_CONFIRMATION"
         state["decision"] = f"{direction.upper()}_{child.get('decision') or 'REVIEW_REQUIRED'}"
-        state["pending_action"] = public_pending(direction, child)
+        state["pending_action"] = pending
         state["active_direction"] = direction
     elif child_status in TERMINAL:
         state["pending_action"] = None
         state["status"] = "RUNNING"
         state["decision"] = f"{direction.upper()}_DIRECTION_COMPLETE"
+    elif child_status == RESUMABLE_CHILD_STATUS:
+        # RUNNING is a durable checkpoint, not a fatal terminal state.  The
+        # wrapper owns the child process lifecycle, so if the subprocess has
+        # exited at this checkpoint we immediately issue a neutral --resume.
+        state["status"] = "RUNNING"
+        state["decision"] = f"{direction.upper()}_CHILD_RUNNING_RESUMABLE"
+        state["pending_action"] = None
+        state["active_direction"] = direction
     else:
         state["status"] = "FAILED"
         state["decision"] = f"{direction.upper()}_UNEXPECTED_CHILD_STATUS_{child_status or 'MISSING'}"
@@ -852,6 +1012,56 @@ def run_direction_new(root: Path, parent: Path, state: dict[str, Any], direction
 def run_direction_resume(root: Path, parent: Path, state: dict[str, Any], direction: str, args: argparse.Namespace) -> int:
     command = build_child_resume_command(state, direction, args)
     return run_subprocess(command, root, parent / "logs" / f"{direction}.log")
+
+
+def run_direction_continue(
+    root: Path,
+    parent: Path,
+    state: dict[str, Any],
+    direction: str,
+) -> int:
+    command = build_child_continue_command(state, direction)
+    return run_subprocess(command, root, parent / "logs" / f"{direction}.log")
+
+
+def drain_resumable_child(
+    root: Path,
+    parent: Path,
+    state: dict[str, Any],
+    direction: str,
+    initial_status: str,
+) -> tuple[int, str]:
+    """Drive an exited RUNNING checkpoint to review pause or terminal state.
+
+    Core search normally reaches NEEDS_CONFIRMATION or a terminal state in one
+    invocation.  This bounded recovery loop handles durable intermediate state
+    after process interruption without converting it into a false fatal error.
+    """
+    status = initial_status
+    return_code = 0
+    hops = 0
+    while status == RESUMABLE_CHILD_STATUS and hops < MAX_INTERNAL_CONTINUATION_HOPS:
+        hops += 1
+        state["decision"] = (
+            f"{direction.upper()}_AUTO_RESUME_DURABLE_RUNNING_CHECKPOINT_{hops}"
+        )
+        save_parent(parent, state)
+        return_code = run_direction_continue(root, parent, state, direction)
+        status = update_parent_from_child(parent, state, direction)
+        merge_outputs(root, parent, state, render=False)
+
+    if status == RESUMABLE_CHILD_STATUS:
+        state["status"] = "FAILED"
+        state["decision"] = (
+            f"{direction.upper()}_CHILD_STALLED_RUNNING_AFTER_"
+            f"{MAX_INTERNAL_CONTINUATION_HOPS}_AUTO_RESUMES"
+        )
+        state["pending_action"] = None
+        save_parent(parent, state)
+        merge_outputs(root, parent, state, render=False)
+        return 2, status
+
+    return return_code, status
 
 
 def finalize_status(state: dict[str, Any]) -> None:
@@ -894,6 +1104,50 @@ def print_status(parent: Path, state: Mapping[str, Any]) -> None:
     print(f"Output               : {parent}")
 
 
+def record_fatal_parent_state(exc: BaseException) -> None:
+    """Best-effort terminal JSON for backend reconciliation after wrapper crashes."""
+
+    try:
+        args = parse_args()
+    except BaseException:
+        return
+    if not bool(getattr(args, "full_scene", False)):
+        return
+    try:
+        root = args.project_root.expanduser().resolve()
+        test_name = validate_name(args.test_name)
+        output_root = resolve(root, args.output_root)
+        parent = output_root / test_name
+        parent.mkdir(parents=True, exist_ok=True)
+        state_path = parent / "pipeline_state.json"
+        if state_path.is_file():
+            try:
+                state = read_json(state_path)
+            except Exception:
+                state = {}
+        else:
+            state = {}
+        state.update(
+            {
+                "schema_version": state.get("schema_version") or WRAPPER_SCHEMA,
+                "pipeline_version": state.get("pipeline_version") or WRAPPER_VERSION,
+                "updated_at": now_iso(),
+                "status": "FAILED",
+                "decision": "FULL_SCENE_FATAL_ERROR",
+                "pending_action": None,
+                "error": {
+                    "type": type(exc).__name__,
+                    "message": str(exc),
+                    "active_direction": state.get("active_direction"),
+                },
+            }
+        )
+        atomic_json(state_path, state)
+    except BaseException:
+        # Never mask the original tracking exception while recording diagnostics.
+        return
+
+
 def main() -> int:
     args = parse_args()
     root = args.project_root.expanduser().resolve()
@@ -919,6 +1173,10 @@ def main() -> int:
         return_code = run_direction_resume(root, parent, state, direction, args)
         child_status = update_parent_from_child(parent, state, direction)
         merge_outputs(root, parent, state, render=False)
+        if child_status == RESUMABLE_CHILD_STATUS:
+            return_code, child_status = drain_resumable_child(
+                root, parent, state, direction, child_status
+            )
         if child_status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
             print_status(parent, state)
             return 3
@@ -932,6 +1190,10 @@ def main() -> int:
             rc = run_direction_new(root, parent, state, next_direction)
             next_status = update_parent_from_child(parent, state, next_direction)
             merge_outputs(root, parent, state, render=False)
+            if next_status == RESUMABLE_CHILD_STATUS:
+                rc, next_status = drain_resumable_child(
+                    root, parent, state, next_direction, next_status
+                )
             if next_status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
                 print_status(parent, state)
                 return 3
@@ -953,6 +1215,10 @@ def main() -> int:
     rc = run_direction_new(root, parent, state, "forward")
     status = update_parent_from_child(parent, state, "forward")
     merge_outputs(root, parent, state, render=False)
+    if status == RESUMABLE_CHILD_STATUS:
+        rc, status = drain_resumable_child(
+            root, parent, state, "forward", status
+        )
     if status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
         print_status(parent, state)
         return 3
@@ -965,6 +1231,10 @@ def main() -> int:
     rc = run_direction_new(root, parent, state, "backward")
     status = update_parent_from_child(parent, state, "backward")
     merge_outputs(root, parent, state, render=False)
+    if status == RESUMABLE_CHILD_STATUS:
+        rc, status = drain_resumable_child(
+            root, parent, state, "backward", status
+        )
     if status in {"NEEDS_CONFIRMATION", "WAITING_CROSS_SHOT_CONFIRMATION"}:
         print_status(parent, state)
         return 3
@@ -985,5 +1255,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         raise SystemExit(130)
     except Exception as exc:
+        record_fatal_parent_state(exc)
         print(f"Full-scene E2E fatal error: {type(exc).__name__}: {exc}", file=sys.stderr)
         raise SystemExit(2)

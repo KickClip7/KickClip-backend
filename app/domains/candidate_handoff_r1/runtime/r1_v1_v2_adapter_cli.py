@@ -118,6 +118,56 @@ PHASE4B_CONTINUATION_MAX_CENTER_DISTANCE_BY_HEIGHT = 1.50
 PHASE4B_CONTINUATION_MAX_HEIGHT_RATIO = 2.50
 PHASE4B_STABLE_EVIDENCE_CLEAN_FRAME_CAP = 24
 PHASE4B_STABLE_EVIDENCE_DURATION_CAP = 48
+
+
+def _register_sports_osnet_numpy_safe_globals(torch: Any, np: Any) -> dict[str, Any]:
+    """Product compatibility for the frozen Sports-OSNet checkpoint.
+
+    The caller verifies the checkpoint SHA-256 first.  This function only
+    allowlists the NumPy globals required for ``torch.load(weights_only=True)``
+    on PyTorch 2.6+/NumPy 2.x; unsafe pickle loading remains forbidden.
+    """
+    serialization = getattr(torch, "serialization", None)
+    add_safe_globals = getattr(serialization, "add_safe_globals", None)
+    if add_safe_globals is None:
+        raise RuntimeError(
+            "torch.serialization.add_safe_globals is required for Sports-OSNet"
+        )
+
+    numpy_core = getattr(np, "_core", None)
+    multiarray = getattr(numpy_core, "multiarray", None)
+    numpy_scalar = getattr(multiarray, "scalar", None)
+    if numpy_scalar is None:
+        legacy_core = getattr(np, "core", None)
+        legacy_multiarray = getattr(legacy_core, "multiarray", None)
+        numpy_scalar = getattr(legacy_multiarray, "scalar", None)
+    if numpy_scalar is None:
+        raise RuntimeError("NumPy multiarray.scalar is unavailable")
+
+    entries: list[Any] = [
+        (numpy_scalar, "numpy.core.multiarray.scalar"),
+        (numpy_scalar, "numpy._core.multiarray.scalar"),
+        (np.dtype, "numpy.dtype"),
+    ]
+    names = [
+        "numpy.core.multiarray.scalar",
+        "numpy._core.multiarray.scalar",
+        "numpy.dtype",
+    ]
+    numpy_dtypes = getattr(np, "dtypes", None)
+    for dtype_name in ("Float64DType", "Float32DType"):
+        dtype_class = getattr(numpy_dtypes, dtype_name, None) if numpy_dtypes is not None else None
+        if dtype_class is not None:
+            qualified_name = f"numpy.dtypes.{dtype_name}"
+            entries.append((dtype_class, qualified_name))
+            names.append(qualified_name)
+    add_safe_globals(entries)
+    return {
+        "status": "REGISTERED",
+        "policy_version": "SPORTS_OSNET_NUMPY2_WEIGHTS_ONLY_COMPAT_R2",
+        "registered_safe_globals": names,
+        "weights_only_false_allowed": False,
+    }
 PHASE4B_NON_PLAYER_ROLE_SHOT_STATUS = "SEARCH_EXHAUSTED_NON_PLAYER_ROLE"
 PHASE4B_PERSISTENT_ROLE_NEGATIVE_MEMORY_SCHEMA = "kickclip.phase4b_persistent_role_negative_memory.v1"
 PHASE4B_PERSISTENT_ROLE_NEGATIVE_MEMORY_POLICY = "USER_CONFIRMED_NON_PLAYER_PLUS_DETECTOR_ROLE_NEGATIVES_R1"
@@ -7134,7 +7184,10 @@ def _phase4b_load_runtime(
     if hasattr(reid, "configure_determinism"):
         reid.configure_determinism(torch)
     deep_root, models, reid_root = stage2b.discover_deep_eiou(root, reid, None)
+    safe_loader_compat = _register_sports_osnet_numpy_safe_globals(torch, np)
     model, model_contract = reid.build_model(torch, models, checkpoint, torch_device)
+    model_contract = dict(model_contract)
+    model_contract["product_numpy_safe_globals_compat"] = safe_loader_compat
     transform = stage2b.build_transform()
     reference_crops: dict[str, Any] = {}
     for index, row in enumerate(scoring_references, start=1):
