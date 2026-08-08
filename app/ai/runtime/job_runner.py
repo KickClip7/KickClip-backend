@@ -5,7 +5,7 @@ from app.ai.tasks.action_spotting.task import ActionSpottingPipelineTask
 from app.ai.tasks.dummy_analysis.task import DummyAnalysisTask
 from app.ai.tasks.full_match_analysis.task import FullMatchAnalysisTask
 from app.ai.tasks.player_tracking.task import PlayerTrackingTask
-from app.db.session import SessionLocal
+from app.db.session import BackgroundSessionLocal
 from app.domains.analysis.job_types import (
     BALL_TRACKING,
     FULL_MATCH_ANALYSIS,
@@ -32,7 +32,7 @@ class JobRunner:
         self.model_registry = model_registry or ModelRegistry()
 
     def run(self, analysis_job_id: str) -> None:
-        db = SessionLocal()
+        db = BackgroundSessionLocal()
 
         try:
             repository = AnalysisJobRepository(db)

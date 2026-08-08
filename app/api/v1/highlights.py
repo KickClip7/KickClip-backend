@@ -12,7 +12,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.ai.runtime.job_runner import run_analysis_job_background
-from app.db.session import SessionLocal, get_db
+from app.db.session import BackgroundSessionLocal, get_db
 from app.domains.auth.access import (
     require_artifact_access,
     require_media_access,
@@ -1113,7 +1113,7 @@ def _run_action_spotting_and_reconcile(
     revision_id: str,
 ) -> None:
     run_analysis_job_background(analysis_job_id)
-    db = SessionLocal()
+    db = BackgroundSessionLocal()
     try:
         service = HighlightWorkflowService(db)
         revision = service.repository.get_revision(revision_id)
@@ -1129,7 +1129,7 @@ def _run_action_spotting_and_reconcile(
 
 
 def _run_candidate_discovery(revision_id: str) -> None:
-    db = SessionLocal()
+    db = BackgroundSessionLocal()
     try:
         HighlightWorkflowService(db).run_candidate_discovery(revision_id)
     finally:
@@ -1137,7 +1137,7 @@ def _run_candidate_discovery(revision_id: str) -> None:
 
 
 def _extract_and_queue_tracking(binding_id: str, user_id: str) -> None:
-    db = SessionLocal()
+    db = BackgroundSessionLocal()
     try:
         user = UserRepository(db).get_by_id(user_id)
         if user is None:
@@ -1155,7 +1155,7 @@ def _extract_and_queue_tracking(binding_id: str, user_id: str) -> None:
 
 
 def _run_render_and_reconcile(render_job_id: str, revision_id: str) -> None:
-    db = SessionLocal()
+    db = BackgroundSessionLocal()
     try:
         RenderJobService(db).run_render_job(render_job_id)
         revision = HighlightWorkflowService(db).repository.get_revision(revision_id)

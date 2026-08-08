@@ -13,7 +13,11 @@ from sqlalchemy import Connection, text
 
 from app.core.config import Settings, get_settings
 from app.ai.runtime.gpu_coordinator import claim_gpu_slot
-from app.db.session import SessionLocal, engine
+from app.db.session import (
+    BackgroundSessionLocal,
+    advisory_lock_engine,
+    engine,
+)
 from app.domains.tracking.artifacts import TrackingArtifactService
 from app.domains.tracking.errors import TrackingProcessTimeoutError
 from app.domains.tracking.execution import LEGACY_EXECUTION_KIND
@@ -112,41 +116,45 @@ class TrackingJobExecutor:
                 self._active_job_ids.discard(tracking_job_id)
 
     def _execute(self, tracking_job_id: str) -> None:
-        db = SessionLocal()
+        """Run one tracking subprocess without pinning a pooled DB connection.
+
+        The old implementation kept one Session open from job claim through the
+        entire external tracking runtime and also held a second QueuePool
+        connection for the PostgreSQL advisory lock.  A long 45s scene can make
+        that last for minutes, starving normal API/polling requests.
+
+        This implementation uses short background-DB phases before/after the
+        subprocess, updates process_pid with its own short session, and keeps the
+        advisory lock on a dedicated NullPool connection.
+        """
+
         advisory: tuple[Connection, int] | None = None
         pid: int | None = None
+        result = None
+        command: list[str] | None = None
+        test_name: str | None = None
+
         try:
-            repository = TrackingJobRepository(db)
-            if not repository.claim_queued(
-                tracking_job_id, execution_kind=self.execution_kind
-            ):
-                db.rollback()
-                return
-            db.commit()
-
-            job = repository.get_by_id(tracking_job_id)
-            if job is None:
-                return
-            assert job is not None
-            claimed_job = job
-            now = datetime.now(timezone.utc)
-            job.started_at = job.started_at or now
-            job.runtime_started_at = now
-            job.runtime_finished_at = None
-            job.error_type = None
-            job.error_message = None
-            db.commit()
-
-            with claim_gpu_slot():
-                advisory = self._acquire_gpu_slot()
-                if advisory is None and self._stopping.is_set():
-                    mark_process_failed(
-                        job,
-                        error_type="TRACKING_EXECUTOR_SHUTDOWN",
-                        public_message="Tracking runtime stopped during backend shutdown.",
-                    )
-                    db.commit()
+            # Phase A: claim + snapshot everything needed to launch.
+            with BackgroundSessionLocal() as db:
+                repository = TrackingJobRepository(db)
+                if not repository.claim_queued(
+                    tracking_job_id, execution_kind=self.execution_kind
+                ):
+                    db.rollback()
                     return
+                db.commit()
+
+                job = repository.get_by_id(tracking_job_id)
+                if job is None:
+                    return
+
+                now = datetime.now(timezone.utc)
+                job.started_at = job.started_at or now
+                job.runtime_started_at = now
+                job.runtime_finished_at = None
+                job.error_type = None
+                job.error_message = None
 
                 storage = LocalStorage()
                 video_path = storage.resolve_path(job.media_asset.file_path)
@@ -154,100 +162,161 @@ class TrackingJobExecutor:
                     mark_process_failed(
                         job,
                         error_type="VIDEO_FILE_MISSING",
-                        public_message="Tracking source video is no longer available.",
+                        public_message=(
+                            "Tracking source video is no longer available."
+                        ),
                     )
                     db.commit()
                     return
 
                 runner = TrackingProcessRunner(self.settings)
                 command = runner.command_for_job(job, video_path=video_path)
+                test_name = job.test_name
+                db.commit()
+
+            # No ORM Session/transaction is alive while waiting for the GPU or
+            # while the external tracking process is running.
+            assert command is not None
+            assert test_name is not None
+
+            with claim_gpu_slot():
+                advisory = self._acquire_gpu_slot()
+                if advisory is None and self._stopping.is_set():
+                    with BackgroundSessionLocal() as db:
+                        job = TrackingJobRepository(db).get_by_id(
+                            tracking_job_id
+                        )
+                        if job is not None:
+                            mark_process_failed(
+                                job,
+                                error_type="TRACKING_EXECUTOR_SHUTDOWN",
+                                public_message=(
+                                    "Tracking runtime stopped during backend "
+                                    "shutdown."
+                                ),
+                            )
+                            db.commit()
+                    return
+
+                runner = TrackingProcessRunner(self.settings)
 
                 def on_start(process_pid: int) -> None:
                     nonlocal pid
                     pid = process_pid
-                    claimed_job.process_pid = process_pid
-                    db.commit()
+                    with BackgroundSessionLocal() as pid_db:
+                        pid_job = TrackingJobRepository(pid_db).get_by_id(
+                            tracking_job_id
+                        )
+                        if pid_job is not None:
+                            pid_job.process_pid = process_pid
+                            pid_db.commit()
 
                 result = runner.run(
                     command,
-                    test_name=job.test_name,
+                    test_name=test_name,
                     on_start=on_start,
                 )
-            artifacts = TrackingArtifactService(self.settings)
-            self._stage_input_artifacts(job, artifacts)
-            state = read_pipeline_state(Path(job.pipeline_state_path))
-            mapping = map_pipeline_state(
-                state,
-                process_return_code=result.return_code,
-                process_ended=True,
-            )
-            apply_pipeline_result(
-                job,
-                state=state,
-                mapping=mapping,
-                process_return_code=result.return_code,
-                process_pid=result.process_pid,
-                artifacts=artifacts,
-            )
-            self._after_pipeline_sync(db, job, state, mapping, artifacts)
-            if mapping.backend_status == TrackingBackendStatus.FAILED:
-                state_error_type, state_error_message = pipeline_state_failure_details(state)
-                if state_error_message:
-                    job.error_type = mapping.error_type or "PIPELINE_FATAL_ERROR"
-                    job.error_message = (
-                        f"{state_error_type}: {state_error_message}"
-                        if state_error_type
-                        else state_error_message
+
+            # The advisory lock only protects the runtime itself; release it
+            # before artifact/DB synchronization so another queued GPU job does
+            # not wait on ordinary post-processing.
+            if advisory is not None:
+                self._release_gpu_slot(*advisory)
+                advisory = None
+
+            # Phase B: synchronize the finished runtime in a fresh short session.
+            with BackgroundSessionLocal() as db:
+                job = TrackingJobRepository(db).get_by_id(tracking_job_id)
+                if job is None:
+                    return
+
+                artifacts = TrackingArtifactService(self.settings)
+                self._stage_input_artifacts(job, artifacts)
+                state = read_pipeline_state(Path(job.pipeline_state_path))
+                mapping = map_pipeline_state(
+                    state,
+                    process_return_code=result.return_code,
+                    process_ended=True,
+                )
+                apply_pipeline_result(
+                    job,
+                    state=state,
+                    mapping=mapping,
+                    process_return_code=result.return_code,
+                    process_pid=result.process_pid,
+                    artifacts=artifacts,
+                )
+                self._after_pipeline_sync(db, job, state, mapping, artifacts)
+
+                if mapping.backend_status == TrackingBackendStatus.FAILED:
+                    state_error_type, state_error_message = (
+                        pipeline_state_failure_details(state)
                     )
-                else:
-                    error_type, public_message = classify_runtime_failure(
-                        result.stdout_log_path,
-                        result.stderr_log_path,
-                    )
-                    job.error_type = error_type
-                    job.error_message = public_message
-            metadata = dict(job.runtime_metadata or {})
-            metadata["stdout_log_path"] = str(result.stdout_log_path)
-            metadata["stderr_log_path"] = str(result.stderr_log_path)
-            job.runtime_metadata = metadata
-            db.commit()
+                    if state_error_message:
+                        job.error_type = (
+                            mapping.error_type or "PIPELINE_FATAL_ERROR"
+                        )
+                        job.error_message = (
+                            f"{state_error_type}: {state_error_message}"
+                            if state_error_type
+                            else state_error_message
+                        )
+                    else:
+                        error_type, public_message = classify_runtime_failure(
+                            result.stdout_log_path,
+                            result.stderr_log_path,
+                        )
+                        job.error_type = error_type
+                        job.error_message = public_message
+
+                metadata = dict(job.runtime_metadata or {})
+                metadata["stdout_log_path"] = str(result.stdout_log_path)
+                metadata["stderr_log_path"] = str(result.stderr_log_path)
+                job.runtime_metadata = metadata
+                db.commit()
 
         except TrackingProcessTimeoutError:
-            db.rollback()
-            job = TrackingJobRepository(db).get_by_id(tracking_job_id)
-            if job is not None:
-                self._reconcile_or_fail(
-                    job,
-                    db=db,
-                    process_return_code=None,
-                    process_pid=pid,
-                    fallback_type="TRACKING_PROCESS_TIMEOUT",
-                    fallback_message=(
-                        "Tracking runtime exceeded its configured timeout."
-                    ),
-                )
-                db.commit()
+            with BackgroundSessionLocal() as db:
+                db.rollback()
+                job = TrackingJobRepository(db).get_by_id(tracking_job_id)
+                if job is not None:
+                    self._reconcile_or_fail(
+                        job,
+                        db=db,
+                        process_return_code=None,
+                        process_pid=pid,
+                        fallback_type="TRACKING_PROCESS_TIMEOUT",
+                        fallback_message=(
+                            "Tracking runtime exceeded its configured timeout."
+                        ),
+                    )
+                    db.commit()
             logger.exception("Tracking job timed out: %s", tracking_job_id)
+
         except Exception:
-            db.rollback()
             logger.exception("Tracking job execution failed: %s", tracking_job_id)
-            job = TrackingJobRepository(db).get_by_id(tracking_job_id)
-            if job is not None:
-                self._reconcile_or_fail(
-                    job,
-                    db=db,
-                    process_return_code=None,
-                    process_pid=pid,
-                    fallback_type="TRACKING_RUNTIME_FAILED",
-                    fallback_message=(
-                        "Tracking runtime failed. See backend process logs for details."
-                    ),
-                )
-                db.commit()
+            with BackgroundSessionLocal() as db:
+                db.rollback()
+                job = TrackingJobRepository(db).get_by_id(tracking_job_id)
+                if job is not None:
+                    self._reconcile_or_fail(
+                        job,
+                        db=db,
+                        process_return_code=(
+                            result.return_code if result is not None else None
+                        ),
+                        process_pid=pid,
+                        fallback_type="TRACKING_RUNTIME_FAILED",
+                        fallback_message=(
+                            "Tracking runtime failed. See backend process logs "
+                            "for details."
+                        ),
+                    )
+                    db.commit()
+
         finally:
             if advisory is not None:
                 self._release_gpu_slot(*advisory)
-            db.close()
 
     def _installation_status(self):
         return get_tracking_verifier().check()
@@ -347,7 +416,7 @@ class TrackingJobExecutor:
         )
 
     def _reconcile_recoverable_jobs(self) -> list[str]:
-        db = SessionLocal()
+        db = BackgroundSessionLocal()
         to_submit: list[str] = []
         try:
             repository = TrackingJobRepository(db)
@@ -398,7 +467,7 @@ class TrackingJobExecutor:
             return None
         while not self._stopping.is_set():
             for slot in range(self.settings.TRACKING_MAX_CONCURRENT_JOBS):
-                connection = engine.connect()
+                connection = advisory_lock_engine.connect()
                 lock_key = GPU_ADVISORY_LOCK_BASE + slot
                 acquired = bool(
                     connection.scalar(
