@@ -623,10 +623,33 @@ def verify_phase1_manifest(root: Path, manifest_path: Path) -> dict[str, Any]:
         expected = str(record.get("sha256") or record.get("expected_sha256") or "")
         if expected and observed.lower() != expected.lower():
             errors.append(f"changed model {logical}: {path}")
+    contracts = manifest.get("contracts") or {}
+    for logical in ("policy", "schema"):
+        raw = contracts.get(f"{logical}_path")
+        expected = str(contracts.get(f"{logical}_sha256") or "")
+        if not raw:
+            errors.append(f"missing contract path {logical}")
+            continue
+        path = resolve(root, normalized_relative_path(str(raw)))
+        if not path.is_file():
+            errors.append(f"missing contract {logical}: {path}")
+            continue
+        observed = sha256_file(path)
+        if expected and observed.lower() != expected.lower():
+            errors.append(f"changed contract {logical}: {path}")
     if errors:
         raise RuntimeError("Frozen Phase-1 verification failed:\n" + "\n".join(errors))
     return manifest
 
+
+
+def _manifest_key_is_path_like(key: str) -> bool:
+    """Return True for every path-bearing key used by the frozen manifest."""
+    normalized = str(key or "").strip().lower()
+    return (
+        normalized in {"path", "relative_path", "project_root", "code_dir"}
+        or normalized.endswith("_path")
+    )
 
 
 def _portable_manifest_copy(value: Any, parent_key: str | None = None) -> Any:
@@ -640,7 +663,7 @@ def _portable_manifest_copy(value: Any, parent_key: str | None = None) -> Any:
         result: dict[str, Any] = {}
         for key, child in value.items():
             if (
-                key in {"path", "relative_path"}
+                _manifest_key_is_path_like(key)
                 and isinstance(child, str)
                 and child
             ):
@@ -657,7 +680,7 @@ def _portable_manifest_path_values(value: Any) -> list[str]:
     paths: list[str] = []
     if isinstance(value, dict):
         for key, child in value.items():
-            if key in {"path", "relative_path"} and isinstance(child, str):
+            if _manifest_key_is_path_like(key) and isinstance(child, str):
                 paths.append(child)
             else:
                 paths.extend(_portable_manifest_path_values(child))
@@ -4512,3 +4535,4 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         raise SystemExit(2)
+

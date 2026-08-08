@@ -237,23 +237,6 @@ def run_stage_if_missing(
     run(cmd, root, dry_run)
 
 
-
-def safe_reid_stage_command(
-    root: Path,
-    python: str,
-    script: Path,
-    *args: str,
-) -> list[str]:
-    """Launch a frozen ReID stage with product-only safe-global registration."""
-    compatibility_runner = (
-        root
-        / "target_centric_tracking_e2e_v1"
-        / "run_frozen_with_sports_osnet_safe_globals.py"
-    )
-    if not compatibility_runner.is_file():
-        raise FileNotFoundError(compatibility_runner)
-    return [python, str(compatibility_runner), str(script), *args]
-
 def main() -> int:
     a = parse_args()
     root = a.project_root.expanduser().resolve()
@@ -292,10 +275,7 @@ def main() -> int:
     stage2 = [python, str(script_path(root, manifest, "stage2")), "--test-name", test_name]
     run_stage_if_missing(test_dir / "stage2_association_summary.json", stage2, root, a.dry_run, a.overwrite, "--overwrite-stage2")
 
-    stage2b = safe_reid_stage_command(
-        root, python, script_path(root, manifest, "stage2b"),
-        "--test-name", test_name, "--device", a.device,
-    )
+    stage2b = [python, str(script_path(root, manifest, "stage2b")), "--test-name", test_name, "--device", a.device]
     run_stage_if_missing(test_dir / "stage2b_reentry_summary.json", stage2b, root, a.dry_run, a.overwrite, "--overwrite-stage2b")
     if a.dry_run:
         print("[PHASE1] dry-run stops before data-dependent review branching")
@@ -332,10 +312,7 @@ def main() -> int:
                    "--stage2b-visual-review", "PASS", "--reviewer", stage2c_reviewer, "--review-note", stage2c_note]
         run_stage_if_missing(test_dir / "stage2c_audit.json", stage2c, root, False, a.overwrite, "--overwrite-stage2c")
 
-        stage2d = safe_reid_stage_command(
-            root, python, script_path(root, manifest, "stage2d"),
-            "--test-name", test_name, "--device", a.device,
-        )
+        stage2d = [python, str(script_path(root, manifest, "stage2d")), "--test-name", test_name, "--device", a.device]
         run_stage_if_missing(test_dir / "stage2d_summary.json", stage2d, root, False, a.overwrite, "--overwrite-stage2d")
         d_summary = read_json(test_dir / "stage2d_summary.json")
         d_new = int((d_summary.get("counts") or {}).get("new_selected_episode_count", 0))
@@ -356,10 +333,7 @@ def main() -> int:
                 print("Review required: Stage 2-D. Re-run with --stage2d-visual-review PASS or FAIL.")
                 return 3
         elif d_summary.get("decision") == SAFE_D:
-            stage2d1 = safe_reid_stage_command(
-                root, python, script_path(root, manifest, "stage2d1"),
-                "--test-name", test_name, "--device", a.device,
-            )
+            stage2d1 = [python, str(script_path(root, manifest, "stage2d1")), "--test-name", test_name, "--device", a.device]
             run_stage_if_missing(test_dir / "stage2d1_summary.json", stage2d1, root, False, a.overwrite, "--overwrite-stage2d1")
             d1_summary = read_json(test_dir / "stage2d1_summary.json")
             if d1_summary.get("decision") == REVIEW_D1:
@@ -378,10 +352,7 @@ def main() -> int:
                                 preview=str(stage2d1_preview))
                     print("Review required: Stage 2-D1. Re-run with --stage2d1-visual-review PASS or FAIL.")
                     return 3
-                stage2d2 = safe_reid_stage_command(
-                    root, python, script_path(root, manifest, "stage2d2"),
-                    "--test-name", test_name,
-                )
+                stage2d2 = [python, str(script_path(root, manifest, "stage2d2")), "--test-name", test_name]
                 run_stage_if_missing(test_dir / "stage2d2_summary.json", stage2d2, root, False, a.overwrite, "--overwrite-stage2d2")
                 d2_summary = read_json(test_dir / "stage2d2_summary.json")
                 if d2_summary.get("decision") == REVIEW_D2:

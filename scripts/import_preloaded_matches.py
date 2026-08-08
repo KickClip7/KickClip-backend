@@ -35,30 +35,46 @@ from app.domains.media.preloaded import (
 
 
 DEFAULT_SPECS = {
-    "fc_bayern_vs_frankfurt_2018_19": PreloadedMatchSpec(
-        key="fc_bayern_vs_frankfurt_2018_19",
-        video_path=PROJECT_ROOT / "fc_bayern_vs_frankfurt_2018_19.mp4",
-        feature_path=PROJECT_ROOT / "fc_bayern_vs_frankfurt_2018_19.npy",
-        home_team="FC Bayern Munich",
-        away_team="Eintracht Frankfurt",
-        competition="Bundesliga",
-        season="2018/19",
+    "tottenham_vs_chelsea_2014_15": PreloadedMatchSpec(
+        key="tottenham_vs_chelsea_2014_15",
+        video_path=PROJECT_ROOT / "tottenham_vs_chelsea_2014_15.mp4",
+        feature_path=PROJECT_ROOT / "tottenham_vs_chelsea_2014_15_feature.npy",
+        home_team="Tottenham Hotspur",
+        away_team="Chelsea",
+        competition="Premier League",
+        season="2014/15",
     ),
     "kor_jpn": PreloadedMatchSpec(
         key="kor_jpn",
         video_path=PROJECT_ROOT / "kor_jpn.mp4",
-        feature_path=PROJECT_ROOT / "kor_jpn.npy",
+        feature_path=PROJECT_ROOT / "kor_jpn_feature.npy",
         home_team="대한민국",
         away_team="일본",
     ),
     "real_madrid_vs_girona_2017_2018": PreloadedMatchSpec(
         key="real_madrid_vs_girona_2017_2018",
         video_path=PROJECT_ROOT / "real_madrid_vs_girona_2017_2018.mp4",
-        feature_path=PROJECT_ROOT / "real_madrid_vs_girona_2017_2018.npy",
+        feature_path=PROJECT_ROOT / "real_madrid_vs_girona_2017_2018_feature.npy",
         home_team="Real Madrid",
         away_team="Girona",
         competition="La Liga",
         season="2017/18",
+    ),
+    "mci_vs_mun": PreloadedMatchSpec(
+        key="mci_vs_mun",
+        video_path=PROJECT_ROOT / "MCIvsMUN.mp4",
+        feature_path=PROJECT_ROOT / "맨시티맨유feature.npy",
+        home_team="Manchester City",
+        away_team="Manchester United",
+        competition="Premier League",
+    ),
+    "real_madrid_vs_barcelona": PreloadedMatchSpec(
+        key="real_madrid_vs_barcelona",
+        video_path=PROJECT_ROOT / "MADRIDvsBARCELONA.mp4",
+        feature_path=PROJECT_ROOT / "레알바르샤feature.npy",
+        home_team="Real Madrid",
+        away_team="Barcelona",
+        competition="La Liga",
     ),
 }
 
