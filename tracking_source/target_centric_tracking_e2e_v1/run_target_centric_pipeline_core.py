@@ -2771,6 +2771,183 @@ def extract_clip_cv2(
         raise RuntimeError(f"Clip frame mismatch: {count}/{expected}")
 
 
+def _state_runtime_phase1_manifest(
+    state: Mapping[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    """Resolve the already-verified portable Phase-1 manifest for this job.
+
+    Continuation segments must use the same cross-platform manifest derivative
+    as the initial target-memory path. Falling back to the source manifest is
+    allowed only for older persisted states that predate the portable-manifest
+    field.
+    """
+
+    contract = state.get("phase1_manifest")
+    if not isinstance(contract, Mapping):
+        raise RuntimeError("Phase-1 manifest contract is missing from pipeline state")
+    raw = str(
+        contract.get("runtime_portable_path")
+        or contract.get("path")
+        or ""
+    ).strip()
+    if not raw:
+        raise RuntimeError("Phase-1 manifest path is missing from pipeline state")
+    path = Path(raw).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path, read_json(path)
+
+
+def _run_segment_stage1_stage2_if_missing(
+    *,
+    root: Path,
+    output_dir: Path,
+    state: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    clip_path: Path,
+    phase1_test_name: str,
+    phase1_dir: Path,
+    device: str,
+) -> tuple[dict[str, Any], dict[str, Any], Path]:
+    """Run only frozen Stage-1/2 for a continuation segment when needed.
+
+    This product wrapper deliberately checks Stage-2 before entering the
+    re-entry chain. Frozen Stage-2B itself rejects clips with no LOST frame as
+    "unnecessary"; short confirmed tail segments commonly have exactly that
+    shape. In that case Stage-2 is already the complete same-shot result and
+    running Stage-2B would manufacture a product runtime failure.
+    """
+
+    desired_conf = float(state.get("tracking_play_conf_threshold", 0.15))
+    if not 0.0 < desired_conf <= 1.0:
+        raise ValueError("tracking_play_conf_threshold must be in (0, 1]")
+
+    stage1_summary_path = phase1_dir / "stage1_detection_summary.json"
+    stage2_summary_path = phase1_dir / "stage2_association_summary.json"
+    stage2_timeline_path = phase1_dir / "target_timeline.json"
+
+    if not stage1_summary_path.is_file():
+        stage1_wrapper = (
+            root
+            / "target_centric_tracking_e2e_v1"
+            / "run_stage1_with_conf_override.py"
+        )
+        if not stage1_wrapper.is_file():
+            raise FileNotFoundError(stage1_wrapper)
+        run_command(
+            [
+                sys.executable,
+                str(stage1_wrapper),
+                "--frozen-stage1",
+                str(manifest_script(root, manifest, "stage1")),
+                "--confidence-threshold",
+                str(desired_conf),
+                "--project-root",
+                str(root),
+                "--test-name",
+                phase1_test_name,
+                "--device",
+                device,
+            ],
+            root,
+            output_dir / "logs" / "pipeline.log",
+        )
+
+    stage1 = read_json(stage1_summary_path)
+    observed_conf = float(
+        (stage1.get("detector") or {}).get("confidence_threshold", -1.0)
+    )
+    if abs(observed_conf - desired_conf) > 1e-9:
+        raise RuntimeError(
+            "Continuation Stage-1 cache uses a different RF-DETR threshold: "
+            f"observed={observed_conf} desired={desired_conf}"
+        )
+    if stage1.get("status") != "PASS":
+        raise RuntimeError(
+            f"Continuation frozen Stage-1 did not PASS: {stage1.get('status')}"
+        )
+
+    if not stage2_summary_path.is_file():
+        run_command(
+            [
+                sys.executable,
+                str(manifest_script(root, manifest, "stage2")),
+                "--project-root",
+                str(root),
+                "--test-name",
+                phase1_test_name,
+            ],
+            root,
+            output_dir / "logs" / "pipeline.log",
+        )
+
+    stage2 = read_json(stage2_summary_path)
+    if stage2.get("status") != "PASS":
+        raise RuntimeError(
+            f"Continuation frozen Stage-2 did not PASS: {stage2.get('status')}"
+        )
+    if not stage2_timeline_path.is_file():
+        raise RuntimeError(
+            "Continuation frozen Stage-2 completed without target_timeline.json"
+        )
+    return stage1, stage2, stage2_timeline_path
+
+
+def _stage2_requires_reentry(stage2_timeline_path: Path) -> bool:
+    """Return True only when frozen Stage-2 actually entered LOST."""
+
+    payload = read_json(stage2_timeline_path)
+    frames = payload.get("frames")
+    if not isinstance(frames, list):
+        raise RuntimeError(
+            f"Invalid continuation Stage-2 timeline: {stage2_timeline_path}"
+        )
+    return any(
+        isinstance(row, Mapping)
+        and str(row.get("state") or "").upper() == "LOST"
+        for row in frames
+    )
+
+
+def _materialize_stage2_as_final_segment_timeline(
+    *,
+    phase1_dir: Path,
+    stage2_timeline_path: Path,
+    clip_meta: Mapping[str, Any],
+) -> Path:
+    """Finalize a continuation that never became LOST.
+
+    No identity inference is added here. The output is a byte-for-byte copy of
+    the frozen Stage-2 target timeline plus a separate product provenance file.
+    This avoids calling frozen Stage-2B, whose own contract says it is
+    unnecessary when Stage-2 has no LOST frame.
+    """
+
+    final_timeline = phase1_dir / "final_target_timeline.json"
+    shutil.copy2(stage2_timeline_path, final_timeline)
+    atomic_json(
+        phase1_dir / "segment_phase1_product_finalize.json",
+        {
+            "schema_version": "kickclip.segment_phase1_product_finalize.v1",
+            "created_at": now_iso(),
+            "status": "COMPLETE",
+            "decision": "FINALIZE_FROZEN_STAGE2_NO_REENTRY_REQUIRED",
+            "reason": "FROZEN_STAGE2_HAS_NO_LOST_FRAME",
+            "clip_frame_count": int(clip_meta["frame_count"]),
+            "clip_duration_seconds": float(clip_meta["duration_seconds"]),
+            "source_timeline": str(stage2_timeline_path.resolve()),
+            "source_timeline_sha256": sha256_file(stage2_timeline_path),
+            "final_timeline": str(final_timeline.resolve()),
+            "final_timeline_sha256": sha256_file(final_timeline),
+            "frozen_stage1_modified": False,
+            "frozen_stage2_modified": False,
+            "stage2b_executed": False,
+            "automatic_target_confirmation": False,
+        },
+    )
+    return final_timeline
+
+
 def run_segment_phase1(
     root: Path,
     output_dir: Path,
@@ -2778,12 +2955,17 @@ def run_segment_phase1(
     segment: dict[str, Any],
     device: str,
 ) -> dict[str, Any]:
-    """Run the real frozen Phase-1 stages for a confirmed continuation segment.
+    """Run frozen Phase-1 for a confirmed continuation segment.
 
-    Stage-0 is executed unchanged into a raw evidence directory. Only product-
-    irrelevant V7/V6-output warnings and the historical 10-30 second research
-    duration warning may be normalized in a derived audit. Model/hash/bbox/video
-    failures remain blocking.
+    Product compatibility rules are identical to the initial Stage-0 path:
+    - DURATION_OUTSIDE_RANGE is a historical research-window warning;
+    - CUDA_NOT_AVAILABLE is expected when product device is auto/cpu;
+    - SPORTS_OSNET_NOT_FOUND is a legacy discovery warning only when the exact
+      frozen manifest checkpoint exists and its SHA-256 verifies.
+
+    A continuation whose frozen Stage-2 timeline never enters LOST is finalized
+    directly from Stage-2. Frozen Stage-2B explicitly treats that case as
+    unnecessary, so invoking the re-entry chain would be an orchestration bug.
     """
 
     video = Path(state["video"]["path"]).resolve()
@@ -2805,11 +2987,20 @@ def run_segment_phase1(
     raw_dir = phase1_root / raw_stage0_name
     phase1_dir = phase1_root / phase1_test_name
 
+    runtime_manifest_path, runtime_manifest = _state_runtime_phase1_manifest(
+        state
+    )
+    allowed_stage0_warnings = stage0_product_allowed_warning_codes(
+        root,
+        runtime_manifest,
+        device,
+    )
+
     if not (raw_dir / "audit.json").is_file():
         run_command(
             [
                 sys.executable,
-                str(root / "target_centric_tracking_v1" / "stage0_audit_inputs.py"),
+                str(manifest_script(root, runtime_manifest, "stage0")),
                 "--project-root",
                 str(root),
                 "--video",
@@ -2826,6 +3017,8 @@ def run_segment_phase1(
         )
 
     # Rebuild the derived Stage-0 directory only before Stage-1 has started.
+    # This also repairs a continuation that previously stopped at the old,
+    # overly-strict Stage-0 compatibility gate.
     if not (phase1_dir / "stage1_detection_summary.json").is_file():
         _materialize_phase1_stage0_compatibility(
             root,
@@ -2833,12 +3026,43 @@ def run_segment_phase1(
             raw_dir=raw_dir,
             source_dir=phase1_dir,
             source_test_name=phase1_test_name,
-            allowed_nonlegacy_warning_codes=frozenset(
-                {"DURATION_OUTSIDE_RANGE"}
-            ),
+            allowed_nonlegacy_warning_codes=allowed_stage0_warnings,
         )
 
-    runner = root / "target_centric_tracking_e2e_v1" / "run_phase1_product_pipeline.py"
+    _, _, stage2_timeline = _run_segment_stage1_stage2_if_missing(
+        root=root,
+        output_dir=output_dir,
+        state=state,
+        manifest=runtime_manifest,
+        clip_path=clip_path,
+        phase1_test_name=phase1_test_name,
+        phase1_dir=phase1_dir,
+        device=device,
+    )
+
+    if not _stage2_requires_reentry(stage2_timeline):
+        timeline = _materialize_stage2_as_final_segment_timeline(
+            phase1_dir=phase1_dir,
+            stage2_timeline_path=stage2_timeline,
+            clip_meta=clip_meta,
+        )
+        return {
+            "status": "COMPLETE",
+            "decision": "FINALIZE_FROZEN_STAGE2_NO_REENTRY_REQUIRED",
+            "phase1_output_dir": str(phase1_dir),
+            "timeline": str(timeline),
+            "preview": str(phase1_dir / "stage2_target_tracking_preview.mp4"),
+            "centered_preview": "",
+            "stage2b_executed": False,
+        }
+
+    runner = (
+        root
+        / "target_centric_tracking_e2e_v1"
+        / "run_phase1_product_pipeline.py"
+    )
+    if not runner.is_file():
+        raise FileNotFoundError(runner)
     command = [
         sys.executable,
         str(runner),
@@ -2856,6 +3080,8 @@ def run_segment_phase1(
         device,
         "--tracking-play-conf-threshold",
         str(float(state.get("tracking_play_conf_threshold", 0.15))),
+        "--manifest",
+        str(runtime_manifest_path),
         "--reviewer",
         state.get("reviewer", "USER"),
         "--review-note",
@@ -2899,6 +3125,7 @@ def run_segment_phase1(
         "timeline": str(timeline),
         "preview": str(phase1_dir / "final_target_tracking_preview.mp4"),
         "centered_preview": str(phase1_dir / "final_target_centered_preview.mp4"),
+        "stage2b_executed": True,
     }
 
 def default_frame(frame_index: int, fps: float, shot_id: str) -> dict[str, Any]:
