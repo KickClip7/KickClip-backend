@@ -14,10 +14,17 @@ from app.domains.auth.security import InvalidTokenError, decode_access_token
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-    db: Session = Depends(get_db),
+def authenticate_current_user(
+    credentials: HTTPAuthorizationCredentials | None,
+    db: Session,
 ) -> User:
+    """Authenticate one bearer token using an already-scoped DB session.
+
+    Media endpoints use this helper with an explicit short-lived SessionLocal
+    context so the SQLAlchemy connection can be returned before FileResponse
+    starts streaming a potentially large image/video body.
+    """
+
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication required",
@@ -36,6 +43,13 @@ def get_current_user(
     if user is None or not user.is_active:
         raise unauthorized
     return user
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    return authenticate_current_user(credentials, db)
 
 
 def get_optional_current_user(

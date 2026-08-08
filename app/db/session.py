@@ -52,6 +52,7 @@ engine = create_engine(
 # must share the same engine so tests still see the same database.
 if _database_backend == "sqlite":
     background_engine = engine
+    media_engine = engine
     advisory_lock_engine = engine
 else:
     background_engine = create_engine(
@@ -59,6 +60,17 @@ else:
         **_queue_engine_kwargs(
             pool_size=settings.DB_BACKGROUND_POOL_SIZE,
             max_overflow=settings.DB_BACKGROUND_MAX_OVERFLOW,
+        ),
+    )
+
+    # Burst-prone authenticated media gets an isolated pool.  Even if an old
+    # frontend accidentally asks for dozens of candidate assets at once, those
+    # requests cannot starve the main request/API pool.
+    media_engine = create_engine(
+        settings.DATABASE_URL,
+        **_queue_engine_kwargs(
+            pool_size=settings.DB_MEDIA_POOL_SIZE,
+            max_overflow=settings.DB_MEDIA_MAX_OVERFLOW,
         ),
     )
 
@@ -82,6 +94,13 @@ SessionLocal = sessionmaker(
 
 BackgroundSessionLocal = sessionmaker(
     bind=background_engine,
+    autocommit=False,
+    autoflush=False,
+    expire_on_commit=False,
+)
+
+MediaSessionLocal = sessionmaker(
+    bind=media_engine,
     autocommit=False,
     autoflush=False,
     expire_on_commit=False,

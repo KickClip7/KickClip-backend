@@ -78,6 +78,28 @@ from .schema import (
 RANKING_ARTIFACT_TYPE = "EVENT_CANDIDATE_RANKING_V1_2_SHADOW_SHORTLIST_PATCH"
 BUNDLE_ARTIFACT_TYPE = "EVENT_CANDIDATE_REVIEW_BUNDLE_R1_MANIFEST"
 GROUPING_ARTIFACT_TYPE = "EVENT_CANDIDATE_GROUPING_R1"
+
+
+@dataclass(frozen=True)
+class CandidateMediaResolutionPlan:
+    """Immutable data needed to serve candidate media after DB release.
+
+    The request path intentionally separates the short database lookup phase
+    from file hashing / OpenCV / FFmpeg lazy materialization.  This prevents a
+    candidate media response from holding a request-pool connection while the
+    actual image or video asset is generated or streamed.
+    """
+
+    storage_root: Path
+    bundle_root: Path
+    bundle_manifest_sha256: str
+    manifest: dict[str, Any]
+    media_name: str
+    direct_path: Path | None = None
+    direct_sha256: str | None = None
+    direct_mime: str | None = None
+    source_video_sha256: str = ""
+    source_video_candidates: tuple[Path, ...] = ()
 SELECTION_ARTIFACT_TYPE = "EVENT_CANDIDATE_SELECTION_R1"
 PROVENANCE_ARTIFACT_TYPE = "CANDIDATE_SELECTION_INTEGRATION_PROVENANCE_R1"
 PUBLIC_ID_PATTERN = re.compile(r"(shot_\d{4}_track_\d{4})$")
@@ -1052,39 +1074,136 @@ class CandidateHandoffR1Service:
             production_recommendation_ui="BLOCKED",
         )
 
-    def _lazy_source_video_path(
+
+    def prepare_media_resolution(
         self,
         *,
         project: Project,
-        source_video_sha256: str,
-    ) -> Path:
-        if len(source_video_sha256) != 64:
-            raise ValueError("Candidate source video SHA-256 is invalid.")
-        rows = self.db.scalars(
-            select(MediaAsset).where(
-                MediaAsset.match_id == project.match_id,
-                MediaAsset.sha256 == source_video_sha256,
-            )
-        ).all()
-        rows.sort(
-            key=lambda row: (
-                row.asset_type != "HIGHLIGHT_SCENE_CLIP",
-                row.created_at,
-            )
+        shortlist_patch_id: str,
+        candidate_id: str,
+        media_name: str,
+    ) -> CandidateMediaResolutionPlan:
+        """Collect only DB-backed media provenance for later materialization."""
+
+        artifact = self._bundle_artifact(
+            project_id=project.project_id,
+            shortlist_patch_id=shortlist_patch_id,
+            candidate_id=candidate_id,
         )
-        for asset in rows:
-            try:
-                path = self.storage.resolve_path(asset.file_path)
-            except ValueError:
-                continue
-            if len(str(path)) >= 248 and not str(path).startswith("\\\\?\\"):
-                path = Path("\\\\?\\" + str(path))
-            if path.is_file() and sha256_file(path) == source_video_sha256:
-                return path
-        raise ValueError(
-            "The immutable source video required for lazy candidate media "
-            "is missing or changed."
+        manifest_path = self._artifact_path(artifact)
+        manifest = self._load_json(manifest_path)
+        root = manifest_path.parent.resolve()
+        manifest_sha256 = str((artifact.metadata_ or {}).get("sha256") or "")
+
+        record = (manifest.get("files") or {}).get(media_name)
+        if isinstance(record, Mapping):
+            path = (root / str(record.get("path") or "")).resolve()
+            if not path.is_relative_to(root):
+                raise ValueError("Candidate media path escapes review bundle.")
+            mime = "video/mp4" if path.suffix.lower() == ".mp4" else "image/jpeg"
+            return CandidateMediaResolutionPlan(
+                storage_root=self.storage.storage_root,
+                bundle_root=root,
+                bundle_manifest_sha256=manifest_sha256,
+                manifest=manifest,
+                media_name=media_name,
+                direct_path=path,
+                direct_sha256=str(record.get("sha256") or ""),
+                direct_mime=mime,
+            )
+
+        lazy_spec = (manifest.get("lazy_media") or {}).get(media_name)
+        if not isinstance(lazy_spec, Mapping):
+            raise ValueError("Candidate media is not allowlisted.")
+
+        source_video_sha256 = ""
+        source_video_candidates: list[Path] = []
+        if str(lazy_spec.get("kind") or "") in {
+            "FIRST_MIDDLE_LAST",
+            "TRACKLET_VIDEO",
+        }:
+            source_video_sha256 = str(manifest.get("source_video_sha256") or "")
+            if len(source_video_sha256) != 64:
+                raise ValueError("Candidate source video SHA-256 is invalid.")
+            rows = self.db.scalars(
+                select(MediaAsset).where(
+                    MediaAsset.match_id == project.match_id,
+                    MediaAsset.sha256 == source_video_sha256,
+                )
+            ).all()
+            rows.sort(
+                key=lambda row: (
+                    row.asset_type != "HIGHLIGHT_SCENE_CLIP",
+                    row.created_at,
+                )
+            )
+            for asset in rows:
+                try:
+                    path = self.storage.resolve_path(asset.file_path)
+                except ValueError:
+                    continue
+                if len(str(path)) >= 248 and not str(path).startswith("\\\\?\\"):
+                    path = Path("\\\\?\\" + str(path))
+                source_video_candidates.append(path)
+            if not source_video_candidates:
+                raise ValueError(
+                    "The immutable source video required for lazy candidate media "
+                    "is missing from the database."
+                )
+
+        return CandidateMediaResolutionPlan(
+            storage_root=self.storage.storage_root,
+            bundle_root=root,
+            bundle_manifest_sha256=manifest_sha256,
+            manifest=manifest,
+            media_name=media_name,
+            source_video_sha256=source_video_sha256,
+            source_video_candidates=tuple(source_video_candidates),
         )
+
+    @staticmethod
+    def materialize_media_resolution(
+        plan: CandidateMediaResolutionPlan,
+    ) -> tuple[Path, str]:
+        """Validate/generate media using no ORM session or pooled DB connection."""
+
+        if plan.direct_path is not None:
+            expected = str(plan.direct_sha256 or "")
+            path = plan.direct_path
+            if (
+                not path.is_relative_to(plan.bundle_root)
+                or not path.is_file()
+                or len(expected) != 64
+                or sha256_file(path) != expected
+            ):
+                raise ValueError("Candidate media integrity validation failed.")
+            return path, str(plan.direct_mime or "application/octet-stream")
+
+        source_video_path: Path | None = None
+        if plan.source_video_sha256:
+            for path in plan.source_video_candidates:
+                if path.is_file() and sha256_file(path) == plan.source_video_sha256:
+                    source_video_path = path
+                    break
+            if source_video_path is None:
+                raise ValueError(
+                    "The immutable source video required for lazy candidate media "
+                    "is missing or changed."
+                )
+
+        materializer = LazyCandidateMediaMaterializer(
+            storage_root=plan.storage_root
+        )
+        try:
+            return materializer.materialize(
+                bundle_root=plan.bundle_root,
+                bundle_manifest_sha256=plan.bundle_manifest_sha256,
+                manifest=plan.manifest,
+                media_name=plan.media_name,
+                source_video_path=source_video_path,
+            )
+        except LazyCandidateMediaError as exc:
+            raise ValueError(str(exc)) from exc
 
     def resolve_media(
         self,
@@ -1094,51 +1213,20 @@ class CandidateHandoffR1Service:
         candidate_id: str,
         media_name: str,
     ) -> tuple[Path, str]:
-        artifact = self._bundle_artifact(
-            project_id=project.project_id,
+        """Compatibility wrapper for non-streaming callers.
+
+        Request-serving media routes should call prepare_media_resolution()
+        inside a short SessionLocal context and materialize_media_resolution()
+        only after that context has closed.
+        """
+
+        plan = self.prepare_media_resolution(
+            project=project,
             shortlist_patch_id=shortlist_patch_id,
             candidate_id=candidate_id,
+            media_name=media_name,
         )
-        manifest_path = self._artifact_path(artifact)
-        manifest = self._load_json(manifest_path)
-        root = manifest_path.parent.resolve()
-
-        record = (manifest.get("files") or {}).get(media_name)
-        if isinstance(record, Mapping):
-            path = (root / str(record.get("path") or "")).resolve()
-            if (
-                not path.is_relative_to(root)
-                or not path.is_file()
-                or sha256_file(path) != record.get("sha256")
-            ):
-                raise ValueError("Candidate media integrity validation failed.")
-            mime = "video/mp4" if path.suffix.lower() == ".mp4" else "image/jpeg"
-            return path, mime
-
-        lazy_spec = (manifest.get("lazy_media") or {}).get(media_name)
-        if not isinstance(lazy_spec, Mapping):
-            raise ValueError("Candidate media is not allowlisted.")
-
-        source_video_path: Path | None = None
-        if str(lazy_spec.get("kind") or "") in {
-            "FIRST_MIDDLE_LAST",
-            "TRACKLET_VIDEO",
-        }:
-            source_video_path = self._lazy_source_video_path(
-                project=project,
-                source_video_sha256=str(manifest.get("source_video_sha256") or ""),
-            )
-        manifest_sha256 = str((artifact.metadata_ or {}).get("sha256") or "")
-        try:
-            return self.lazy_media.materialize(
-                bundle_root=root,
-                bundle_manifest_sha256=manifest_sha256,
-                manifest=manifest,
-                media_name=media_name,
-                source_video_path=source_video_path,
-            )
-        except LazyCandidateMediaError as exc:
-            raise ValueError(str(exc)) from exc
+        return self.materialize_media_resolution(plan)
 
     def create_selection(
         self,

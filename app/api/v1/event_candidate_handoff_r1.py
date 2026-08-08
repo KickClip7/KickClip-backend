@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
+from app.core.config import get_settings
+from app.db.session import MediaSessionLocal, get_db
 from app.domains.auth.access import (
     require_media_access,
     require_project_access,
     require_tracking_job_access,
 )
-from app.domains.auth.dependencies import get_current_user
+from app.domains.auth.dependencies import (
+    authenticate_current_user,
+    bearer_scheme,
+    get_current_user,
+)
 from app.domains.auth.model import User
 from app.domains.candidate_handoff_r1.errors import (
     CandidateHandoffR1Error,
@@ -55,6 +63,96 @@ from app.storage.local_storage import LocalStorage
 
 router = APIRouter()
 install_candidate_preparation_integration()
+
+# Media endpoints are intentionally isolated from the normal API DB pool and
+# bounded before any thread/DB work begins.  A burst of 50-100 browser media
+# requests therefore queues as lightweight coroutines instead of consuming
+# every SQLAlchemy connection or AnyIO worker thread.
+_MEDIA_REQUEST_LIMIT = get_settings().CANDIDATE_MEDIA_MAX_CONCURRENT_REQUESTS
+_media_request_gate = asyncio.Semaphore(_MEDIA_REQUEST_LIMIT)
+
+
+def _prepare_candidate_media_plan(
+    *,
+    credentials: HTTPAuthorizationCredentials | None,
+    project_id: str,
+    shortlist_patch_id: str,
+    candidate_id: str,
+    media_name: str,
+):
+    with MediaSessionLocal() as db:
+        current_user = authenticate_current_user(credentials, db)
+        project = require_project_access(db, project_id, current_user)
+        return CandidateHandoffR1Service(db).prepare_media_resolution(
+            project=project,
+            shortlist_patch_id=shortlist_patch_id,
+            candidate_id=candidate_id,
+            media_name=media_name,
+        )
+
+
+def _prepare_ambiguity_evidence_path(
+    *,
+    credentials: HTTPAuthorizationCredentials | None,
+    job_id: str,
+    ambiguity_id: str,
+    evidence_name: str,
+) -> tuple[str, str]:
+    with MediaSessionLocal() as db:
+        current_user = authenticate_current_user(credentials, db)
+        require_tracking_job_access(db, job_id, current_user)
+        ambiguity = db.scalar(
+            select(EventCandidateAmbiguityR1).where(
+                EventCandidateAmbiguityR1.tracking_job_id == job_id,
+                EventCandidateAmbiguityR1.ambiguity_id == ambiguity_id,
+            )
+        )
+        if ambiguity is None:
+            raise HTTPException(status_code=404, detail="Ambiguity not found.")
+        if evidence_name == "full-frame-context":
+            return str(ambiguity.full_frame_context_path or ""), "image/jpeg"
+        if evidence_name == "full-shot-clip":
+            return str(ambiguity.shot_clip_path or ""), "video/mp4"
+        raise HTTPException(status_code=404, detail="Evidence not found.")
+
+
+def _prepare_ambiguity_candidate_media_path(
+    *,
+    credentials: HTTPAuthorizationCredentials | None,
+    job_id: str,
+    ambiguity_id: str,
+    candidate_id: str,
+    media_name: str,
+) -> tuple[str, str]:
+    with MediaSessionLocal() as db:
+        current_user = authenticate_current_user(credentials, db)
+        require_tracking_job_access(db, job_id, current_user)
+        ambiguity = db.scalar(
+            select(EventCandidateAmbiguityR1).where(
+                EventCandidateAmbiguityR1.tracking_job_id == job_id,
+                EventCandidateAmbiguityR1.ambiguity_id == ambiguity_id,
+            )
+        )
+        if ambiguity is None:
+            raise HTTPException(status_code=404, detail="Ambiguity not found.")
+        candidate = next(
+            (
+                dict(row)
+                for row in ambiguity.candidates or []
+                if str(row.get("candidate_id") or "") == candidate_id
+            ),
+            None,
+        )
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Candidate not found.")
+        media_fields = {
+            "reference-gallery": ("reference_gallery_path", "image/jpeg"),
+            "full-frame-context": ("full_frame_context_path", "image/jpeg"),
+        }
+        field = media_fields.get(media_name)
+        if field is None:
+            raise HTTPException(status_code=404, detail="Candidate media not found.")
+        return str(candidate.get(field[0]) or ""), field[1]
 
 
 def _prepare_url(
@@ -393,25 +491,40 @@ def prepare_event_candidate_recommendations(
     "/candidates/{candidate_id}/media/{media_name}",
     summary="Download one allowlisted immutable candidate review asset",
 )
-def candidate_review_media(
+async def candidate_review_media(
     shortlist_patch_id: str,
     candidate_id: str,
     media_name: str,
     project_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> FileResponse:
-    project = require_project_access(db, project_id, current_user)
-    try:
-        path, mime = CandidateHandoffR1Service(db).resolve_media(
-            project=project,
-            shortlist_patch_id=shortlist_patch_id,
-            candidate_id=candidate_id,
-            media_name=media_name,
-        )
-    except (ValueError, CandidateHandoffR1Error) as exc:
-        _raise(exc)
-    return FileResponse(path, media_type=mime, filename=path.name)
+    """Bound and isolate candidate media so request storms cannot exhaust DB."""
+
+    async with _media_request_gate:
+        try:
+            plan = await run_in_threadpool(
+                _prepare_candidate_media_plan,
+                credentials=credentials,
+                project_id=project_id,
+                shortlist_patch_id=shortlist_patch_id,
+                candidate_id=candidate_id,
+                media_name=media_name,
+            )
+            # The DB session is already closed here.  Lazy OpenCV/FFmpeg/hash
+            # work is also bounded by the same gate.
+            path, mime = await run_in_threadpool(
+                CandidateHandoffR1Service.materialize_media_resolution,
+                plan,
+            )
+        except (ValueError, CandidateHandoffR1Error) as exc:
+            _raise(exc)
+
+    return FileResponse(
+        path,
+        media_type=mime,
+        filename=path.name,
+        headers={"Cache-Control": "private, max-age=3600, immutable"},
+    )
 
 
 @router.post(
@@ -531,34 +644,29 @@ def record_candidate_review_state(
     "/tracking/jobs/{job_id}/ambiguities/{ambiguity_id}/evidence/{evidence_name}",
     summary="Download authenticated immutable R1 ambiguity evidence",
 )
-def get_ambiguity_evidence(
+async def get_ambiguity_evidence(
     job_id: str,
     ambiguity_id: str,
     evidence_name: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> FileResponse:
-    require_tracking_job_access(db, job_id, current_user)
-    ambiguity = db.scalar(
-        select(EventCandidateAmbiguityR1).where(
-            EventCandidateAmbiguityR1.tracking_job_id == job_id,
-            EventCandidateAmbiguityR1.ambiguity_id == ambiguity_id,
+    async with _media_request_gate:
+        relative, mime = await run_in_threadpool(
+            _prepare_ambiguity_evidence_path,
+            credentials=credentials,
+            job_id=job_id,
+            ambiguity_id=ambiguity_id,
+            evidence_name=evidence_name,
         )
+        path = LocalStorage().resolve_path(relative)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Evidence artifact is missing.")
+    return FileResponse(
+        path,
+        media_type=mime,
+        filename=path.name,
+        headers={"Cache-Control": "private, max-age=3600, immutable"},
     )
-    if ambiguity is None:
-        raise HTTPException(status_code=404, detail="Ambiguity not found.")
-    if evidence_name == "full-frame-context":
-        relative = ambiguity.full_frame_context_path
-        mime = "image/jpeg"
-    elif evidence_name == "full-shot-clip":
-        relative = ambiguity.shot_clip_path
-        mime = "video/mp4"
-    else:
-        raise HTTPException(status_code=404, detail="Evidence not found.")
-    path = LocalStorage().resolve_path(relative)
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Evidence artifact is missing.")
-    return FileResponse(path, media_type=mime, filename=path.name)
 
 
 @router.get(
@@ -566,43 +674,30 @@ def get_ambiguity_evidence(
     "/candidates/{candidate_id}/media/{media_name}",
     summary="Download authenticated immutable R1 candidate review media",
 )
-def get_ambiguity_candidate_media(
+async def get_ambiguity_candidate_media(
     job_id: str,
     ambiguity_id: str,
     candidate_id: str,
     media_name: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> FileResponse:
-    require_tracking_job_access(db, job_id, current_user)
-    ambiguity = db.scalar(
-        select(EventCandidateAmbiguityR1).where(
-            EventCandidateAmbiguityR1.tracking_job_id == job_id,
-            EventCandidateAmbiguityR1.ambiguity_id == ambiguity_id,
+    async with _media_request_gate:
+        relative, mime = await run_in_threadpool(
+            _prepare_ambiguity_candidate_media_path,
+            credentials=credentials,
+            job_id=job_id,
+            ambiguity_id=ambiguity_id,
+            candidate_id=candidate_id,
+            media_name=media_name,
         )
+        path = LocalStorage().resolve_path(relative)
+        if not path.is_file():
+            raise HTTPException(
+                status_code=404, detail="Candidate media artifact is missing."
+            )
+    return FileResponse(
+        path,
+        media_type=mime,
+        filename=path.name,
+        headers={"Cache-Control": "private, max-age=3600, immutable"},
     )
-    if ambiguity is None:
-        raise HTTPException(status_code=404, detail="Ambiguity not found.")
-    candidate = next(
-        (
-            dict(row)
-            for row in ambiguity.candidates or []
-            if str(row.get("candidate_id") or "") == candidate_id
-        ),
-        None,
-    )
-    if candidate is None:
-        raise HTTPException(status_code=404, detail="Candidate not found.")
-    media_fields = {
-        "reference-gallery": ("reference_gallery_path", "image/jpeg"),
-        "full-frame-context": ("full_frame_context_path", "image/jpeg"),
-    }
-    field = media_fields.get(media_name)
-    if field is None:
-        raise HTTPException(status_code=404, detail="Candidate media not found.")
-    path = LocalStorage().resolve_path(str(candidate.get(field[0]) or ""))
-    if not path.is_file():
-        raise HTTPException(
-            status_code=404, detail="Candidate media artifact is missing."
-        )
-    return FileResponse(path, media_type=field[1], filename=path.name)

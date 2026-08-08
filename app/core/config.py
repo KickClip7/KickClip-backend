@@ -88,6 +88,15 @@ class Settings(BaseSettings):
     # subprocess work is in progress.
     DB_BACKGROUND_POOL_SIZE: int = Field(default=4, ge=1, le=20)
     DB_BACKGROUND_MAX_OVERFLOW: int = Field(default=2, ge=0, le=20)
+    # Candidate/evidence media requests use a dedicated pool.  These routes can
+    # be bursty (many cards/assets requested together), so they must never
+    # consume the general API pool used by auth/status/control requests.
+    DB_MEDIA_POOL_SIZE: int = Field(default=4, ge=1, le=20)
+    DB_MEDIA_MAX_OVERFLOW: int = Field(default=0, ge=0, le=20)
+    # Application-level gate for candidate/evidence media.  Keep this <= the
+    # dedicated media pool size so a request never waits for a DB connection
+    # while already occupying a media worker slot.
+    CANDIDATE_MEDIA_MAX_CONCURRENT_REQUESTS: int = Field(default=4, ge=1, le=16)
 
     # -------------------------------------------------------------------------
     # Champion Action Spotting provenance/runtime diagnostics
